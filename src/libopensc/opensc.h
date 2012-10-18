@@ -174,7 +174,7 @@ typedef struct sc_security_env {
 
 struct sc_algorithm_id {
 	unsigned int algorithm;
-	struct sc_object_id obj_id;
+	struct sc_object_id oid;
 	void *params;
 };
 
@@ -330,7 +330,7 @@ struct sc_pin_cmd_pin {
 	u8 pad_char;
 	size_t offset;		/* PIN offset in the APDU */
 	size_t length_offset;	/* Effective PIN length offset in the APDU */
-	
+
 	int max_tries;	/* Used for signaling back from SC_PIN_CMD_GET_INFO */
 	int tries_left;	/* Used for signaling back from SC_PIN_CMD_GET_INFO */
 
@@ -349,7 +349,7 @@ struct sc_pin_cmd_data {
 	struct sc_apdu *apdu;		/* APDU of the PIN command */
 };
 
-
+#if 0
 #define PACE_PIN_ID_MRZ 0x01
 #define PACE_PIN_ID_CAN 0x02
 #define PACE_PIN_ID_PIN 0x03
@@ -414,6 +414,7 @@ struct establish_pace_channel_output {
     /** PCD identifier */
     unsigned char *id_pcd;
 };
+#endif
 
 struct sc_reader_operations {
 	/* Called during sc_establish_context(), when the driver
@@ -442,11 +443,12 @@ struct sc_reader_operations {
 	int (*display_message)(struct sc_reader *, const char *);
 	int (*perform_verify)(struct sc_reader *, struct sc_pin_cmd_data *);
 	int (*perform_pace)(struct sc_reader *reader,
-            struct establish_pace_channel_input *,
-            struct establish_pace_channel_output *);
+			void *establish_pace_channel_input,
+			void *establish_pace_channel_output);
 
 	/* Wait for an event */
-	int (*wait_for_event)(struct sc_context *ctx, unsigned int event_mask, sc_reader_t **event_reader, unsigned int *event, 
+	int (*wait_for_event)(struct sc_context *ctx, unsigned int event_mask,
+			sc_reader_t **event_reader, unsigned int *event,
 			int timeout, void **reader_states);
 	/* Reset a reader */
 	int (*reset)(struct sc_reader *, int);
@@ -779,7 +781,7 @@ int sc_context_repair(sc_context_t **ctx);
  *               created sc_context_t object.
  * @param  parm  parameters for the sc_context_t creation (see
  *               sc_context_param_t for a description of the supported
- *               options). This parameter is optional and can be NULL.
+ *               options)..
  * @return SC_SUCCESS on success and an error code otherwise.
  */
 int sc_context_create(sc_context_t **ctx, const sc_context_param_t *parm);
@@ -1214,6 +1216,12 @@ const sc_path_t *sc_get_mf_path(void);
 int sc_hex_to_bin(const char *in, u8 *out, size_t *outlen);
 int sc_bin_to_hex(const u8 *, size_t, char *, size_t, int separator);
 scconf_block *sc_get_conf_block(sc_context_t *ctx, const char *name1, const char *name2, int priority);
+
+/**
+ * Initializes a given OID
+ * @param  oid  sc_object_id object to be initialized
+ */
+void sc_init_oid(struct sc_object_id *oid);
 /**
  * Converts a given OID in ascii form to a internal sc_object_id object
  * @param  oid  OUT sc_object_id object for the result
@@ -1228,6 +1236,11 @@ int sc_format_oid(struct sc_object_id *oid, const char *in);
  * @return 1 if the oids are equal and a non-zero value otherwise
  */
 int sc_compare_oid(const struct sc_object_id *oid1, const struct sc_object_id *oid2);
+/**
+ * Validates a given OID
+ * @param  oid  sc_object_id object to be validated
+ */
+int sc_valid_oid(const struct sc_object_id *oid);
 
 /* Base64 encoding/decoding functions */
 int sc_base64_encode(const u8 *in, size_t inlen, u8 *out, size_t outlen,
@@ -1293,10 +1306,6 @@ extern const char *sc_get_version(void);
 	}
 
 extern sc_card_driver_t *sc_get_iso7816_driver(void);
-
-int sc_perform_pace(sc_card_t *card,
-        struct establish_pace_channel_input *pace_input,
-        struct establish_pace_channel_output *pace_output);
 
 #ifdef __cplusplus
 }

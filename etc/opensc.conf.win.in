@@ -19,7 +19,7 @@ app default {
 	# Special values 'stdout' and 'stderr' are recognized.
 	# Default: stderr
 	#
-	# debug_file = @DEBUG_FILE@
+	# debug_file = %TEMP%\opensc-debug.log
 
 	# Re-open debug file  (used in WIN32)
 	#
@@ -32,9 +32,9 @@ app default {
 
 	# PKCS#15 initialization / personalization
 	# profiles directory for pkcs15-init.
-	# Default: @pkgdatadir@
+	# Default: obtained from windows registers
 	#
-	# profile_dir = @pkgdatadir@;
+	# profile_dir = "";
 
 	# Paranoid memory allocation.
 	#
@@ -90,8 +90,8 @@ app default {
 		# enable_pinpad = false;
 		#
 		# Use specific pcsc provider.
-		# Default: @DEFAULT_PCSC_PROVIDER@
-		# provider_library = @DEFAULT_PCSC_PROVIDER@
+		# Default: winscard.dll
+		# provider_library = winscard.dll
 	}
 
 	# Options for OpenCT support
@@ -329,12 +329,15 @@ app default {
         }
 
 	secure_messaging local_authentic  {
-		#path to ans name of external SM module
-		#module_name = @DEFAULT_SM_MODULE@;
-		#module_path = @libdir@;
+		# name of external SM module
+		# module_name = smm-local.dll;
+
+		# directory with external SM module
+		# Default: defined by windows register
+		# module_path = "";
 
 		# specific data to tune the module initialization
-		#module_data = "Here can be your SM module init data";
+		# module_data = "Here can be your SM module init data";
 
 		# SM mode:
 		# 'transmit' -- in this mode the procedure to securize an APDU is called by the OpenSC general
@@ -353,9 +356,9 @@ app default {
 	}
 
         secure_messaging local_gemalto_iam  {
-		module_name = @DEFAULT_SM_MODULE@;
-		module_path = @libdir@;
-                #module_data = "";
+		module_name = smm-local.dll;
+		# module_path = "";
+                # module_data = "";
                 type = acl;             # transmit, acl
 
                 ifd_serial = "11:22:33:44:55:66:77:88";
@@ -372,8 +375,9 @@ app default {
         }
 
 	secure_messaging local_amos  {
-		module_name = @DEFAULT_SM_MODULE@;
-		module_path = @libdir@;
+		module_name = smm-local.dll;
+		# module_path = "";
+                # module_data = "";
 		mode = acl;
 		ifd_serial = "11:22:33:44:55:66:77:88";
 		keyset_02_enc = "ENCROECHANTILLON";
@@ -381,8 +385,9 @@ app default {
 	}
 
         secure_messaging local_amos_eid  {
-		module_name = @DEFAULT_SM_MODULE@;
-		module_path = @libdir@;
+		module_name = smm-local.dll;
+		# module_path = "";
+                # module_data = "";
                 mode = acl;
                 ifd_serial = "11:22:33:44:55:66:77:88";
                 keyset_E828BD080FD2504543432D654944_03_enc = "RW_PUBL_ENC_TEST";
@@ -390,9 +395,9 @@ app default {
         }
 
         secure_messaging local_adele  {
-		module_name = @DEFAULT_SM_MODULE@;
-		module_path = @libdir@;
-                #module_data = "";
+		module_name = smm-local.dll;
+		# module_path = "";
+                # module_data = "";
                 type = acl;             # transmit, acl
 
 		ifd_serial = "11:22:33:44:55:66:77:88";
@@ -470,7 +475,7 @@ app default {
 		#
 		# emulate custom {
 			# The location of the driver library
-			# module = @libdir@/p15emu_custom.so;
+			# module = p15emu_custom.dll;
 		# }
 
 		# some additional application parameters:

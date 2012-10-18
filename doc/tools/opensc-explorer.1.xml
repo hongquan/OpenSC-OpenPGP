@@ -276,9 +276,12 @@
 
 			<varlistentry>
 				<term>
-					<command>ls</command>
+					<command>ls</command> [<replaceable>pattern</replaceable> ...]
 				</term>
-				<listitem><para>List all files in the current DF</para></listitem>
+				<listitem><para>List files in the current DF.
+				If no <replaceable>pattern</replaceable> is given, then all files are listed.
+				If one ore more <replaceable>pattern</replaceable>s are given, only files matching
+				at least one <replaceable>pattern</replaceable> are listed.</para></listitem>
 			</varlistentry>
 
 			<varlistentry>
@@ -437,8 +440,11 @@
 				colon-separated list of hex values or a <literal>"</literal> enclosed string.
 				</para>
                                 <para>
-                                If <replaceable>key</replaceable> is omitted, the PIN will be verified
-				using the card reader's pin pad.
+                                If <replaceable>key</replaceable> is omitted, the exact action depends on the
+				card reader's features: if the card readers supports PIN input via a pin pad,
+				then the PIN will be verified using the card reader's pin pad.
+				If the card reader does not support PIN input, then the PIN will be asked
+				interactively.
                                 </para>
 				<para>
 				Examples:
@@ -465,22 +471,6 @@
 						</para></listitem>
 					</varlistentry>
 				</variablelist>
-				</para>
-				</listitem>
-			</varlistentry>
-
-			<varlistentry>
-				<term>
-					<command>pace</command> <replaceable>secret-type</replaceable> [<replaceable>secret</replaceable>]
-				</term>
-				<listitem><para>Perform PACE with the card. <replaceable>secret-type</replaceable>
-				can be one of pin, can, puk or mrz. <replaceable>secret</replaceable> is the secret to be verified as string.
-				</para>
-                                <para>
-                                If <replaceable>secret</replaceable> is omitted, the secret will be verified with the PIN-Pad.
-                                </para>
-				<para>
-					Example: pace can 123456
 				</para>
 				</listitem>
 			</varlistentry>

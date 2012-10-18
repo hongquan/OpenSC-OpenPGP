@@ -101,6 +101,9 @@ sc_format_apdu
 sc_bytes2apdu
 sc_format_asn1_entry
 sc_format_oid
+sc_init_oid
+sc_compare_oid
+sc_valid_oid
 sc_format_path
 sc_free_apps
 sc_free_ef_atr
@@ -302,7 +305,6 @@ sc_remote_data_init
 sc_crc32
 sc_pkcs15_convert_prkey
 sc_pkcs15_convert_pubkey
-sc_perform_pace
 iasecc_sdo_encode_update_field
 iasecc_sm_create_file
 iasecc_sm_delete_file

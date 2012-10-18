@@ -118,7 +118,7 @@ static const struct sc_asn1_entry c_asn1_gostr3410_type_attr[C_ASN1_GOST3410_TYP
 static const struct sc_asn1_entry c_asn1_pubkey_choice[C_ASN1_PUBKEY_CHOICE_SIZE] = {
 	{ "publicRSAKey", SC_ASN1_PKCS15_OBJECT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, 0, NULL, NULL },
 	{ "publicDSAKey", SC_ASN1_PKCS15_OBJECT, 2 | SC_ASN1_CTX | SC_ASN1_CONS, 0, NULL, NULL },
-	{ "publicGOSTR3410Key", SC_ASN1_PKCS15_OBJECT, 3 | SC_ASN1_CTX | SC_ASN1_CONS, 0, NULL, NULL },
+	{ "publicGOSTR3410Key", SC_ASN1_PKCS15_OBJECT, 4 | SC_ASN1_CTX | SC_ASN1_CONS, 0, NULL, NULL },
 /*TODO: -DEE not clear EC is needed here  as look like it is for pukdf */
 	{ NULL, 0, 0, 0, NULL, NULL }
 };
@@ -804,6 +804,8 @@ sc_pkcs15_erase_pubkey(struct sc_pkcs15_pubkey *key)
 void
 sc_pkcs15_free_pubkey(struct sc_pkcs15_pubkey *key)
 {
+	if (!key)
+		return;
 	sc_pkcs15_erase_pubkey(key);
 	free(key);
 }
@@ -1007,12 +1009,19 @@ static struct ec_curve_info {
 	const char *oid_encoded;
 	size_t size;
 } ec_curve_infos[] = {
+	{"secp192r1",		"1.2.840.10045.3.1.1", "06082A8648CE3D030101", 192},
+	{"prime192r1",		"1.2.840.10045.3.1.1", "06082A8648CE3D030101", 192},
+	{"ansiX9p192r1",	"1.2.840.10045.3.1.1", "06082A8648CE3D030101", 192},
 	{"prime256v1",		"1.2.840.10045.3.1.7", "06082A8648CE3D030107", 256},
 	{"secp256r1",		"1.2.840.10045.3.1.7", "06082A8648CE3D030107", 256},
 	{"ansiX9p256r1",	"1.2.840.10045.3.1.7", "06082A8648CE3D030107", 256},
 	{"secp384r1",		"1.3.132.0.34", "06052B81040022", 384},
 	{"prime384v1",		"1.3.132.0.34", "06052B81040022", 384},
 	{"ansiX9p384r1",	"1.3.132.0.34", "06052B81040022", 384},
+	{"brainpoolP192r1",	"1.3.36.3.3.2.8.1.1.3", "06092B2403030208010103", 192},
+	{"brainpoolP224r1",	"1.3.36.3.3.2.8.1.1.5", "06092B2403030208010105", 224},
+	{"brainpoolP256r1",	"1.3.36.3.3.2.8.1.1.7", "06092B2403030208010107", 256},
+	{"brainpoolP320r1",	"1.3.36.3.3.2.8.1.1.9", "06092B2403030208010109", 320},
 	{NULL, NULL, NULL, 0},
 };
 
@@ -1055,7 +1064,7 @@ sc_pkcs15_fix_ec_parameters(struct sc_context *ctx, struct sc_pkcs15_ec_paramete
 			sc_log(ctx, "Curve name: '%s'", ecparams->named_curve);
 		}
 
-		if (ecparams->id.value[0] <=0 || ecparams->id.value[1] <=0)
+		if (!sc_valid_oid(&ecparams->id))
 			sc_format_oid(&ecparams->id, ec_curve_infos[ii].oid_str);
 
 		ecparams->field_length = ec_curve_infos[ii].size;
@@ -1081,7 +1090,7 @@ sc_pkcs15_fix_ec_parameters(struct sc_context *ctx, struct sc_pkcs15_ec_paramete
 			LOG_TEST_RET(ctx, rv, "Cannot encode object ID");
 		}
 	}
-	else if (ecparams->id.value[0] > 0 && ecparams->id.value[1] > 0)  {
+	else if (sc_valid_oid(&ecparams->id))  {
 		LOG_TEST_RET(ctx, SC_ERROR_NOT_IMPLEMENTED, "EC parameters has to be presented as a named curve or explicit data");
 	}
 

@@ -231,6 +231,8 @@ int sc_pkcs15_parse_tokeninfo(sc_context_t *ctx,
 		if (ti->preferred_language == NULL)
 			return SC_ERROR_OUT_OF_MEMORY;
 	}
+
+	sc_init_oid(&ti->profile_indication.oid);
 	if (asn1_toki_attrs[13].flags & SC_ASN1_PRESENT) {
 		if (asn1_profile_indication[0].flags & SC_ASN1_PRESENT)   {
 			sc_log(ctx, "ProfileIndication.oid present");
@@ -354,13 +356,13 @@ sc_pkcs15_encode_tokeninfo(sc_context_t *ctx, sc_pkcs15_tokeninfo_t *ti,
 	}
 	sc_format_asn1_entry(asn1_toki_attrs + 12, NULL, NULL, 0);
 
-	if (ti->profile_indication.oid.value[0] > 0)   {
-        	sc_format_asn1_entry(asn1_profile_indication + 0, &ti->profile_indication.oid, NULL, 1);
+	if (sc_valid_oid(&ti->profile_indication.oid))   {
+		sc_format_asn1_entry(asn1_profile_indication + 0, &ti->profile_indication.oid, NULL, 1);
 		sc_format_asn1_entry(asn1_toki_attrs + 13, asn1_profile_indication, NULL, 1);
 	}
 	else if (ti->profile_indication.name)   {
 		pi_len = strlen(ti->profile_indication.name);
-        	sc_format_asn1_entry(asn1_profile_indication + 1, ti->profile_indication.name, &pi_len, 1);
+		sc_format_asn1_entry(asn1_profile_indication + 1, ti->profile_indication.name, &pi_len, 1);
 		sc_format_asn1_entry(asn1_toki_attrs + 13, asn1_profile_indication, NULL, 1);
 	}
 	else    {
@@ -713,7 +715,7 @@ struct sc_pkcs15_card * sc_pkcs15_card_new(void)
 		return NULL;
 	}
 
-	p15card->tokeninfo->profile_indication.oid.value[0] = -1;
+	sc_init_oid(&p15card->tokeninfo->profile_indication.oid);
 
 	p15card->magic = SC_PKCS15_CARD_MAGIC;
 	return p15card;
@@ -1141,6 +1143,7 @@ int sc_pkcs15_bind(sc_card_t *card, struct sc_aid *aid, struct sc_pkcs15_card **
 	p15card->opts.use_file_cache = 0;
 	p15card->opts.use_pin_cache = 1;
 	p15card->opts.pin_cache_counter = 10;
+	p15card->opts.pin_cache_ignore_user_consent = 0;
 
 	conf_block = sc_get_conf_block(ctx, "framework", "pkcs15", 1);
 
@@ -1148,9 +1151,10 @@ int sc_pkcs15_bind(sc_card_t *card, struct sc_aid *aid, struct sc_pkcs15_card **
 		p15card->opts.use_file_cache = scconf_get_bool(conf_block, "use_file_caching", p15card->opts.use_file_cache);
 		p15card->opts.use_pin_cache = scconf_get_bool(conf_block, "use_pin_caching", p15card->opts.use_pin_cache);
 		p15card->opts.pin_cache_counter = scconf_get_int(conf_block, "pin_cache_counter", p15card->opts.pin_cache_counter);
+		p15card->opts.pin_cache_ignore_user_consent =  scconf_get_bool(conf_block, "pin_cache_ignore_user_consent", p15card->opts.pin_cache_ignore_user_consent);
 	}
-	sc_log(ctx, "PKCS#15 options: use_file_cache=%d use_pin_cache=%d pin_cache_counter=%d",
-	         p15card->opts.use_file_cache, p15card->opts.use_pin_cache, p15card->opts.pin_cache_counter);
+	sc_log(ctx, "PKCS#15 options: use_file_cache=%d use_pin_cache=%d pin_cache_counter=%d pin_cache_ignore_user_consent=%d",
+	         p15card->opts.use_file_cache, p15card->opts.use_pin_cache, p15card->opts.pin_cache_counter, p15card->opts.pin_cache_ignore_user_consent);
 
 	r = sc_lock(card);
 	if (r) {

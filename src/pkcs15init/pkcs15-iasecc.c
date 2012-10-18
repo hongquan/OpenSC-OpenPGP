@@ -540,7 +540,7 @@ iasecc_sdo_allocate_pubkey(struct sc_profile *profile, struct sc_card *card, str
 		*(sdo->docp.size.value + 1) = sz & 0xFF;
 
 		if (card->type == SC_CARD_TYPE_IASECC_OBERTHUR)   {
-			printf("TODO: Disabled for the tests of the Oberthur card\n");
+			/* TODO: Disabled for the tests of the Oberthur card */
 		}
 		else   {
 			sdo->data.pub_key.cha.value = calloc(1, 2);
@@ -1104,8 +1104,7 @@ iasecc_pkcs15_generate_key(struct sc_profile *profile, sc_pkcs15_card_t *p15card
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
-	printf("TODO: Check if native IAS middleware accepts the meaningfull path value.\n");
-
+	/* TODO: Check if native IAS middleware accepts the meaningfull path value. */
 	rv = sc_profile_get_parent(profile, "private-key", &file);
 	LOG_TEST_RET(ctx, rv, "IasEcc: cannot get private key parent file");
 
@@ -1312,14 +1311,19 @@ iasecc_pkcs15_delete_object (struct sc_profile *profile, struct sc_pkcs15_card *
 	int rv, key_ref;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "delete PKCS15 object '%s', path %s", object->label, sc_print_path(path));
 
 	switch(object->type & SC_PKCS15_TYPE_CLASS_MASK)   {
 	case SC_PKCS15_TYPE_PUBKEY:
+		sc_log(ctx, "Ignore delete of SDO-PubKey(ref:%X) '%s', path %s", key_ref, object->label, sc_print_path(path));
 		key_ref = ((struct sc_pkcs15_pubkey_info *)object->data)->key_reference;
-		sc_log(ctx, "Ignore delete of the SDO-PUBLIC-KEY(ref:%X)", key_ref);
 		LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 	case SC_PKCS15_TYPE_PRKEY:
+		sc_log(ctx, "delete PrivKey '%s', path %s", object->label, sc_print_path(path));
+		if (path->len || path->aid.len)   {
+			rv = sc_select_file(p15card->card, path, NULL);
+			LOG_TEST_RET(ctx, rv, "cannot select PrivKey path");
+		}
+
 		key_ref = ((struct sc_pkcs15_prkey_info *)object->data)->key_reference;
 
 		/* Delete both parts of the RSA key */
@@ -1336,8 +1340,10 @@ iasecc_pkcs15_delete_object (struct sc_profile *profile, struct sc_pkcs15_card *
 
 		LOG_FUNC_RETURN(ctx, rv);
 	case SC_PKCS15_TYPE_CERT:
+		sc_log(ctx, "delete Certificate '%s', path %s", object->label, sc_print_path(path));
 		break;
 	case SC_PKCS15_TYPE_DATA_OBJECT:
+		sc_log(ctx, "delete DataObject '%s', path %s", object->label, sc_print_path(path));
 		break;
 	default:
 		LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_SUPPORTED);
@@ -1377,7 +1383,7 @@ iasecc_md_gemalto_set_default(struct sc_pkcs15_card *p15card, struct sc_profile 
 
 	if (!data_obj)   {
 		memset(&data_args, 0, sizeof(data_args));
-		data_args.app_oid.value[0] = -1;
+		sc_init_oid(&data_args.app_oid);
 		data_args.label = "Default Key Container";
 		data_args.app_label = "CSP";
 		data_args.der_encoded.value = (unsigned char *)guid;
@@ -1486,7 +1492,7 @@ iasecc_md_gemalto_new_prvkey(struct sc_pkcs15_card *p15card, struct sc_profile *
 	data[offs++] = 0x01;
 
 	memset(&data_args, 0, sizeof(data_args));
-	data_args.app_oid.value[0] = -1;
+	sc_init_oid(&data_args.app_oid);
 	data_args.label = guid;
 	data_args.app_label = "CSP";
         data_args.der_encoded.value = data;

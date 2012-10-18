@@ -63,6 +63,7 @@
 #include "libopensc/pkcs15.h"
 #include "libopensc/log.h"
 #include "libopensc/cards.h"
+#include "libopensc/asn1.h"
 #include "pkcs15init/pkcs15-init.h"
 #include "pkcs15init/profile.h"
 #include "util.h"
@@ -1004,12 +1005,12 @@ is_cacert_already_present(struct sc_pkcs15init_certargs *args)
 		if (r < 0 || !cert)
 			continue;
 
-		if (cert->data_len == args->der_encoded.len
-		     && !memcmp(cert->data, args->der_encoded.value,
-				     cert->data_len)) {
+		if (cert->data.len == args->der_encoded.len
+				&& !memcmp(cert->data.value, args->der_encoded.value, cert->data.len)) {
 			sc_pkcs15_free_certificate(cert);
 			return 1;
 		}
+
 		sc_pkcs15_free_certificate(cert);
 		cert=NULL;
 	}
@@ -1086,8 +1087,8 @@ do_read_check_certificate(sc_pkcs15_cert_t *sc_oldcert,
 	int r;
 
 	/* Get the public key from the old cert */
-	ptr = sc_oldcert->data;
-	oldcert = d2i_X509(NULL, &ptr, sc_oldcert->data_len);
+	ptr = sc_oldcert->data.value;
+	oldcert = d2i_X509(NULL, &ptr, sc_oldcert->data.len);
 
 	if (oldcert == NULL)
 		return SC_ERROR_INTERNAL;
@@ -1189,7 +1190,7 @@ do_store_data_object(struct sc_profile *profile)
 	int	r=0;
 
 	memset(&args, 0, sizeof(args));
-	args.app_oid.value[0] = -1;
+	sc_init_oid(&args.app_oid);
 
 	if (opt_objectid)
 		sc_pkcs15_format_id(opt_objectid, &args.id);

@@ -20,6 +20,7 @@
 
 #include "config.h"
 #include "libopensc/log.h"
+#include "libopensc/asn1.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -394,13 +395,14 @@ __pkcs15_delete_object(struct pkcs15_fw_data *fw_data, struct pkcs15_any_object 
 	if (fw_data->num_objects == 0)
 		return SC_ERROR_INTERNAL;
 
-	for (i = 0; i < fw_data->num_objects; ++i)
+	for (i = 0; i < fw_data->num_objects; ++i)   {
 		if (fw_data->objects[i] == obj) {
 			fw_data->objects[i] = fw_data->objects[--fw_data->num_objects];
 			if (__pkcs15_release_object(obj) > 0)
 				return SC_ERROR_INTERNAL;
 			return SC_SUCCESS;
 		}
+	}
 	return SC_ERROR_OBJECT_NOT_FOUND;
 }
 #endif
@@ -469,50 +471,40 @@ out:
 
 
 static int
-public_key_created(struct pkcs15_fw_data *fw_data, const unsigned int num_objects,
-			      const unsigned char *id, const size_t size_id,
-			      struct pkcs15_any_object **obj2)
+public_key_created(struct pkcs15_fw_data *fw_data, const struct sc_pkcs15_id *id,
+		struct pkcs15_any_object **obj2)
 {
-	int found = 0;
-	unsigned int ii=0;
+	size_t ii;
 
-	while(ii<num_objects && !found) {
-		if (!fw_data->objects[ii]->p15_object) {
-			ii++;
+	for(ii=0; ii<fw_data->num_objects; ii++) {
+		struct pkcs15_any_object *any_object = fw_data->objects[ii];
+		struct sc_pkcs15_object *p15_object = any_object->p15_object;
+
+		if (!p15_object)
 			continue;
-		}
-		if ((fw_data->objects[ii]->p15_object->type != SC_PKCS15_TYPE_PUBKEY) &&
-		    (fw_data->objects[ii]->p15_object->type != SC_PKCS15_TYPE_PUBKEY_RSA) &&
-		    (fw_data->objects[ii]->p15_object->type != SC_PKCS15_TYPE_PUBKEY_DSA) &&
-		    (fw_data->objects[ii]->p15_object->type != SC_PKCS15_TYPE_PUBKEY_EC) &&
-		    (fw_data->objects[ii]->p15_object->type != SC_PKCS15_TYPE_PUBKEY_GOSTR3410)) {
-			ii++;
+
+		if ((p15_object->type & SC_PKCS15_TYPE_CLASS_MASK) != SC_PKCS15_TYPE_PUBKEY)
 			continue;
+
+		if (sc_pkcs15_compare_id(id, &((struct sc_pkcs15_pubkey_info *)p15_object->data)->id))   {
+			if (obj2)
+				*obj2 = any_object;
+			return SC_SUCCESS;
 		}
-		/* XXX this is somewhat dirty as this assumes that the first
-		 * member of the is the pkcs15 id */
-		if (memcmp(fw_data->objects[ii]->p15_object->data, id, size_id) == 0) {
-			*obj2 = (struct pkcs15_any_object *) fw_data->objects[ii];
-			found=1;
-		} else
-			ii++;
 	}
 
-	if (found)
-		return SC_SUCCESS;
-	else
-		return SC_ERROR_OBJECT_NOT_FOUND;
+	return SC_ERROR_OBJECT_NOT_FOUND;
 }
 
 
 static int
-__pkcs15_create_cert_object(struct pkcs15_fw_data *fw_data,
-	struct sc_pkcs15_object *cert, struct pkcs15_any_object **cert_object)
+__pkcs15_create_cert_object(struct pkcs15_fw_data *fw_data, struct sc_pkcs15_object *cert,
+		struct pkcs15_any_object **cert_object)
 {
-	struct sc_pkcs15_cert_info *p15_info;
-	struct sc_pkcs15_cert *p15_cert;
-	struct pkcs15_cert_object *object;
-	struct pkcs15_pubkey_object *obj2;
+	struct sc_pkcs15_cert_info *p15_info = NULL;
+	struct sc_pkcs15_cert *p15_cert = NULL;
+	struct pkcs15_cert_object *object = NULL;
+	struct pkcs15_pubkey_object *obj2 = NULL;
 	int rv;
 
 	p15_info = (struct sc_pkcs15_cert_info *) cert->data;
@@ -536,9 +528,7 @@ __pkcs15_create_cert_object(struct pkcs15_fw_data *fw_data,
 	object->cert_data = p15_cert;
 
 	/* Corresponding public key */
-	rv = public_key_created(fw_data, fw_data->num_objects, p15_info->id.value, p15_info->id.len, 
-			(struct pkcs15_any_object **) &obj2);
-
+	rv = public_key_created(fw_data, &p15_info->id, (struct pkcs15_any_object **) &obj2);
 	if (rv != SC_SUCCESS)
 		rv = __pkcs15_create_object(fw_data, (struct pkcs15_any_object **) &obj2,
 				NULL, &pkcs15_pubkey_ops, sizeof(struct pkcs15_pubkey_object));
@@ -546,17 +536,11 @@ __pkcs15_create_cert_object(struct pkcs15_fw_data *fw_data,
 		return rv;
 
 	if (p15_cert) {
-		 /* we take the pubkey from the cert, as it in not needed */
-		obj2->pub_data = p15_cert->key;
-		/* invalidate public data of the cert object so that sc_pkcs15_cert_free
-		 * does not free the public key data as well (something like
-		 * sc_pkcs15_pubkey_dup would have been nice here) -- Nils
-		 */
-		p15_cert->key = NULL;
-
-	}
-	else   {
-		obj2->pub_data = NULL; /* will copy from cert when cert is read */
+		 /* make a copy of public key from the cert */
+		if (!obj2->pub_data)
+			rv = sc_pkcs15_pubkey_from_cert(context, &p15_cert->data, &obj2->pub_data);
+		if (rv < 0)
+			return rv;
 	}
 
 	obj2->pub_genfrom = object;
@@ -600,8 +584,7 @@ __pkcs15_create_pubkey_object(struct pkcs15_fw_data *fw_data,
 
 	/* Public key object */
 	rv = __pkcs15_create_object(fw_data, (struct pkcs15_any_object **) &object,
-					pubkey, &pkcs15_pubkey_ops,
-					sizeof(struct pkcs15_pubkey_object));
+			pubkey, &pkcs15_pubkey_ops, sizeof(struct pkcs15_pubkey_object));
 	if (rv >= 0) {
 		object->pub_info = (struct sc_pkcs15_pubkey_info *) pubkey->data;
 		object->pub_data = p15_key;
@@ -643,8 +626,7 @@ __pkcs15_create_data_object(struct pkcs15_fw_data *fw_data,
 	int rv;
 
 	rv = __pkcs15_create_object(fw_data, (struct pkcs15_any_object **) &dobj,
-			object, &pkcs15_dobj_ops,
-			sizeof(struct pkcs15_data_object));
+			object, &pkcs15_dobj_ops, sizeof(struct pkcs15_data_object));
 	if (rv >= 0)   {
 	    dobj->info = (struct sc_pkcs15_data_info *) object->data;
 	    dobj->value = NULL;
@@ -665,11 +647,9 @@ __pkcs15_create_secret_key_object(struct pkcs15_fw_data *fw_data,
 	int rv;
 
 	rv = __pkcs15_create_object(fw_data, (struct pkcs15_any_object **) &skey,
-			object, &pkcs15_skey_ops,
-			sizeof(struct pkcs15_skey_object));
-	if (rv >= 0)   {
+			object, &pkcs15_skey_ops, sizeof(struct pkcs15_skey_object));
+	if (rv >= 0)
 	    skey->info = (struct sc_pkcs15_skey_info *) object->data;
-	}
 
 	if (skey_object != NULL)
 		*skey_object = (struct pkcs15_any_object *) skey;
@@ -677,12 +657,11 @@ __pkcs15_create_secret_key_object(struct pkcs15_fw_data *fw_data,
 	return 0;
 }
 
+
 static int
-pkcs15_create_pkcs11_objects(struct pkcs15_fw_data *fw_data,
-			     int p15_type, const char *name,
-			     int (*create)(struct pkcs15_fw_data *,
-				     struct sc_pkcs15_object *,
-				     struct pkcs15_any_object **any_object))
+pkcs15_create_pkcs11_objects(struct pkcs15_fw_data *fw_data, int p15_type, const char *name,
+		int (*create)(struct pkcs15_fw_data *, struct sc_pkcs15_object *,
+			struct pkcs15_any_object **any_object))
 {
 	struct sc_pkcs15_object *p15_object[MAX_OBJECTS];
 	int i, count, rv;
@@ -701,7 +680,7 @@ pkcs15_create_pkcs11_objects(struct pkcs15_fw_data *fw_data,
 static void
 __pkcs15_prkey_bind_related(struct pkcs15_fw_data *fw_data, struct pkcs15_prkey_object *pk)
 {
-	sc_pkcs15_id_t *id = &pk->prv_info->id;
+	struct sc_pkcs15_id *id = &pk->prv_info->id;
 	unsigned int i;
 
 	sc_log(context, "Object is a private key and has id %s", sc_pkcs15_print_id(id));
@@ -743,11 +722,10 @@ static void
 __pkcs15_cert_bind_related(struct pkcs15_fw_data *fw_data, struct pkcs15_cert_object *cert)
 {
 	struct sc_pkcs15_cert *c1 = cert->cert_data;
-	sc_pkcs15_id_t *id = &cert->cert_info->id;
+	struct sc_pkcs15_id *id = &cert->cert_info->id;
 	unsigned int i;
 
-	sc_log(context, "Object is a certificate and has id %s",
-	         sc_pkcs15_print_id(id));
+	sc_log(context, "Object is a certificate and has id %s", sc_pkcs15_print_id(id));
 
 	/* Loop over all objects to see if we find the certificate of
 	 * the issuer and the associated private key */
@@ -798,48 +776,37 @@ pkcs15_bind_related_objects(struct pkcs15_fw_data *fw_data)
 			continue;
 
 		sc_log(context, "Looking for objects related to object %d", i);
-
-		if (is_privkey(obj)) {
+		if (is_privkey(obj))
 			__pkcs15_prkey_bind_related(fw_data, (struct pkcs15_prkey_object *) obj);
-		} else if (is_cert(obj)) {
+		else if (is_cert(obj))
 			__pkcs15_cert_bind_related(fw_data, (struct pkcs15_cert_object *) obj);
-		}
 	}
 }
 
-/* We deferred reading of the cert until needed, as it may be
- * a private object, so we must wait till login to read
- */
 
+/* We deferred reading of the cert until needed, as it may be
+ * a private object, so we must wait till login to read  */
 static int
-check_cert_data_read(struct pkcs15_fw_data *fw_data,
-				 struct pkcs15_cert_object *cert)
+check_cert_data_read(struct pkcs15_fw_data *fw_data, struct pkcs15_cert_object *cert)
 {
-	int rv;
 	struct pkcs15_pubkey_object *obj2;
+	int rv;
 
 	if (!cert)
 		return SC_ERROR_OBJECT_NOT_FOUND;
 
 	if (cert->cert_data)
 		return 0;
-	if ((rv = sc_pkcs15_read_certificate(fw_data->p15_card,
-				cert->cert_info, &cert->cert_data) < 0))
+	rv = sc_pkcs15_read_certificate(fw_data->p15_card, cert->cert_info, &cert->cert_data);
+	if (rv < 0)
 		return rv;
 
-	/* update the related public key object */
 	obj2 = cert->cert_pubkey;
-
-	obj2->pub_data = cert->cert_data->key;
-	/* We take the pub key from the cert that we will discard below */
-	/* invalidate public data of the cert object so that sc_pkcs15_cert_free
-	 * does not free the public key data as well (something like
-	 * sc_pkcs15_pubkey_dup would have been nice here) -- Nils
-	 */
-	cert->cert_data->key = NULL;
+	/* make a copy of public key from the cert data */
+	if (!obj2->pub_data)
+		rv = sc_pkcs15_pubkey_from_cert(context, &cert->cert_data->data, &obj2->pub_data);
 
 	/* now that we have the cert and pub key, lets see if we can bind anything else */
-
 	pkcs15_bind_related_objects(fw_data);
 
 	return 0;
@@ -2068,10 +2035,8 @@ out:
 
 
 static CK_RV
-pkcs15_create_public_key(struct sc_pkcs11_slot *slot,
-		struct sc_profile *profile,
-		CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount,
-		CK_OBJECT_HANDLE_PTR phObject)
+pkcs15_create_public_key(struct sc_pkcs11_slot *slot, struct sc_profile *profile,
+		CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount, CK_OBJECT_HANDLE_PTR phObject)
 {
 	struct sc_pkcs11_card *p11card = slot->card;
 	struct pkcs15_fw_data *fw_data = NULL;
@@ -2261,7 +2226,7 @@ pkcs15_create_data(struct sc_pkcs11_slot *slot, struct sc_profile *profile,
 	char label[SC_PKCS15_MAX_LABEL_SIZE];
 
 	memset(&args, 0, sizeof(args));
-	args.app_oid.value[0] = -1;
+	sc_init_oid(&args.app_oid);
 
 	fw_data = (struct pkcs15_fw_data *) p11card->fws_data[slot->fw_data_idx];
 	if (!fw_data)
@@ -2299,9 +2264,10 @@ pkcs15_create_data(struct sc_pkcs11_slot *slot, struct sc_profile *profile,
 			args.app_label = (char *) attr->pValue;
 			break;
 		case CKA_OBJECT_ID:
-			rv = attr_extract(attr, args.app_oid.value, NULL);
-			if (rv != CKR_OK)
+			if (sc_asn1_decode_object_id(attr->pValue, attr->ulValueLen, &args.app_oid))   {
+				rv = CKR_ATTRIBUTE_VALUE_INVALID;
 				goto out;
+			}
 			break;
 		case CKA_VALUE:
 			args.der_encoded.len = attr->ulValueLen;
@@ -2535,7 +2501,7 @@ pkcs15_gen_keypair(struct sc_pkcs11_slot *slot, CK_MECHANISM_PTR pMechanism,
 	struct sc_pkcs15_id id;
 	size_t		len;
 	CK_KEY_TYPE	keytype;
-	CK_ULONG	keybits;
+	CK_ULONG	keybits = 0;
 	char		pub_label[SC_PKCS15_MAX_LABEL_SIZE];
 	char		priv_label[SC_PKCS15_MAX_LABEL_SIZE];
 	int		rc, rv = CKR_OK;
@@ -2672,7 +2638,7 @@ pkcs15_gen_keypair(struct sc_pkcs11_slot *slot, CK_MECHANISM_PTR pMechanism,
 			goto kpgen_done;
 		}
 	}
-	else if (rc != SC_ERROR_NOT_SUPPORTED) {
+	else {
 		sc_log(context, "sc_pkcs15init_generate_key returned %d", rc);
 		rv = sc_to_cryptoki_error(rc, "C_GenerateKeyPair");
 		goto kpgen_done;
@@ -2740,8 +2706,10 @@ pkcs15_any_destroy(struct sc_pkcs11_session *session, void *object)
 #else
 	struct pkcs15_data_object *obj = (struct pkcs15_data_object*) object;
 	struct pkcs15_any_object *any_obj = (struct pkcs15_any_object*) object;
-	struct sc_pkcs11_card *p11card = session->slot->card;
-	struct pkcs15_fw_data *fw_data = NULL;
+	struct sc_pkcs11_slot *slot = session->slot;
+	struct sc_pkcs11_card *p11card = slot->card;
+        struct pkcs15_fw_data *fw_data = NULL;
+	struct sc_aid *aid = NULL;
 	struct sc_profile *profile = NULL;
 	int rv;
 
@@ -2754,20 +2722,43 @@ pkcs15_any_destroy(struct sc_pkcs11_session *session, void *object)
 		return sc_to_cryptoki_error(rv, "C_DestroyObject");
 
 	/* Bind the profile */
-	rv = sc_pkcs15init_bind(p11card->card, "pkcs15", NULL, NULL, &profile);
+	rv = sc_pkcs15init_bind(p11card->card, "pkcs15", NULL, slot->app_info, &profile);
 	if (rv < 0) {
 		sc_unlock(p11card->card);
 		return sc_to_cryptoki_error(rv, "C_DestroyObject");
 	}
 
-	rv = sc_pkcs15init_finalize_profile(p11card->card, profile, NULL);
-	if (rv != CKR_OK) {
+	if(slot->app_info)
+		aid = &slot->app_info->aid;
+	rv = sc_pkcs15init_finalize_profile(p11card->card, profile, aid);
+	if (rv) {
 		sc_log(context, "Cannot finalize profile: %i", rv);
 		return sc_to_cryptoki_error(rv, "C_DestroyObject");
 	}
 
-	/* Delete object in smartcard */
-	rv = sc_pkcs15init_delete_object(fw_data->p15_card, profile, obj->base.p15_object);
+	if (any_obj->related_pubkey)   {
+		struct pkcs15_any_object *ao_pubkey = (struct pkcs15_any_object *)any_obj->related_pubkey;
+		struct pkcs15_pubkey_object *pubkey = any_obj->related_pubkey;
+
+		/* Delete reference to related certificate of the public key PKCS#11 object */
+		pubkey->pub_genfrom = NULL;
+		if (ao_pubkey->p15_object == NULL)   {
+			/* Unlink related public key FW object if it has no corresponding PKCS#15 object
+			 * and was created from certificate. */
+			--ao_pubkey->refcount;
+			list_delete(&session->slot->objects, ao_pubkey);
+			/* Delete public key object in pkcs15 */
+			if (pubkey->pub_data)   {
+				sc_pkcs15_free_pubkey(pubkey->pub_data);
+				pubkey->pub_data = NULL;
+			}
+			__pkcs15_delete_object(fw_data, ao_pubkey);
+		}
+	}
+
+	/* Delete object in smartcard (if corresponding PKCS#15 object exists) */
+	if (obj->base.p15_object)
+		rv = sc_pkcs15init_delete_object(fw_data->p15_card, profile, obj->base.p15_object);
 	if (rv >= 0) {
 		/* Oppose to pkcs15_add_object */
 		--any_obj->refcount; /* correct refcont */
@@ -2908,10 +2899,9 @@ pkcs15_cert_release(void *obj)
 	struct pkcs15_cert_object *cert = (struct pkcs15_cert_object *) obj;
 	struct sc_pkcs15_cert      *cert_data = cert->cert_data;
 
-	if (__pkcs15_release_object((struct pkcs15_any_object *) obj) == 0) {
+	if (__pkcs15_release_object((struct pkcs15_any_object *) obj) == 0)
 		if (cert_data) /* may never have been read */
 			sc_pkcs15_free_certificate(cert_data);
-	}
 }
 
 
@@ -2946,8 +2936,7 @@ pkcs15_cert_get_attribute(struct sc_pkcs11_session *session, void *object, CK_AT
 		break;
 	case CKA_PRIVATE:
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
-		*(CK_BBOOL*)attr->pValue =
-			(cert->base.p15_object->flags & SC_PKCS15_CO_FLAG_PRIVATE) != 0;
+		*(CK_BBOOL*)attr->pValue = (cert->base.p15_object->flags & SC_PKCS15_CO_FLAG_PRIVATE) != 0;
 		break;
 	case CKA_MODIFIABLE:
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
@@ -2963,11 +2952,11 @@ pkcs15_cert_get_attribute(struct sc_pkcs11_session *session, void *object, CK_AT
 		*(CK_CERTIFICATE_TYPE*)attr->pValue = CKC_X_509;
 		break;
 	case CKA_ID:
-		if (cert->cert_info->authority
-				&& sc_pkcs11_conf.zero_ckaid_for_ca_certs) {
+		if (cert->cert_info->authority && sc_pkcs11_conf.zero_ckaid_for_ca_certs) {
 			check_attribute_buffer(attr, 1);
 			*(unsigned char*)attr->pValue = 0;
-		} else {
+		}
+		else {
 			check_attribute_buffer(attr, cert->cert_info->id.len);
 			memcpy(attr->pValue, cert->cert_info->id.value, cert->cert_info->id.len);
 		}
@@ -2981,8 +2970,8 @@ pkcs15_cert_get_attribute(struct sc_pkcs11_session *session, void *object, CK_AT
 			attr->ulValueLen = 0;
 			return CKR_OK;
 		}
-		check_attribute_buffer(attr, cert->cert_data->data_len);
-		memcpy(attr->pValue, cert->cert_data->data, cert->cert_data->data_len);
+		check_attribute_buffer(attr, cert->cert_data->data.len);
+		memcpy(attr->pValue, cert->cert_data->data.value, cert->cert_data->data.len);
 		break;
 	case CKA_SERIAL_NUMBER:
 		if (check_cert_data_read(fw_data, cert) != 0) {
@@ -2997,15 +2986,13 @@ pkcs15_cert_get_attribute(struct sc_pkcs11_session *session, void *object, CK_AT
 			attr->ulValueLen = 0;
 			return CKR_OK;
 		}
-		return asn1_sequence_wrapper(cert->cert_data->subject,
-		                             cert->cert_data->subject_len, attr);
+		return asn1_sequence_wrapper(cert->cert_data->subject, cert->cert_data->subject_len, attr);
 	case CKA_ISSUER:
 		if (check_cert_data_read(fw_data, cert) != 0) {
 			attr->ulValueLen = 0;
 			return CKR_OK;
 		}
-		return asn1_sequence_wrapper(cert->cert_data->issuer,
-				 cert->cert_data->issuer_len, attr);
+		return asn1_sequence_wrapper(cert->cert_data->issuer, cert->cert_data->issuer_len, attr);
 	default:
 		return CKR_ATTRIBUTE_TYPE_INVALID;
 	}
@@ -3014,6 +3001,8 @@ pkcs15_cert_get_attribute(struct sc_pkcs11_session *session, void *object, CK_AT
 }
 
 
+#define ASN1_SET_TAG (SC_ASN1_SET | SC_ASN1_TAG_CONSTRUCTED)
+#define ASN1_SEQ_TAG (SC_ASN1_SEQUENCE | SC_ASN1_TAG_CONSTRUCTED)
 static int
 pkcs15_cert_cmp_attribute(struct sc_pkcs11_session *session,
 		void *object, CK_ATTRIBUTE_PTR attr)
@@ -3021,38 +3010,43 @@ pkcs15_cert_cmp_attribute(struct sc_pkcs11_session *session,
 	struct pkcs15_cert_object *cert = (struct pkcs15_cert_object*) object;
 	struct sc_pkcs11_card *p11card = session->slot->card;
 	struct pkcs15_fw_data *fw_data = NULL;
-	unsigned char *data = NULL;
-	size_t	len;
+	const unsigned char *data = NULL, *_data = NULL;
+	size_t	len, _len;
 
 	fw_data = (struct pkcs15_fw_data *) p11card->fws_data[session->slot->fw_data_idx];
 	if (!fw_data)
 		return sc_to_cryptoki_error(SC_ERROR_INTERNAL, "C_GetAttributeValue");
 
 	switch (attr->type) {
-	/* Check the issuer. Some pkcs11 callers (i.e. netscape) will pass
-	 * in the ASN.1 encoded SEQUENCE OF SET ... while OpenSC just
-	 * keeps the SET in the issuer field. */
+	/* Check the issuer/subject. Some pkcs11 callers (i.e. netscape) will pass
+	 * in the ASN.1 encoded SEQUENCE OF SET,
+	 * while OpenSC just keeps the SET in the issuer/subject field. */
 	case CKA_ISSUER:
 		if (check_cert_data_read(fw_data, cert) != 0)
 			break;
 		if (cert->cert_data->issuer_len == 0)
 			break;
-		data = (u8 *) attr->pValue;
-		len = attr->ulValueLen;
-		/* SEQUENCE is tag 0x30, SET is 0x31
-		 * I know this code is icky, but hey... this is netscape
-		 * we're dealing with :-) */
-		if (cert->cert_data->issuer[0] == 0x31
-		 && data[0] == 0x30 && len >= 2) {
-			/* skip the length byte(s) */
-			len = (data[1] & 0x80)? (data[1] & 0x7F) : 0;
-			if (attr->ulValueLen < len + 2)
-				break;
-			data += len + 2;
-			len = attr->ulValueLen - len - 2;
-		}
-		if (len == cert->cert_data->issuer_len
-		 && !memcmp(cert->cert_data->issuer, data, len))
+
+		data = _data = (u8 *) attr->pValue;
+		len = _len = attr->ulValueLen;
+		if (cert->cert_data->issuer[0] == ASN1_SET_TAG && data[0] == ASN1_SEQ_TAG && len >= 2)
+			data = sc_asn1_skip_tag(context, &_data, &_len, SC_ASN1_CONS | SC_ASN1_TAG_SEQUENCE, &len);
+
+		if (len == cert->cert_data->issuer_len && !memcmp(cert->cert_data->issuer, data, len))
+			return 1;
+		break;
+	case CKA_SUBJECT:
+		if (check_cert_data_read(fw_data, cert) != 0)
+			break;
+		if (cert->cert_data->subject_len == 0)
+			break;
+
+		data = _data = (u8 *) attr->pValue;
+		len = _len = attr->ulValueLen;
+		if (cert->cert_data->subject[0] == ASN1_SET_TAG && data[0] == ASN1_SEQ_TAG && len >= 2)
+			data = sc_asn1_skip_tag(context, &_data, &_len, SC_ASN1_CONS | SC_ASN1_TAG_SEQUENCE, &len);
+
+		if (len == cert->cert_data->subject_len && !memcmp(cert->cert_data->subject, data, len))
 			return 1;
 		break;
 	default:
@@ -3286,7 +3280,7 @@ pkcs15_prkey_sign(struct sc_pkcs11_session *session, void *obj,
 	struct pkcs15_prkey_object *prkey = (struct pkcs15_prkey_object *) obj;
 	struct sc_pkcs11_card *p11card = session->slot->card;
 	struct pkcs15_fw_data *fw_data = NULL;
-	int rv, flags = 0;
+	int rv, flags = 0, prkey_has_path = 0;
 	unsigned sign_flags = SC_PKCS15_PRKEY_USAGE_SIGN | SC_PKCS15_PRKEY_USAGE_SIGNRECOVER
 			| SC_PKCS15_PRKEY_USAGE_NONREPUDIATION;
 
@@ -3301,6 +3295,9 @@ pkcs15_prkey_sign(struct sc_pkcs11_session *session, void *obj,
 
 	if (prkey == NULL)
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	if (prkey->prv_info->path.len || prkey->prv_info->path.aid.len)
+		prkey_has_path = 1;
 
 	switch (pMechanism->mechanism) {
 	case CKM_RSA_PKCS:
@@ -3362,17 +3359,20 @@ pkcs15_prkey_sign(struct sc_pkcs11_session *session, void *obj,
 	if (rv < 0)
 		return sc_to_cryptoki_error(rv, "C_Sign");
 
-	if (!sc_pkcs11_conf.lock_login) {
-		rv = reselect_app_df(fw_data->p15_card);
-		if (rv < 0) {
-			sc_unlock(p11card->card);
-			return sc_to_cryptoki_error(rv, "C_Sign");
-		}
-	}
-
 	sc_log(context, "Selected flags %X. Now computing signature for %d bytes. %d bytes reserved.", flags, ulDataLen, *pulDataLen);
 	rv = sc_pkcs15_compute_signature(fw_data->p15_card, prkey->prv_p15obj, flags,
 			pData, ulDataLen, pSignature, *pulDataLen);
+	if (rv < 0 && !sc_pkcs11_conf.lock_login && !prkey_has_path) {
+		/* If private key PKCS#15 object do not have 'path' attribute,
+		 * and if PKCS#11 login session is not locked,
+		 * the compute signature could fail because of concurent access to the card
+		 * by other application that could change the current DF.
+		 * In this particular case try to 'reselect' application DF.
+		 */
+		if (reselect_app_df(fw_data->p15_card) == SC_SUCCESS)
+			rv = sc_pkcs15_compute_signature(fw_data->p15_card, prkey->prv_p15obj, flags,
+					pData, ulDataLen, pSignature, *pulDataLen);
+	}
 
 	sc_unlock(p11card->card);
 
@@ -3397,7 +3397,7 @@ pkcs15_prkey_decrypt(struct sc_pkcs11_session *session, void *obj,
 	struct pkcs15_fw_data *fw_data = NULL;
 	struct pkcs15_prkey_object *prkey;
 	unsigned char decrypted[256]; /* FIXME: Will not work for keys above 2048 bits */
-	int	buff_too_small, rv, flags = 0;
+	int	buff_too_small, rv, flags = 0, prkey_has_path = 0;
 
 	sc_log(context, "Initiating decryption.");
 
@@ -3411,6 +3411,9 @@ pkcs15_prkey_decrypt(struct sc_pkcs11_session *session, void *obj,
 		prkey = prkey->prv_next;
 	if (prkey == NULL)
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	if (prkey->prv_info->path.len || prkey->prv_info->path.aid.len)
+		prkey_has_path = 1;
 
 	/* Select the proper padding mechanism */
 	switch (pMechanism->mechanism) {
@@ -3428,17 +3431,13 @@ pkcs15_prkey_decrypt(struct sc_pkcs11_session *session, void *obj,
 	if (rv < 0)
 		return sc_to_cryptoki_error(rv, "C_Decrypt");
 
-	if (!sc_pkcs11_conf.lock_login) {
-		rv = reselect_app_df(fw_data->p15_card);
-		if (rv < 0) {
-			sc_unlock(p11card->card);
-			return sc_to_cryptoki_error(rv, "C_Decrypt");
-		}
-	}
+	rv = sc_pkcs15_decipher(fw_data->p15_card, prkey->prv_p15obj, flags,
+			pEncryptedData, ulEncryptedDataLen, decrypted, sizeof(decrypted));
 
-	rv = sc_pkcs15_decipher(fw_data->p15_card, prkey->prv_p15obj,
-				 flags, pEncryptedData, ulEncryptedDataLen,
-				 decrypted, sizeof(decrypted));
+	if (rv < 0 && !sc_pkcs11_conf.lock_login && !prkey_has_path)
+		if (reselect_app_df(fw_data->p15_card) == SC_SUCCESS)
+			rv = sc_pkcs15_decipher(fw_data->p15_card, prkey->prv_p15obj, flags,
+					pEncryptedData, ulEncryptedDataLen, decrypted, sizeof(decrypted));
 
 	sc_unlock(p11card->card);
 
@@ -3468,7 +3467,7 @@ pkcs15_prkey_derive(struct sc_pkcs11_session *session, void *obj,
 	struct sc_pkcs11_card *p11card = session->slot->card;
 	struct pkcs15_fw_data *fw_data = NULL;
 	struct pkcs15_prkey_object *prkey = (struct pkcs15_prkey_object *) obj;
-	int	need_unlock = 0;
+	int	need_unlock = 0, prkey_has_path = 0;
 	int	rv, flags = 0;
 	CK_BYTE_PTR pSeedData = NULL;
 	CK_ULONG ulSeedDataLen = 0;
@@ -3488,19 +3487,14 @@ pkcs15_prkey_derive(struct sc_pkcs11_session *session, void *obj,
 	if (prkey == NULL)
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
 
+	if (prkey->prv_info->path.len || prkey->prv_info->path.aid.len)
+		prkey_has_path = 1;
+
 	if (pData != NULL && *pulDataLen > 0) { /* TODO DEE only test for NULL? */
 	    need_unlock = 1;
 	    rv = sc_lock(p11card->card);
 	    if (rv < 0)
 		    return sc_to_cryptoki_error(rv, "C_DeriveKey");
-
-	    if (!sc_pkcs11_conf.lock_login) {
-		    rv = reselect_app_df(fw_data->p15_card);
-		    if (rv < 0) {
-			sc_unlock(p11card->card);
-			return sc_to_cryptoki_error(rv, "C_DeriveKey");
-		    }
-	    }
 	}
 
 	/* TODO DEE This may not be the place to get the parameters,
@@ -3517,13 +3511,17 @@ pkcs15_prkey_derive(struct sc_pkcs11_session *session, void *obj,
 		break;
 	}
 
-	rv = sc_pkcs15_derive(fw_data->p15_card, prkey->prv_p15obj,
-				 flags, pSeedData, ulSeedDataLen,
-				 pData, pulDataLen);
+	rv = sc_pkcs15_derive(fw_data->p15_card, prkey->prv_p15obj, flags,
+			pSeedData, ulSeedDataLen, pData, pulDataLen);
+	if (rv < 0 && !sc_pkcs11_conf.lock_login && !prkey_has_path && need_unlock)
+		if (reselect_app_df(fw_data->p15_card) == SC_SUCCESS)
+			rv = sc_pkcs15_derive(fw_data->p15_card, prkey->prv_p15obj, flags,
+					pSeedData, ulSeedDataLen, pData, pulDataLen);
+
 	/* this may have been a request for size */
 
 	if (need_unlock)
-	    sc_unlock(p11card->card);
+		sc_unlock(p11card->card);
 
 	sc_log(context, "Derivation complete. Result %d.", rv);
 
@@ -3663,15 +3661,12 @@ pkcs15_pubkey_get_attribute(struct sc_pkcs11_session *session,
 		break;
 	case CKA_PRIVATE:
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
-		if (pubkey->pub_p15obj) {
-			*(CK_BBOOL*)attr->pValue =
-				(pubkey->pub_p15obj->flags & SC_PKCS15_CO_FLAG_PRIVATE) != 0;
-		} else if (cert && cert->cert_p15obj) {
-			*(CK_BBOOL*)attr->pValue =
-				(cert->pub_p15obj->flags & SC_PKCS15_CO_FLAG_PRIVATE) != 0;
-		} else  {
+		if (pubkey->pub_p15obj)
+			*(CK_BBOOL*)attr->pValue = (pubkey->pub_p15obj->flags & SC_PKCS15_CO_FLAG_PRIVATE) != 0;
+		else if (cert && cert->cert_p15obj)
+			*(CK_BBOOL*)attr->pValue = (cert->pub_p15obj->flags & SC_PKCS15_CO_FLAG_PRIVATE) != 0;
+		else
 			return CKR_ATTRIBUTE_TYPE_INVALID;
-		}
 		break;
 	case CKA_MODIFIABLE:
 	case CKA_EXTRACTABLE:
@@ -3683,11 +3678,13 @@ pkcs15_pubkey_get_attribute(struct sc_pkcs11_session *session,
 			len = strlen(pubkey->pub_p15obj->label);
 			check_attribute_buffer(attr, len);
 			memcpy(attr->pValue, pubkey->pub_p15obj->label, len);
-		} else if (cert && cert->cert_p15obj) {
+		}
+		else if (cert && cert->cert_p15obj) {
 			len = strlen(cert->cert_p15obj->label);
 			check_attribute_buffer(attr, len);
 			memcpy(attr->pValue, cert->cert_p15obj->label, len);
-		} else {
+		}
+		else {
 			return CKR_ATTRIBUTE_TYPE_INVALID;
 		}
 		break;
@@ -3706,10 +3703,12 @@ pkcs15_pubkey_get_attribute(struct sc_pkcs11_session *session,
 		if (pubkey->pub_info) {
 			check_attribute_buffer(attr, pubkey->pub_info->id.len);
 			memcpy(attr->pValue, pubkey->pub_info->id.value, pubkey->pub_info->id.len);
-		} else if (cert && cert->cert_info) {
+		}
+		else if (cert && cert->cert_info) {
 			check_attribute_buffer(attr, cert->cert_info->id.len);
 			memcpy(attr->pValue, cert->cert_info->id.value, cert->cert_info->id.len);
-		} else {
+		}
+		else {
 			return CKR_ATTRIBUTE_TYPE_INVALID;
 		}
 		break;
@@ -3743,15 +3742,16 @@ pkcs15_pubkey_get_attribute(struct sc_pkcs11_session *session,
 	case CKA_VALUE:
 		if (pubkey->pub_data) {
 			/* TODO: -DEE  Not all pubkeys have CKA_VALUE attribute. RSA and EC
-		 	 * for example don't. So why is this here?
+			 * for example don't. So why is this here?
 			 * Why checking for cert in this pkcs15_pubkey_get_attribute?
-		 	 */
+			 */
 			check_attribute_buffer(attr, pubkey->pub_data->data.len);
 			memcpy(attr->pValue, pubkey->pub_data->data.value,
 					      pubkey->pub_data->data.len);
-		} else if (cert && cert->cert_data) {
-			check_attribute_buffer(attr, cert->cert_data->data_len);
-			memcpy(attr->pValue, cert->cert_data->data, cert->cert_data->data_len);
+		}
+		else if (cert && cert->cert_data) {
+			check_attribute_buffer(attr, cert->cert_data->data.len);
+			memcpy(attr->pValue, cert->cert_data->data.value, cert->cert_data->data.len);
 		}
 		break;
 	case CKA_GOSTR3410_PARAMS:
@@ -3853,7 +3853,11 @@ static CK_RV
 pkcs15_dobj_get_attribute(struct sc_pkcs11_session *session, void *object, CK_ATTRIBUTE_PTR attr)
 {
 	struct pkcs15_data_object *dobj = (struct pkcs15_data_object*) object;
+	struct sc_pkcs15_data *data = NULL;
+	CK_RV rv;
 	size_t len;
+	int r;
+	unsigned char *buf = NULL;
 
 	switch (attr->type) {
 	case CKA_CLASS:
@@ -3866,13 +3870,11 @@ pkcs15_dobj_get_attribute(struct sc_pkcs11_session *session, void *object, CK_AT
 		break;
 	case CKA_PRIVATE:
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
-		*(CK_BBOOL*)attr->pValue =
-			(dobj->base.p15_object->flags & SC_PKCS15_CO_FLAG_PRIVATE) != 0;
+		*(CK_BBOOL*)attr->pValue = (dobj->base.p15_object->flags & SC_PKCS15_CO_FLAG_PRIVATE) != 0;
 		break;
 	case CKA_MODIFIABLE:
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
-		*(CK_BBOOL*)attr->pValue =
-			(dobj->base.p15_object->flags & 0x02) != 0;
+		*(CK_BBOOL*)attr->pValue = (dobj->base.p15_object->flags & 0x02) != 0;
 		break;
 	case CKA_LABEL:
 		len = strlen(dobj->base.p15_object->label);
@@ -3891,28 +3893,37 @@ pkcs15_dobj_get_attribute(struct sc_pkcs11_session *session, void *object, CK_AT
 		break;
 #endif
 	case CKA_OBJECT_ID:
-		{
-			len = sizeof(dobj->info->app_oid);
-
-			check_attribute_buffer(attr, len);
-			memcpy(attr->pValue, dobj->info->app_oid.value, len);
+		if (!sc_valid_oid(&dobj->info->app_oid))   {
+			attr->ulValueLen = -1;
+			return CKR_ATTRIBUTE_TYPE_INVALID;
 		}
+		r = sc_asn1_encode_object_id(NULL, &len, &dobj->info->app_oid);
+		if (r)   {
+			sc_log(context, "data_get_attr(): encode OID error %i", r);
+			return CKR_FUNCTION_FAILED;
+		}
+
+		check_attribute_buffer(attr, len);
+
+		r = sc_asn1_encode_object_id(&buf, &len, &dobj->info->app_oid);
+		if (r)   {
+			sc_log(context, "data_get_attr(): encode OID error %i", r);
+			return CKR_FUNCTION_FAILED;
+		}
+
+		memcpy(attr->pValue, buf, len);
+		free(buf);
 		break;
 	case CKA_VALUE:
-		{
-			CK_RV rv;
-			struct sc_pkcs15_data *data = NULL;
-
-			rv = pkcs15_dobj_get_value(session, dobj, &data);
-			if (rv == CKR_OK)
-				rv = data_value_to_attr(attr, data);
-			if (data) {
-				free(data->data);
-				free(data);
-			}
-			if (rv != CKR_OK)
-				return rv;
+		rv = pkcs15_dobj_get_value(session, dobj, &data);
+		if (rv == CKR_OK)
+			rv = data_value_to_attr(attr, data);
+		if (data) {
+			free(data->data);
+			free(data);
 		}
+		if (rv != CKR_OK)
+			return rv;
 		break;
 	default:
 		return CKR_ATTRIBUTE_TYPE_INVALID;

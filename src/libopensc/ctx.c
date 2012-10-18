@@ -96,6 +96,7 @@ static const struct _sc_driver_entry internal_card_drivers[] = {
 	{ "rutoken_ecp",(void *(*)(void)) sc_get_rtecp_driver },
 	{ "westcos",	(void *(*)(void)) sc_get_westcos_driver },
 	{ "myeid",      (void *(*)(void)) sc_get_myeid_driver },
+	{ "sc-hsm",		(void *(*)(void)) sc_get_sc_hsm_driver },
 
 /* Here should be placed drivers that need some APDU transactions to
  * recognise its cards. */
@@ -221,18 +222,18 @@ load_parameters(sc_context_t *ctx, scconf_block *block, struct _sc_ctx_options *
 	int err = 0;
 	const scconf_list *list;
 	const char *val, *s_internal = "internal";
-	const char *debug = NULL;
+	int debug;
 	int reopen;
 #ifdef _WIN32
 	char expanded_val[PATH_MAX];
 	DWORD expanded_len;
 #endif
-	ctx->debug = scconf_get_int(block, "debug", ctx->debug);
+
 	reopen = scconf_get_bool(block, "reopen_debug_file", 1);
 
-	debug = getenv("OPENSC_DEBUG");
-	if (debug)
-		ctx->debug = atoi(debug);
+	debug = scconf_get_int(block, "debug", ctx->debug);
+	if (debug > ctx->debug)
+		ctx->debug = debug;
 
 	val = scconf_get_str(block, "debug_file", NULL);
 	if (val)   {
@@ -399,13 +400,19 @@ static int load_card_drivers(sc_context_t *ctx,
 	int drv_count;
 	int i;
 
-	for (drv_count = 0; ctx->card_drivers[drv_count] != NULL; drv_count++);
+	for (drv_count = 0; ctx->card_drivers[drv_count] != NULL; drv_count++)
+		;
 
 	for (i = 0; i < opts->ccount; i++) {
 		struct sc_card_driver *(*func)(void) = NULL;
 		struct sc_card_driver *(**tfunc)(void) = &func;
 		void *dll = NULL;
 		int  j;
+
+		if (drv_count >= SC_MAX_CARD_DRIVERS - 1)   {
+			sc_log(ctx, "Not more then %i card drivers allowed.", SC_MAX_CARD_DRIVERS);
+			break;
+		}
 
 		ent = &opts->cdrv[i];
 		for (j = 0; internal_card_drivers[j].name != NULL; j++)
@@ -431,6 +438,10 @@ static int load_card_drivers(sc_context_t *ctx,
 		ctx->card_drivers[drv_count]->natrs = 0;
 
 		load_card_driver_options(ctx, ctx->card_drivers[drv_count]);
+
+		/* Ensure that the list is always terminated by NULL */
+		ctx->card_drivers[drv_count + 1] = NULL;
+
 		drv_count++;
 	}
 	return SC_SUCCESS;
@@ -515,12 +526,18 @@ static void process_config_file(sc_context_t *ctx, struct _sc_ctx_options *opts)
 	int i, r, count = 0;
 	scconf_block **blocks;
 	const char *conf_path = NULL;
+	const char *debug = NULL;
 #ifdef _WIN32
 	char temp_path[PATH_MAX];
 	DWORD temp_len;
 	long rc;
 	HKEY hKey;
 #endif
+
+	/* Takes effect even when no config around */
+	debug = getenv("OPENSC_DEBUG");
+	if (debug)
+		ctx->debug = atoi(debug);
 
 	memset(ctx->conf_blocks, 0, sizeof(ctx->conf_blocks));
 #ifdef _WIN32

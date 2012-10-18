@@ -22,6 +22,7 @@
 
 #include <fcntl.h>
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #ifdef ENABLE_OPENSSL
 #include <openssl/opensslv.h>
@@ -45,6 +46,7 @@
 
 #include "pkcs11/pkcs11.h"
 #include "pkcs11/pkcs11-opensc.h"
+#include "libopensc/asn1.h"
 #include "util.h"
 
 extern void *C_LoadModule(const char *name, CK_FUNCTION_LIST_PTR_PTR);
@@ -59,8 +61,13 @@ static struct ec_curve_info {
 	const char *oid_encoded;
 	size_t size;
 } ec_curve_infos[] = {
+	{"prime192r1", "1.2.840.10045.3.1.1", "06082A8648CE3D030101", 192},
 	{"prime256v1", "1.2.840.10045.3.1.7", "06082A8648CE3D030107", 256},
 	{"secp384r1", "1.3.132.0.34", "06052B81040022", 384},
+	{"brainpoolP192r1", "1.3.36.3.3.2.8.1.1.3", "06092B2403030208010103", 192},
+	{"brainpoolP224r1", "1.3.36.3.3.2.8.1.1.5", "06092B2403030208010105", 224},
+	{"brainpoolP256r1", "1.3.36.3.3.2.8.1.1.7", "06092B2403030208010107", 256},
+	{"brainpoolP320r1", "1.3.36.3.3.2.8.1.1.9", "06092B2403030208010109", 320},
 	{NULL, NULL, NULL, 0},
 };
 
@@ -72,6 +79,8 @@ enum {
 	OPT_TOKEN_LABEL,
 	OPT_APPLICATION_LABEL,
 	OPT_APPLICATION_ID,
+	OPT_ISSUER,
+	OPT_SUBJECT,
 	OPT_SO_PIN,
 	OPT_INIT_TOKEN,
 	OPT_INIT_PIN,
@@ -123,6 +132,8 @@ static const struct option options[] = {
 	{ "delete-object",	0, NULL,		'b' },
 	{ "application-label",	1, NULL,		OPT_APPLICATION_LABEL },
 	{ "application-id",	1, NULL,		OPT_APPLICATION_ID },
+	{ "issuer",		1, NULL,		OPT_ISSUER },
+	{ "subject",		1, NULL,		OPT_SUBJECT },
 	{ "type",		1, NULL,		'y' },
 	{ "id",			1, NULL,		'd' },
 	{ "label",		1, NULL,		'a' },
@@ -178,6 +189,8 @@ static const char *option_help[] = {
 	"Delete an object",
 	"Specify the application label of the data object (use with --type data)",
 	"Specify the application ID of the data object (use with --type data)",
+	"Specify the issuer in hexadecimal format (use with --type cert)",
+	"Specify the subject in hexadecimal format (use with --type cert/privkey/pubkey)",
 	"Specify the type of object (e.g. cert, privkey, pubkey, data)",
 	"Specify the ID of the object",
 	"Specify the label of the object",
@@ -225,6 +238,8 @@ static char *		opt_puk = NULL;
 static char *		opt_new_pin = NULL;
 static char *		opt_application_label = NULL;
 static char *		opt_application_id = NULL;
+static char *		opt_issuer = NULL;
+static char *		opt_subject = NULL;
 static char *		opt_key_type = NULL;
 static int		opt_is_private = 0;
 static int		opt_test_hotplug = 0;
@@ -237,6 +252,7 @@ static void *module = NULL;
 static CK_FUNCTION_LIST_PTR p11 = NULL;
 static CK_SLOT_ID_PTR p11_slots = NULL;
 static CK_ULONG p11_num_slots = 0;
+static int suppress_warn = 0;
 
 struct flag_info {
 	CK_FLAGS	value;
@@ -306,7 +322,7 @@ static void		set_id_attr(CK_SESSION_HANDLE session);
 static int		find_object(CK_SESSION_HANDLE, CK_OBJECT_CLASS,
 				CK_OBJECT_HANDLE_PTR,
 				const unsigned char *, size_t id_len, int obj_index);
-static int		find_mechanism(CK_SLOT_ID, CK_FLAGS, int, CK_MECHANISM_TYPE_PTR);
+static int		find_mechanism(CK_SLOT_ID, CK_FLAGS, CK_MECHANISM_TYPE_PTR, size_t, CK_MECHANISM_TYPE_PTR);
 static int		find_slot_by_description(const char *, CK_SLOT_ID_PTR);
 static int		find_slot_by_token_label(const char *, CK_SLOT_ID_PTR);
 static void		get_token_info(CK_SLOT_ID, CK_TOKEN_INFO_PTR);
@@ -365,6 +381,11 @@ int main(int argc, char * argv[])
 	int do_unlock_pin = 0;
 	int action_count = 0;
 	CK_RV rv;
+
+#ifdef _WIN32
+	if (_set_fmode(_O_BINARY) == EINVAL)
+		util_fatal("Cannot set FMODE to O_BINARY");
+#endif
 
 #ifdef ENABLE_OPENSSL
 #if OPENSSL_VERSION_NUMBER >= 0x00907000L
@@ -547,6 +568,12 @@ int main(int argc, char * argv[])
 			break;
 		case OPT_APPLICATION_ID:
 			opt_application_id = optarg;
+			break;
+		case OPT_ISSUER:
+			opt_issuer = optarg;
+			break;
+		case OPT_SUBJECT:
+			opt_subject = optarg;
 			break;
 		case OPT_NEW_PIN:
 			opt_new_pin = optarg;
@@ -787,7 +814,8 @@ int main(int argc, char * argv[])
 		if (opt_object_class_str == NULL)
 			util_fatal("You should specify type of the object to read");
 		if (opt_object_id_len == 0 && opt_object_label == NULL &&
-				opt_application_label == NULL && opt_application_id == NULL)
+				opt_application_label == NULL && opt_application_id == NULL &&
+				opt_issuer == NULL && opt_subject == NULL)
 			 util_fatal("You should specify at least one of the "
 					 "object ID, object label, application label or application ID\n");
 		read_object(session);
@@ -1023,6 +1051,9 @@ static void list_mechs(CK_SLOT_ID slot)
 		}
 		printf("\n");
 	}
+
+	if (mechs)
+		free(mechs);
 }
 
 static int login(CK_SESSION_HANDLE session, int login_type)
@@ -1308,9 +1339,10 @@ static void sign_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
 	int		fd, r;
 
 	if (!opt_mechanism_used)
-		opt_mechanism = find_mechanism(slot, CKF_SIGN|CKF_HW, 1, &opt_mechanism);
-	printf("Using signature algorithm %s\n", p11_mechanism_to_name(opt_mechanism));
+		if (!find_mechanism(slot, CKF_SIGN|CKF_HW, NULL, 0, &opt_mechanism))
+			util_fatal("Sign mechanism not supported\n");
 
+	printf("Using signature algorithm %s\n", p11_mechanism_to_name(opt_mechanism));
 	memset(&mech, 0, sizeof(mech));
 	mech.mechanism = opt_mechanism;
 
@@ -1402,12 +1434,11 @@ static void hash_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 	CK_ULONG	hash_len;
 	int		fd, r;
 
-	if (!opt_mechanism_used) {
-		opt_mechanism = find_mechanism(slot, CKF_DIGEST, 1, &opt_mechanism);
-		printf("Using digest algorithm %s\n",
-				p11_mechanism_to_name(opt_mechanism));
-	}
+	if (!opt_mechanism_used)
+		if (!find_mechanism(slot, CKF_DIGEST, NULL, 0, &opt_mechanism))
+			util_fatal("Digest mechanism is not supported\n");
 
+	printf("Using digest algorithm %s\n", p11_mechanism_to_name(opt_mechanism));
 	memset(&mech, 0, sizeof(mech));
 	mech.mechanism = opt_mechanism;
 
@@ -1738,6 +1769,7 @@ static int write_object(CK_SESSION_HANDLE session)
 	struct sc_object_id oid;
 	CK_RV rv;
 	int need_to_parse_certdata = 0;
+	unsigned char *oid_buf = NULL;
 #ifdef ENABLE_OPENSSL
 	struct x509cert_info cert;
 	struct rsakey_info rsa;
@@ -1920,9 +1952,6 @@ static int write_object(CK_SESSION_HANDLE session)
 	if (opt_object_class == CKO_PUBLIC_KEY) {
 		CK_OBJECT_CLASS clazz = CKO_PUBLIC_KEY;
 		CK_KEY_TYPE type = CKK_RSA;
-#ifdef ENABLE_OPENSSL
-		CK_ULONG modulus_bits = rsa.modulus_len * 8;
-#endif
 
 		FILL_ATTR(pubkey_templ[0], CKA_CLASS, &clazz, sizeof(clazz));
 		FILL_ATTR(pubkey_templ[1], CKA_KEY_TYPE, &type, sizeof(type));
@@ -1954,9 +1983,6 @@ static int write_object(CK_SESSION_HANDLE session)
 		FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_MODULUS,
 			rsa.modulus, rsa.modulus_len);
 		n_pubkey_attr++;
-		FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_MODULUS_BITS,
-			&modulus_bits, sizeof (modulus_bits));
-		n_pubkey_attr++;
 		FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_PUBLIC_EXPONENT,
 			rsa.public_exponent, rsa.public_exponent_len);
 		n_pubkey_attr++;
@@ -1984,9 +2010,15 @@ static int write_object(CK_SESSION_HANDLE session)
 		}
 
 		if (opt_application_id != NULL) {
-			sc_format_oid(&oid, opt_application_id);
-			FILL_ATTR(data_templ[n_data_attr], CKA_OBJECT_ID,
-				(unsigned char *)oid.value, sizeof(oid.value));
+			size_t len;
+
+			if (sc_format_oid(&oid, opt_application_id))
+				util_fatal("Invalid OID \"%s\"\n", opt_application_id);
+
+			if (sc_asn1_encode_object_id(&oid_buf, &len, &oid))
+				util_fatal("Cannot encode OID \"%s\"\n", opt_application_id);
+
+			FILL_ATTR(data_templ[n_data_attr], CKA_OBJECT_ID, oid_buf, len);
 			n_data_attr++;
 		}
 
@@ -2035,6 +2067,8 @@ static int write_object(CK_SESSION_HANDLE session)
 		show_object(session, privkey_obj);
 	}
 
+	if (oid_buf)
+		free(oid_buf);
 	return 1;
 }
 
@@ -2189,21 +2223,39 @@ done:
 }
 
 
-static int find_mechanism(CK_SLOT_ID slot, CK_FLAGS flags,
-		int stop_if_not_found, CK_MECHANISM_TYPE_PTR result)
+static int
+find_mechanism(CK_SLOT_ID slot, CK_FLAGS flags,
+		CK_MECHANISM_TYPE_PTR list, size_t list_len,
+		CK_MECHANISM_TYPE_PTR result)
 {
 	CK_MECHANISM_TYPE *mechs = NULL;
 	CK_ULONG	count = 0;
 
 	count = get_mechanisms(slot, &mechs, flags);
-	if (count == 0) {
-		if (stop_if_not_found)
-			util_fatal("No appropriate mechanism found");
-	} else {
-		/* X: why only first ? */
-		*result = mechs[0];
+	if (count)   {
+		if (list && list_len)   {
+			unsigned ii, jj;
+
+			for (jj=0; jj<count; jj++)   {
+				for (ii=0; ii<list_len; ii++)
+					if (*(mechs + jj) == *(list + ii))
+						break;
+				if (ii<list_len)
+					break;
+			}
+
+			if (jj < count && ii < list_len)
+				*result = mechs[jj];
+			else
+				count = 0;
+		}
+		else   {
+			*result = mechs[0];
+		}
+
 		free(mechs);
 	}
+
 	return count;
 }
 
@@ -2358,10 +2410,10 @@ derive_key(CK_SLOT_ID slot, CK_SESSION_HANDLE session, CK_OBJECT_HANDLE key)
 	};
 
 	if (!opt_mechanism_used)
-		opt_mechanism = find_mechanism(slot, CKF_DERIVE|CKF_HW, 1, &opt_mechanism);
-	printf("Using derive algorithm 0x%8.8lx %s\n",
-			opt_mechanism, p11_mechanism_to_name(opt_mechanism));
+		if (!find_mechanism(slot, CKF_DERIVE|CKF_HW, NULL, 0, &opt_mechanism))
+			util_fatal("Derive mechanism not supported\n");
 
+	printf("Using derive algorithm 0x%8.8lx %s\n", opt_mechanism, p11_mechanism_to_name(opt_mechanism));
 	memset(&mech, 0, sizeof(mech));
 	mech.mechanism = opt_mechanism;
 
@@ -2596,10 +2648,14 @@ show_key(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 		printf("%ssign", sepa);
 		sepa = ", ";
 	}
+
+	suppress_warn = 1;
 	if (!pub && getOPENSC_NON_REPUDIATION(sess, obj)) {
 		printf("%snon-repudiation", sepa);
 		sepa = ", ";
 	}
+	suppress_warn = 0;
+
 	if (pub && getVERIFY(sess, obj)) {
 		printf("%sverify", sepa);
 		sepa = ", ";
@@ -2620,9 +2676,9 @@ show_key(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 		printf("none");
 	printf("\n");
 
-	if (!pub && getALWAYS_AUTHENTICATE(sess, obj)) {
+	if (!pub && getALWAYS_AUTHENTICATE(sess, obj))
 		printf("  Access:     always authenticate\n");
-	}
+	suppress_warn = 0;
 }
 
 static void show_cert(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
@@ -2666,10 +2722,11 @@ static void show_cert(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 
 static void show_dobj(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 {
-	int	*app_oid;
-	char		*label;
+	unsigned char *oid_buf;
+	char *label;
 	CK_ULONG    size = 0;
 
+	suppress_warn = 1;
 	printf("Data object %u\n", (unsigned int) obj);
 	printf("  label:          ");
 	if ((label = getLABEL(sess, obj, NULL)) != NULL) {
@@ -2690,18 +2747,20 @@ static void show_dobj(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 	}
 
 	printf("  app_id:         ");
-	app_oid = (int *)getOBJECT_ID(sess, obj, &size);
-	if (app_oid != NULL && size) {
+	oid_buf = getOBJECT_ID(sess, obj, &size);
+	if (oid_buf != NULL && size) {
 		unsigned int	n;
+		struct sc_object_id oid;
 
-		size /= sizeof(int);
-		printf("%i", app_oid[0]);
-		if (app_oid[0] >= 0)
-			for (n = 1; (n < size) && (app_oid[n] >= 0); n++)
-				printf(".%i", app_oid[n]);
-
+		sc_init_oid(&oid);
+		sc_asn1_decode_object_id(oid_buf, size, &oid);
+		printf("%i", oid.value[0]);
+		if (oid.value[0] >= 0)
+			for (n = 1; (n < SC_MAX_OBJECT_ID_OCTETS) && (oid.value[n] >= 0); n++)
+				printf(".%i", oid.value[n]);
 		printf("\n");
-		free(app_oid);
+
+		free(oid_buf);
 	}
 	else   {
 		printf("<empty>\n");
@@ -2712,10 +2771,16 @@ static void show_dobj(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 		printf(" modifiable");
 	if (getPRIVATE(sess, obj))
 		printf(" private");
+	if (!getMODIFIABLE(sess, obj) && !getPRIVATE(sess, obj))
+		printf("<empty>\n");
+
 	printf ("\n");
+	suppress_warn = 0;
 }
 
-static void get_token_info(CK_SLOT_ID slot, CK_TOKEN_INFO_PTR info)
+
+static void
+get_token_info(CK_SLOT_ID slot, CK_TOKEN_INFO_PTR info)
 {
 	CK_RV		rv;
 
@@ -2724,8 +2789,9 @@ static void get_token_info(CK_SLOT_ID slot, CK_TOKEN_INFO_PTR info)
 		p11_fatal("C_GetTokenInfo", rv);
 }
 
-static CK_ULONG get_mechanisms(CK_SLOT_ID slot, CK_MECHANISM_TYPE_PTR *pList,
-		CK_FLAGS flags)
+
+static CK_ULONG
+get_mechanisms(CK_SLOT_ID slot, CK_MECHANISM_TYPE_PTR *pList, CK_FLAGS flags)
 {
 	CK_ULONG	m, n, ulCount = 0;
 	CK_RV		rv;
@@ -2766,10 +2832,11 @@ static int read_object(CK_SESSION_HANDLE session)
 	CK_OBJECT_CLASS clazz = opt_object_class;
 	CK_OBJECT_HANDLE obj = CK_INVALID_HANDLE;
 	int nn_attrs = 0;
-	unsigned char *value = NULL;
+	unsigned char *value = NULL, *oid_buf = NULL;
 	CK_ULONG len = 0;
 	FILE *out;
 	struct sc_object_id oid;
+	unsigned char subject[0x400], issuer[0x400];
 
 	if (opt_object_class_str != NULL)   {
 		FILL_ATTR(attrs[nn_attrs], CKA_CLASS,
@@ -2796,9 +2863,33 @@ static int read_object(CK_SESSION_HANDLE session)
 	}
 
 	if (opt_application_id != NULL)   {
-		sc_format_oid(&oid, opt_application_id);
-		FILL_ATTR(attrs[nn_attrs], CKA_OBJECT_ID,
-				(unsigned char *)oid.value, sizeof(oid.value));
+		size_t oid_buf_len;
+
+		if (sc_format_oid(&oid, opt_application_id))
+			util_fatal("Invalid OID \"%s\"\n", opt_application_id);
+
+		if (sc_asn1_encode_object_id(&oid_buf, &oid_buf_len, &oid))
+			util_fatal("Cannot encode OID \"%s\"\n", opt_application_id);
+
+		FILL_ATTR(attrs[nn_attrs], CKA_OBJECT_ID, oid_buf, oid_buf_len);
+		nn_attrs++;
+	}
+
+	if (opt_issuer != NULL)   {
+		size_t sz = sizeof(issuer);
+
+		if (sc_hex_to_bin(opt_issuer, issuer, &sz))
+			util_fatal("Invalid 'issuer' hexadecimal value");
+		FILL_ATTR(attrs[nn_attrs], CKA_ISSUER, issuer,  sz);
+		nn_attrs++;
+	}
+
+	if (opt_subject != NULL)   {
+		size_t sz = sizeof(subject);
+
+		if (sc_hex_to_bin(opt_subject, subject, &sz))
+			util_fatal("Invalid 'subject' hexadecimal value");
+		FILL_ATTR(attrs[nn_attrs], CKA_SUBJECT, subject,  sz);
 		nn_attrs++;
 	}
 
@@ -2828,6 +2919,9 @@ static int read_object(CK_SESSION_HANDLE session)
 		util_fatal("cannot write to '%s'\n", opt_output);
 	if (opt_output)
 		fclose(out);
+
+	if (oid_buf)
+		free(oid_buf);
 	return 1;
 }
 
@@ -2842,6 +2936,7 @@ static int delete_object(CK_SESSION_HANDLE session)
 	CK_OBJECT_HANDLE obj = CK_INVALID_HANDLE;
 	int nn_attrs = 0;
 	struct sc_object_id oid;
+	unsigned char *oid_buf = NULL;
 
 	if (opt_object_class_str != NULL)   {
 		FILL_ATTR(attrs[nn_attrs], CKA_CLASS,
@@ -2868,9 +2963,15 @@ static int delete_object(CK_SESSION_HANDLE session)
 	}
 
 	if (opt_application_id != NULL)   {
-		sc_format_oid(&oid, opt_application_id);
-		FILL_ATTR(attrs[nn_attrs], CKA_OBJECT_ID,
-				(unsigned char *)oid.value, sizeof(oid.value));
+		size_t oid_buf_len;
+
+		if (sc_format_oid(&oid, opt_application_id))
+			util_fatal("Invalid OID '%s'\n", opt_application_id);
+
+		if (sc_asn1_encode_object_id(&oid_buf, &oid_buf_len, &oid))
+			util_fatal("Cannot encode OID \"%s\"\n", opt_application_id);
+
+		FILL_ATTR(attrs[nn_attrs], CKA_OBJECT_ID, oid_buf, oid_buf_len);
 		nn_attrs++;
 	}
 
@@ -2882,6 +2983,9 @@ static int delete_object(CK_SESSION_HANDLE session)
 	rv = p11->C_DestroyObject(session, obj);
 	if (rv != CKR_OK)
 		p11_fatal("C_DestroyObject()", rv);
+
+	if (oid_buf)
+		free(oid_buf);
 
 	return 1;
 }
@@ -2942,11 +3046,13 @@ static int test_digest(CK_SESSION_HANDLE session)
 	if (rv != CKR_OK)
 		p11_fatal("C_OpenSession", rv);
 
-	if (!find_mechanism(sessionInfo.slotID, CKF_DIGEST, 0, &firstMechType)) {
+	if (!find_mechanism(sessionInfo.slotID, CKF_DIGEST, NULL, 0, &firstMechType)) {
 		printf("Digests: not implemented\n");
 		return errors;
-	} else
+	}
+	else    {
 		printf("Digests:\n");
+	}
 
 	/* 1st test */
 
@@ -3168,6 +3274,7 @@ static int sign_verify_openssl(CK_SESSION_HANDLE session,
 		EVP_sha1(),
 		EVP_md5(),
 		EVP_ripemd160(),
+		EVP_sha256(),
 	};
 #endif
 
@@ -3244,8 +3351,10 @@ static int test_signature(CK_SESSION_HANDLE sess)
 		CKM_SHA1_RSA_PKCS,
 		CKM_MD5_RSA_PKCS,
 		CKM_RIPEMD160_RSA_PKCS,
+		CKM_SHA256_RSA_PKCS,
 		0xffffff
 	};
+	size_t mechTypes_num = sizeof(mechTypes)/sizeof(CK_MECHANISM_TYPE);
 	unsigned char  *datas[] = {
 		/* PCKS1_wrap(SHA1_encode(SHA-1(verifyData))),
 		 * is done further on
@@ -3258,10 +3367,12 @@ static int test_signature(CK_SESSION_HANDLE sess)
 		verifyData,
 		verifyData,
 		verifyData,
+		verifyData,
 	};
 	CK_ULONG        dataLens[] = {
 		0,		/* should be modulus length, is done further on */
 		35,
+		sizeof(verifyData),
 		sizeof(verifyData),
 		sizeof(verifyData),
 		sizeof(verifyData),
@@ -3275,7 +3386,7 @@ static int test_signature(CK_SESSION_HANDLE sess)
 		return errors;
 	}
 
-	if (!find_mechanism(sessionInfo.slotID, CKF_SIGN | CKF_HW, 0, &firstMechType)) {
+	if (!find_mechanism(sessionInfo.slotID, CKF_SIGN | CKF_HW, mechTypes, mechTypes_num, &firstMechType)) {
 		printf("Signatures: not implemented\n");
 		return errors;
 	}
@@ -3519,7 +3630,7 @@ static int sign_verify(CK_SESSION_HANDLE session,
 
 		printf("    %s: ", p11_mechanism_to_name(*mech_type));
 		if (getALWAYS_AUTHENTICATE(session, priv_key))
-                	login(session,CKU_CONTEXT_SPECIFIC);
+			login(session,CKU_CONTEXT_SPECIFIC);
 
 		signat_len = sizeof(signat);
 		rv = p11->C_Sign(session, datas[j], data_lens[j], signat, &signat_len);
@@ -3568,7 +3679,7 @@ static int test_verify(CK_SESSION_HANDLE sess)
 		return errors;
 	}
 
-	if (!find_mechanism(sessionInfo.slotID, CKF_VERIFY, 0, &first_mech_type)) {
+	if (!find_mechanism(sessionInfo.slotID, CKF_VERIFY, NULL, 0, &first_mech_type)) {
 		printf("Verify: not implemented\n");
 		return errors;
 	}
@@ -3733,7 +3844,7 @@ static int test_unwrap(CK_SESSION_HANDLE sess)
 		return errors;
 	}
 
-	if (!find_mechanism(sessionInfo.slotID, CKF_UNWRAP | CKF_HW, 0, &firstMechType)) {
+	if (!find_mechanism(sessionInfo.slotID, CKF_UNWRAP | CKF_HW, NULL, 0, &firstMechType)) {
 		printf("Unwrap: not implemented\n");
 		return errors;
 	}
@@ -4023,7 +4134,7 @@ static void test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 	CK_BYTE			md5_and_digestinfo[34] = "\x30\x20\x30\x0c\x06\x08\x2a\x86\x48\x86\xf7\x0d\x02\x05\x05\x00\x04\x10";
 	CK_BYTE			*data, sig[512];
 	CK_ULONG		data_len, sig_len;
-	CK_BYTE			*id = (CK_BYTE *) "abcdefghijklmnopqrst";
+	CK_BYTE 		id[] = "abcdefghijklmnopqrst";
 	CK_ULONG		id_len = 20, mod_len = 0;
 	CK_BYTE			*label = (CK_BYTE *) "Just a label";
 	CK_ULONG		label_len = 12;
@@ -4348,21 +4459,18 @@ static void p11_fatal(const char *func, CK_RV rv)
 	if (module)
 		C_UnloadModule(module);
 
-	util_fatal("PKCS11 function %s failed: rv = %s (0x%0x)\n",
-		func, CKR2Str(rv), (unsigned int) rv);
+	util_fatal("PKCS11 function %s failed: rv = %s (0x%0x)\n", func, CKR2Str(rv), (unsigned int) rv);
 }
 
 static void p11_warn(const char *func, CK_RV rv)
 {
-	util_warn("PKCS11 function %s failed: rv = %s (0x%0x)\n",
-		func, CKR2Str(rv), (unsigned int) rv);
+	if (!suppress_warn)
+		util_warn("PKCS11 function %s failed: rv = %s (0x%0x)\n", func, CKR2Str(rv), (unsigned int) rv);
 }
 
 static void p11_perror(const char *msg, CK_RV rv)
 {
-	fprintf(stderr,
-		"  ERR: %s failed: %s (0x%0x)\n",
-		msg, CKR2Str(rv), (unsigned int) rv);
+	fprintf(stderr, "  ERR: %s failed: %s (0x%0x)\n", msg, CKR2Str(rv), (unsigned int) rv);
 }
 
 static int hex_to_bin(const char *in, unsigned char *out, size_t *outlen)

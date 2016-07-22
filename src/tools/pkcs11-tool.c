@@ -1188,22 +1188,35 @@ static int login(CK_SESSION_HANDLE session, int login_type)
 		pin = opt_pin ? (char *) opt_pin : (char *) opt_puk;
 
 	if (!pin && !(info.flags & CKF_PROTECTED_AUTHENTICATION_PATH)) {
-			printf("Logging in to \"%s\".\n", p11_utf8_to_local(info.label, sizeof(info.label)));
-		if ((login_type == CKU_SO && info.flags & CKF_SO_PIN_COUNT_LOW) ||
-				(login_type == CKU_USER && info.flags & CKF_USER_PIN_COUNT_LOW))
-			printf("WARNING: PIN count low\n");
-		else if ((login_type == CKU_SO && info.flags & CKF_SO_PIN_FINAL_TRY) ||
-				(login_type == CKU_USER && info.flags & CKF_USER_PIN_FINAL_TRY))
-			printf("WARNING: PIN final try\n");
-		else if ((login_type == CKU_SO && info.flags & CKF_SO_PIN_LOCKED) ||
-				(login_type == CKU_USER && info.flags & CKF_USER_PIN_LOCKED)) /* PIN is reported as locked but try to continue */
-			printf("WARNING: PIN reported locked\n"); 
-		if (login_type == CKU_SO)
+		printf("Logging in to \"%s\".\n", p11_utf8_to_local(info.label, sizeof(info.label)));
+		if (login_type == CKU_SO)   {
+			if (info.flags & CKF_SO_PIN_COUNT_LOW)
+				printf("WARNING: SO PIN count low\n");
+			if (info.flags & CKF_SO_PIN_FINAL_TRY)
+				printf("WARNING: SO PIN final try\n");
+			if (info.flags & CKF_SO_PIN_LOCKED)
+				printf("WARNING: SO PIN reported locked\n");
+			if (info.flags & CKF_SO_PIN_TO_BE_CHANGED)
+				printf("WARNING: SO PIN has to be changed\n");
+
 			printf("Please enter SO PIN: ");
-		else if (login_type == CKU_USER)
+		}
+		else if (login_type == CKU_USER)   {
+			if (info.flags & CKF_USER_PIN_COUNT_LOW)
+				printf("WARNING: User PIN count low\n");
+			if (info.flags & CKF_USER_PIN_FINAL_TRY)
+				printf("WARNING: User PIN final try\n");
+			if (info.flags & CKF_USER_PIN_LOCKED)
+				printf("WARNING: User PIN reported locked\n");
+			if (info.flags & CKF_USER_PIN_TO_BE_CHANGED)
+				printf("WARNING: User PIN has to be changed\n");
+
 			printf("Please enter User PIN: ");
-		else if (login_type == CKU_CONTEXT_SPECIFIC)
+		}
+		else if (login_type == CKU_CONTEXT_SPECIFIC)   {
 			printf("Please enter context specific PIN: ");
+		}
+
 		r = util_getpass(&pin, &len, stdin);
 		if (r < 0)
 			util_fatal("No PIN entered");
@@ -5090,12 +5103,12 @@ static const char *p11_token_info_flags(CK_FLAGS value)
 		{ CKF_RNG, "rng" },
 		{ CKF_SO_PIN_TO_BE_CHANGED, "SO PIN to be changed"},
 		{ CKF_SO_PIN_COUNT_LOW, "SO PIN count low" },
-		{ CKF_SO_PIN_FINAL_TRY, "final SO PIN try" },		
-		{ CKF_SO_PIN_LOCKED, "SO PIN locked" },				
+		{ CKF_SO_PIN_FINAL_TRY, "final SO PIN try" },
+		{ CKF_SO_PIN_LOCKED, "SO PIN locked" },
 		{ CKF_TOKEN_INITIALIZED, "token initialized" },
 		{ CKF_USER_PIN_COUNT_LOW, "user PIN count low" },
 		{ CKF_USER_PIN_FINAL_TRY, "final user PIN try" },
-		{ CKF_USER_PIN_INITIALIZED, "PIN initialized" },		
+		{ CKF_USER_PIN_INITIALIZED, "PIN initialized" },
 		{ CKF_USER_PIN_LOCKED, "user PIN locked" },
 		{ CKF_USER_PIN_TO_BE_CHANGED, "user PIN to be changed"},
 		{ CKF_WRITE_PROTECTED, "readonly" },

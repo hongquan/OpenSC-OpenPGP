@@ -178,15 +178,24 @@ jpki_select_file(struct sc_card *card,
 	LOG_TEST_RET(card->ctx, rc, "APDU transmit failed");
 	rc = sc_check_sw(card, apdu.sw1, apdu.sw2);
 	LOG_TEST_RET(card->ctx, rc, "SW Check failed");
-	if (file_out) {
+	if (!file_out) {
+		LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
+	}
+
+	/* read size of auth certificate file */
+	if (path->len == 2 && memcmp(path->value, "\x00\x0a", 2) == 0) {
+		u8 buf[4];
+		rc = sc_read_binary(card, 0, buf, 4, 0);
+		LOG_TEST_RET(card->ctx, rc, "SW Check failed");
 		file = sc_file_new();
 		if (!file) {
 			LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
 		}
 		file->path = *path;
-		file->size = 2048;
+		file->size = (buf[2] << 8 | buf[3]) + 4;
 		*file_out = file;
 	}
+
 	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 }
 
@@ -323,11 +332,13 @@ jpki_compute_signature(sc_card_t * card,
 	apdu.le = 0;
 	rc = sc_transmit_apdu(card, &apdu);
 	LOG_TEST_RET(card->ctx, rc, "APDU transmit failed");
+	rc = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	LOG_TEST_RET(card->ctx, rc, "SW Check failed");
 	if (apdu.resplen > outlen) {
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
 	}
 	memcpy(out, resp, apdu.resplen);
-	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
+	LOG_FUNC_RETURN(card->ctx, apdu.resplen);
 }
 
 static struct sc_card_driver *

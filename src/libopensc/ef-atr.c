@@ -31,23 +31,17 @@
 #include "asn1.h"
 #include "iso7816.h"
 
-static int 
+static int
 sc_parse_ef_atr_content(struct sc_card *card, unsigned char *buf, size_t buflen)
 {
 	struct sc_context *ctx = card->ctx;
 	const unsigned char *tag = NULL;
 	size_t taglen;
 	struct sc_ef_atr ef_atr;
-	unsigned char category;
 
 	LOG_FUNC_CALLED(ctx);
 
-	category = *buf;
-
 	memset(&ef_atr, 0, sizeof(struct sc_ef_atr));
-	/* IAS/ECC specific: skip second 'zero' byte */
-	if (*(++buf)  == 0x00)	
-		++buf;
 
 	tag = sc_asn1_find_tag(ctx, buf, buflen, ISO7816_TAG_II_CARD_SERVICE, &taglen);
 	if (tag && taglen >= 1)   {
@@ -72,6 +66,21 @@ sc_parse_ef_atr_content(struct sc_card *card, unsigned char *buf, size_t buflen)
 		ef_atr.card_capabilities = *(tag + 2);
 		sc_log(ctx, "EF.ATR: DF selection %X, unit_size %X, card caps %X", 
 				ef_atr.df_selection, ef_atr.unit_size, ef_atr.card_capabilities);
+	}
+
+	if (ef_atr.card_capabilities & ISO7816_CAP_EXTENDED_LENGTH_INFO) {
+		/* Extended Length Information in EF.ATR/INFO */
+		tag = sc_asn1_find_tag(ctx, buf, buflen, ISO7816_TAG_II_EXTENDED_LENGTH, &taglen);
+		if (tag && taglen >= 8) {
+			/* The command- and response-APDU size limitations are defined by
+			 * two integers, each nested in a DO'02'.
+			 * We skip parsing the nested DOs and jump directly to the numbers */
+			ef_atr.max_command_apdu = bebytes2ushort(tag + 2);
+			ef_atr.max_response_apdu = bebytes2ushort(tag + 6);
+			sc_log(ctx, "EF.ATR: Biggest command APDU %u bytes, response APDU %u", 
+					(unsigned long) ef_atr.max_command_apdu,
+					(unsigned long) ef_atr.max_response_apdu);
+		}
 	}
 
 	tag = sc_asn1_find_tag(ctx, buf, buflen, ISO7816_TAG_II_AID, &taglen);
@@ -105,12 +114,10 @@ sc_parse_ef_atr_content(struct sc_card *card, unsigned char *buf, size_t buflen)
 		}
 	}
 
-	if (category == ISO7816_II_CATEGORY_TLV)   {
-		tag = sc_asn1_find_tag(ctx, buf, buflen, ISO7816_TAG_II_STATUS_SW, &taglen);
-		if (tag && taglen == 2)   {
-			ef_atr.status = *(tag + 0) * 0x100 + *(tag + 1);
-			sc_log(ctx, "EF.ATR: status word 0x%X", ef_atr.status);
-		}
+	tag = sc_asn1_find_tag(ctx, buf, buflen, ISO7816_TAG_II_STATUS_SW, &taglen);
+	if (tag && taglen == 2)   {
+		ef_atr.status = *(tag + 0) * 0x100 + *(tag + 1);
+		sc_log(ctx, "EF.ATR: status word 0x%X", ef_atr.status);
 	}
 
 	if (!card->ef_atr)

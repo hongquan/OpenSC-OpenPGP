@@ -589,6 +589,10 @@ int main(int argc, char **argv)
 	/* decode options */
 	argind = decode_options(argc, argv);
 
+	/* fail on too many arguments */
+	if (argind > argc)
+		util_print_usage_and_die(app_name, options, option_help, NULL);
+
 	/* connect to the card */
 	memset(&ctx_param, 0, sizeof(ctx_param));
 	ctx_param.ver      = 0;
@@ -622,10 +626,6 @@ int main(int argc, char **argv)
 		exit_status = EXIT_FAILURE;
 		goto out;
 	}
-
-	/* fail on too many arguments */
-	if (argind > argc)
-		util_print_usage_and_die(app_name, options, option_help, NULL);
 
 	/* set default action */
 	if (!actions)

@@ -43,8 +43,8 @@
 #include "libopensc/cardctl.h"
 #include "libopensc/log.h"
 #include "libopensc/errors.h"
-#include "util.h"
 #include "libopensc/log.h"
+#include "util.h"
 
 #define OPT_RAW     256
 #define OPT_PRETTY  257
@@ -101,16 +101,16 @@ static const struct option options[] = {
 	{ "pretty",    no_argument,       NULL, OPT_PRETTY },
 	{ "card-info", no_argument,       NULL, 'C'        },
 	{ "user-info", no_argument,       NULL, 'U'        },
-	{ "gen-key",   required_argument, NULL, 'G'        },
-	{ "key-length",required_argument, NULL, 'L'        },
-	{ "help",      no_argument,       NULL, 'h'        },
-	{ "verbose",   no_argument,       NULL, 'v'        },
-	{ "version",   no_argument,       NULL, 'V'        },
-	{ "erase",     no_argument,       NULL, 'E'        },
 	{ "verify",    required_argument, NULL, OPT_VERIFY },
 	{ "pin",       required_argument, NULL, OPT_PIN },
+	{ "gen-key",   required_argument, NULL, 'G'        },
+	{ "key-length",required_argument, NULL, 'L'        },
+	{ "erase",     no_argument,       NULL, 'E'        },
 	{ "del-key",   required_argument, NULL, OPT_DELKEY },
 	{ "do",        required_argument, NULL, 'd' },
+	{ "help",      no_argument,       NULL, 'h'        },
+	{ "version",   no_argument,       NULL, 'V'        },
+	{ "verbose",   no_argument,       NULL, 'v'        },
 	{ NULL, 0, NULL, 0 }
 };
 
@@ -122,16 +122,16 @@ static const char *option_help[] = {
 	"Print values in pretty format",
 /* C */	NULL,
 /* U */	"Show card holder information",
+	"Verify PIN (CHV1, CHV2, CHV3)",
+	"PIN string",
 /* G */ "Generate key",
 /* L */ "Key length (default 2048)",
-/* h */	"Print this help message",
-/* v */	"Verbose operation. Use several times to enable debug output.",
-/* V */	"Show version number",
 /* E */	"Erase (reset) the card",
-	"Verify PIN (CHV1, CHV2, CHV3...)",
-	"PIN string",
 	"Delete key (1, 2, 3 or all)",
 /* d */ "Dump private data object number <arg> (i.e. PRIVATE-DO-<arg>)",
+/* h */	"Print this help message",
+/* V */	"Show version number",
+/* v */	"Verbose operation. Use several times to enable debug output.",
 };
 
 static const struct ef_name_map openpgp_data[] = {

@@ -51,6 +51,13 @@
 #define OPT_VERIFY  258
 #define OPT_PIN     259
 #define OPT_DELKEY  260
+#define OPT_IMPORT_AES  261
+
+/* DO containing AES key */
+#define DO_AES      0xd5
+
+/* Accept maximum 256 bits (32 bytes) of AES key */
+#define MAX_AES_LEN 32
 
 /* define structures */
 struct ef_name_map {
@@ -80,6 +87,9 @@ static int opt_cardinfo = 0;
 static char *exec_program = NULL;
 static int opt_genkey = 0;
 static int opt_keylen = 0;
+static int opt_import_aes = 0;
+static u8 key_aes[MAX_AES_LEN];
+static size_t len_aes = MAX_AES_LEN;
 static u8 key_id = 0;
 static unsigned int key_len = 2048;
 static int opt_verify = 0;
@@ -105,6 +115,7 @@ static const struct option options[] = {
 	{ "pin",       required_argument, NULL, OPT_PIN },
 	{ "gen-key",   required_argument, NULL, 'G'        },
 	{ "key-length",required_argument, NULL, 'L'        },
+	{ "import-aes",required_argument, NULL, OPT_IMPORT_AES },
 	{ "erase",     no_argument,       NULL, 'E'        },
 	{ "del-key",   required_argument, NULL, OPT_DELKEY },
 	{ "do",        required_argument, NULL, 'd' },
@@ -126,6 +137,7 @@ static const char *option_help[] = {
 	"PIN string",
 /* G */ "Generate key",
 /* L */ "Key length (default 2048)",
+	"Import AES key from hex string (need CHV3 verification)",
 /* E */	"Erase (reset) the card",
 	"Delete key (1, 2, 3 or all)",
 /* d */ "Dump private data object number <arg> (i.e. PRIVATE-DO-<arg>)",
@@ -247,6 +259,10 @@ static void display_data(const struct ef_name_map *mapping, char *value)
 static int decode_options(int argc, char **argv)
 {
 	int c;
+	int err = SC_SUCCESS;
+
+	/* reset key_aes array */
+	memset(key_aes, 0, MAX_AES_LEN);
 
 	while ((c = getopt_long(argc, argv,"r:x:CUG:L:EhwvVd:", options, (int *) 0)) != EOF) {
 		switch (c) {
@@ -291,6 +307,26 @@ static int decode_options(int argc, char **argv)
 		case 'L':
 			opt_keylen++;
 			key_len = atoi(optarg);
+			actions++;
+			break;
+		case OPT_IMPORT_AES:
+			opt_import_aes++;
+			err = sc_hex_to_bin(optarg, key_aes, &len_aes);
+			/* Validate AES key to import */
+			if (err == SC_ERROR_BUFFER_TOO_SMALL) {
+				util_error("AES key is too long. Accept 128 and 256 only!\n");
+				exit(EXIT_FAILURE);
+			}
+			if (err < 0) {
+				util_error("Invalid hex string of AES key!\n");
+				exit(EXIT_FAILURE);
+			}
+			if (len_aes != (128 / 8) && len_aes != (256 / 8)) {
+				util_error(
+					"Key length is wrong (%zu). Accept 128 and 256 only!\n",
+					len_aes * 8);
+				exit(EXIT_FAILURE);
+			}
 			actions++;
 			break;
 		case 'h':
@@ -454,6 +490,19 @@ int do_genkey(sc_card_t *card, u8 key_id, unsigned int key_len)
 		return 1;
 	}
 	printf("Fingerprint:\n%s\n", (char *)sc_dump_hex(fingerprints + 20*(key_id - 1), 20));
+	return 0;
+}
+
+/* Import AES key */
+int do_import_aes(sc_card_t *card, const u8 *key_buf, size_t key_len)
+{
+	int r = SC_SUCCESS;
+	r = sc_put_data(card, DO_AES, key_buf, key_len);
+	if (r < 0) {
+		printf("Failed to import AES key. Error %s.\n", sc_strerror(r));
+		return 1;
+	}
+	printf("Import AES key successfully.\n");
 	return 0;
 }
 
@@ -644,6 +693,9 @@ int main(int argc, char **argv)
 
 	if (opt_genkey)
 		exit_status |= do_genkey(card, key_id, key_len);
+
+	if (opt_import_aes)
+		exit_status |= do_import_aes(card, key_aes, len_aes);
 
 	if (exec_program) {
 		char *const largv[] = {exec_program, NULL};

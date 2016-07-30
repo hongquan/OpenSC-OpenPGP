@@ -181,6 +181,8 @@ static int		pgp_get_pubkey_pem(sc_card_t *, unsigned int,
 #define DO_NAME                  0x5b
 #define DO_LANG_PREF             0x5f2d
 #define DO_SEX                   0x5f35
+/* DO containing AES key */
+#define DO_AES                   0xd5
 
 
 /* Maximum length for response buffer when reading pubkey.
@@ -238,7 +240,7 @@ static struct do_info		pgp1_objects[] = {	/* OpenPGP card spec 1.1 */
 	{ 0, 0, 0, NULL, NULL },
 };
 
-static struct do_info		pgp2_objects[] = {	/* OpenPGP card spec 2.0 */
+static struct do_info		pgp2_objects[] = {  /* OpenPGP card spec 2.0+ */
 	{ 0x004d, CONSTRUCTED, READ_NEVER  | WRITE_PIN3,  NULL,               sc_put_data },
 	{ 0x004f, SIMPLE,      READ_ALWAYS | WRITE_NEVER, sc_get_data,        NULL        },
 	{ 0x005b, SIMPLE,      READ_ALWAYS | WRITE_PIN3,  NULL,               sc_put_data },
@@ -270,6 +272,7 @@ static struct do_info		pgp2_objects[] = {	/* OpenPGP card spec 2.0 */
 	{ 0x00d1, SIMPLE,      READ_NEVER  | WRITE_PIN3,  NULL,               sc_put_data },
 	{ 0x00d2, SIMPLE,      READ_NEVER  | WRITE_PIN3,  NULL,               sc_put_data },
 	{ 0x00d3, SIMPLE,      READ_NEVER  | WRITE_PIN3,  NULL,               sc_put_data },
+	{ DO_AES, SIMPLE,      READ_NEVER  | WRITE_PIN3,  NULL,               sc_put_data },
 	{ 0x00f4, CONSTRUCTED, READ_NEVER  | WRITE_PIN3,  NULL,               sc_put_data },
 	{ 0x0101, SIMPLE,      READ_ALWAYS | WRITE_PIN2,  sc_get_data,        sc_put_data },
 	{ 0x0102, SIMPLE,      READ_ALWAYS | WRITE_PIN3,  sc_get_data,        sc_put_data },

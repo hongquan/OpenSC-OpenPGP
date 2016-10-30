@@ -118,6 +118,14 @@ enum _card_state {
 	CARD_STATE_ACTIVATED      = 0x05
 };
 
+/* Indicate which algorithm we want to use in DECIPHER operation
+ * OpenPGP card spec, section 7.2.9 */
+enum _decipher_algo {
+	DEC_RSA,
+	DEC_AES
+	/* Future: ECDSA */
+};
+
 typedef struct pgp_blob {
 	struct pgp_blob *	next;	/* pointer to next sibling */
 	struct pgp_blob *	parent;	/* pointer to parent */
@@ -311,6 +319,7 @@ struct pgp_priv_data {
 
 	enum _card_state	state;		/* card state */
 	enum _ext_caps		ext_caps;	/* extended capabilities */
+	enum _decipher_algo decipher_algo;
 
 	size_t			max_challenge_size;
 	size_t			max_cert_size;
@@ -1679,8 +1688,8 @@ pgp_decipher(sc_card_t *card, const u8 *in, size_t inlen,
 
 	LOG_FUNC_CALLED(card->ctx);
 
-	/* There's some funny padding indicator that must be
-	 * prepended... hmm. */
+	/* Prepend a padding indicator: 00 for RSA, 02 for AES (OpenPGP 2.1).
+	 * OpenPGP card spec, section 7.2.9 */
 	if (!(temp = malloc(inlen + 1)))
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
 	temp[0] = '\0';

@@ -18,10 +18,22 @@
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
-
 #include "config.h"
-#include <ctype.h>
+
+#define _XOPEN_SOURCE 500
 #include <assert.h>
+#include <ctype.h>
+#ifdef _WIN32
+#ifdef __MINGW32__
+// work around for https://sourceforge.net/p/mingw-w64/bugs/476/
+#include <windows.h>
+#endif
+#include <shellapi.h>
+#include <tchar.h>
+#else
+#include <ftw.h>
+#endif
+#include <stdio.h>
 
 #ifdef ENABLE_OPENSSL
 #if defined(HAVE_INTTYPES_H)
@@ -46,6 +58,7 @@ static const char *app_name = "pkcs15-tool";
 
 static int opt_wait = 0;
 static int opt_no_cache = 0;
+static int opt_clear_cache = 0;
 static char * opt_auth_id = NULL;
 static char * opt_reader = NULL;
 static char * opt_cert = NULL;
@@ -69,6 +82,7 @@ enum {
 	OPT_READER,
 	OPT_PIN_ID,
 	OPT_NO_CACHE,
+	OPT_CLEAR_CACHE,
 	OPT_LIST_PUB,
 	OPT_READ_PUB,
 #if defined(ENABLE_OPENSSL) && (defined(_WIN32) || defined(HAVE_INTTYPES_H))
@@ -93,7 +107,6 @@ static int	authenticate(sc_pkcs15_object_t *obj);
 
 static const struct option options[] = {
 	{ "version",		0, NULL,			OPT_PRINT_VERSION },
-	{ "learn-card",		no_argument, NULL,		'L' },
 	{ "list-applications",	no_argument, NULL,		OPT_LIST_APPLICATIONS },
 	{ "read-certificate",	required_argument, NULL,	'r' },
 	{ "list-certificates",	no_argument, NULL,		'c' },
@@ -121,6 +134,7 @@ static const struct option options[] = {
 	{ "verify-pin",		no_argument, NULL,		OPT_VERIFY_PIN },
 	{ "output",		required_argument, NULL,	'o' },
 	{ "no-cache",		no_argument, NULL,		OPT_NO_CACHE },
+	{ "clear-cache",	no_argument, NULL,		OPT_CLEAR_CACHE },
 	{ "auth-id",		required_argument, NULL,	'a' },
 	{ "aid",		required_argument, NULL,	OPT_BIND_TO_AID },
 	{ "wait",		no_argument, NULL,		'w' },
@@ -131,7 +145,6 @@ static const struct option options[] = {
 
 static const char *option_help[] = {
 	"Print OpenSC package version",
-	"Stores card info to cache",
 	"List the on-card PKCS#15 applications",
 	"Reads certificate with ID <arg>",
 	"Lists certificates",
@@ -159,6 +172,7 @@ static const char *option_help[] = {
 	"Verify PIN after card binding (without 'auth-id' the first non-SO, non-Unblock PIN will be verified)",
 	"Outputs to file <arg>",
 	"Disable card caching",
+	"Clear card caching",
 	"The auth ID of the PIN to use",
 	"Specify AID of the on-card PKCS#15 application to bind to (in hexadecimal form)",
 	"Wait for card insertion",
@@ -248,6 +262,7 @@ static void print_cert_info(const struct sc_pkcs15_object *obj)
 	if (rv >= 0 && cert_parsed)   {
 		printf("\tEncoded serial : %02X %02X ", *(cert_parsed->serial), *(cert_parsed->serial + 1));
 		util_hex_dump(stdout, cert_parsed->serial + 2, cert_parsed->serial_len - 2, "");
+		printf("\n");
 		sc_pkcs15_free_certificate(cert_parsed);
 	}
 }
@@ -1121,8 +1136,10 @@ static u8 * get_pin(const char *prompt, sc_pkcs15_object_t *pin_obj)
 		r = util_getpass(&pincode, &len, stdin);
 		if (r < 0)
 			return NULL;
-		if (!pincode || strlen(pincode) == 0)
+		if (!pincode || strlen(pincode) == 0) {
+			free(pincode);
 			return NULL;
+		}
 		if (strlen(pincode) < pinfo->attrs.pin.min_length) {
 			printf("PIN code too short, try again.\n");
 			continue;
@@ -1131,9 +1148,76 @@ static u8 * get_pin(const char *prompt, sc_pkcs15_object_t *pin_obj)
 			printf("PIN code too long, try again.\n");
 			continue;
 		}
-		return (u8 *) strdup(pincode);
+		return (u8 *) pincode;
 	}
 }
+
+#ifdef _WIN32
+static int clear_cache(void)
+{
+	TCHAR dirname[PATH_MAX];
+	SHFILEOPSTRUCT fileop;
+	int r;
+
+	fileop.hwnd   = NULL;      // no status display
+	fileop.wFunc  = FO_DELETE; // delete operation
+	fileop.pFrom  = dirname;   // source file name as double null terminated string
+	fileop.pTo    = NULL;      // no destination needed
+	fileop.fFlags = FOF_NOCONFIRMATION|FOF_SILENT;  // do not prompt the user
+
+	fileop.fAnyOperationsAborted = FALSE;
+	fileop.lpszProgressTitle     = NULL;
+	fileop.hNameMappings         = NULL;
+
+	/* remove the user's cache directory */
+	if ((r = sc_get_cache_dir(ctx, dirname, sizeof(dirname))) < 0)
+		return r;
+	dirname[_tcslen(dirname)+1] = 0;
+
+	printf("Deleting %s...", dirname);
+	r = SHFileOperation(&fileop);
+	if (r == 0) {
+		printf(" OK\n");
+	} else {
+		printf(" Error\n");
+	}
+
+	_tcscpy(dirname, _T("C:\\Windows\\System32\\config\\systemprofile\\eid-cache"));
+	dirname[_tcslen(dirname)+1] = 0;
+
+	printf("Deleting %s...", dirname);
+	r = SHFileOperation(&fileop);
+	if (r == 0) {
+		printf(" OK\n");
+	} else {
+		printf(" Error\n");
+	}
+
+	return r;
+}
+
+#else
+
+static int unlink_cb(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf)
+{
+	int r = remove(fpath);
+	if (r)
+		perror(fpath);
+	return r;
+}
+static int clear_cache(void)
+{
+	char dirname[PATH_MAX];
+	int r = 0;
+
+	/* remove the user's cache directory */
+	if ((r = sc_get_cache_dir(ctx, dirname, sizeof(dirname))) < 0)
+		return r;
+	r = nftw(dirname, unlink_cb, 64, FTW_DEPTH | FTW_PHYS);
+	return r;
+}
+#endif
+
 
 static int verify_pin(void)
 {
@@ -1491,6 +1575,7 @@ static int change_pin(void)
 
 	if (pincode && strlen((char *) pincode) == 0) {
 		fprintf(stderr, "No PIN code supplied.\n");
+		free(pincode);
 		return 2;
 	}
 
@@ -1510,6 +1595,7 @@ static int change_pin(void)
 		if (newpin == NULL || strlen((char *) newpin) == 0)   {
 			fprintf(stderr, "No new PIN value supplied.\n");
 			free(newpin);
+			free(pincode);
 			return 2;
 		}
 
@@ -1546,151 +1632,6 @@ static int change_pin(void)
 	return 0;
 }
 
-static int read_and_cache_file(const sc_path_t *path)
-{
-	sc_file_t *tfile;
-	const sc_acl_entry_t *e;
-	u8 *buf;
-	int r;
-	size_t size;
-
-	if (verbose) {
-		printf("Reading file ");
-		util_hex_dump(stdout, path->value, path->len, "");
-		printf("...\n");
-	}
-	r = sc_select_file(card, path, &tfile);
-	if (r != 0) {
-		fprintf(stderr, "sc_select_file() failed: %s\n", sc_strerror(r));
-		return -1;
-	}
-	e = sc_file_get_acl_entry(tfile, SC_AC_OP_READ);
-	if (e != NULL && e->method != SC_AC_NONE) {
-		if (verbose)
-			printf("Skipping; ACL for read operation is not NONE.\n");
-		return -1;
-	}
-	if (tfile->size) {
-		size = tfile->size;
-	} else {
-		size = 1024;
-	}
-	buf = malloc(size);
-	if (!buf) {
-		printf("out of memory!");
-		return -1;
-	}
-	if (tfile->ef_structure == SC_FILE_EF_LINEAR_VARIABLE_TLV) {
-		int i;
-		size_t l, record_len;
-		unsigned char *head = buf;
-
-		for (i=1;  ; i++) {
-			l = size - (head - buf);
-			if (l > 256) { l = 256; }
-			r = sc_read_record(p15card->card, i, head, l, SC_RECORD_BY_REC_NR);
-			if (r == SC_ERROR_RECORD_NOT_FOUND) {
-				r = 0;
-				break;
-			}
-			if (r < 0) {
-				free(buf);
-				return -1;
-			}
-			if (r < 2)
-				break;
-			record_len = head[1];
-			if (record_len != 0xff) {
-				memmove(head,head+2,r-2);
-				head += (r-2);
-			}
-			else {
-				if (r < 4)
-					break;
-				memmove(head,head+4,r-4);
-				head += (r-4);
-			}
-		}
-		r = head - buf;
-
-	}
-	else {
-
-		r = sc_read_binary(card, 0, buf, size, 0);
-		if (r < 0) {
-			fprintf(stderr, "sc_read_binary() failed: %s\n", sc_strerror(r));
-			free(buf);
-			return -1;
-		}
-	}
-	r = sc_pkcs15_cache_file(p15card, path, buf, r);
-	if (r) {
-		fprintf(stderr, "Unable to cache file: %s\n", sc_strerror(r));
-		free(buf);
-		return -1;
-	}
-	sc_file_free(tfile);
-	free(buf);
-	return 0;
-}
-
-static int learn_card(void)
-{
-	char dir[PATH_MAX];
-	int r, i, cert_count;
-	struct sc_pkcs15_object *certs[32];
-	struct sc_pkcs15_df *df;
-
-	r = sc_get_cache_dir(ctx, dir, sizeof(dir));
-	if (r) {
-		fprintf(stderr, "Unable to find cache directory: %s\n", sc_strerror(r));
-		return 1;
-	}
-
-	printf("Using cache directory '%s'.\n", dir);
-	r = sc_pkcs15_get_objects(p15card, SC_PKCS15_TYPE_CERT_X509, certs, 32);
-	if (r < 0) {
-		fprintf(stderr, "Certificate enumeration failed: %s\n", sc_strerror(r));
-		return 1;
-	}
-	cert_count = r;
-	r = sc_pkcs15_get_objects(p15card, SC_PKCS15_TYPE_PRKEY, NULL, 0);
-	if (r < 0) {
-		fprintf(stderr, "Private key enumeration failed: %s\n", sc_strerror(r));
-		return 1;
-	}
-	r = sc_pkcs15_get_objects(p15card, SC_PKCS15_TYPE_AUTH, NULL, 0);
-	if (r < 0) {
-		fprintf(stderr, "Authentication objects enumeration failed: %s\n", sc_strerror(r));
-		return 1;
-	}
-
-	/* Cache all relevant DF files. The cache
-	 * directory is created automatically. */
-	for (df = p15card->df_list; df != NULL; df = df->next)
-		read_and_cache_file(&df->path);
-	printf("Caching %d certificate(s)...\n", cert_count);
-	for (i = 0; i < cert_count; i++) {
-		sc_path_t tpath;
-		struct sc_pkcs15_cert_info *cinfo = (struct sc_pkcs15_cert_info *) certs[i]->data;
-
-		printf("[%.*s]\n", (int) sizeof certs[i]->label, certs[i]->label);
-
-		memset(&tpath, 0, sizeof(tpath));
-		tpath = cinfo->path;
-		if (tpath.type == SC_PATH_TYPE_FILE_ID) {
-			/* prepend application DF path in case of a file id */
-			r = sc_concatenate_path(&tpath, &p15card->file_app->path, &tpath);
-			if (r != SC_SUCCESS)
-				return r;
-		}
-
-		read_and_cache_file(&tpath);
-	}
-
-	return 0;
-}
-
 static int test_update(sc_card_t *in_card)
 {
 	sc_apdu_t apdu;
@@ -1701,7 +1642,9 @@ static int test_update(sc_card_t *in_card)
 	static u8 fci_bad[] = { 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 	static u8 fci_good[] = { 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00 };
 
-
+	r = sc_lock(card);
+	if (r < 0)
+		return r;
 
 	if (strcmp("cardos",in_card->driver->short_name) != 0) {
 		printf("not using the cardos driver, card is fine.\n");
@@ -1779,10 +1722,12 @@ static int test_update(sc_card_t *in_card)
 		goto bad_fci;
 	}
 end:
+	sc_unlock(card);
 	/* 0 = card ok, 1 = card vulnerable, 2 = problem! */
 	return rc;
 
 bad_fci:
+	sc_unlock(card);
 	util_hex_dump(stdout,rbuf,apdu.resplen," ");
 	printf("\n");
 	return 2;
@@ -1802,6 +1747,10 @@ static int update(sc_card_t *in_card)
 	apdu.lc = sizeof(cmd1);
 	apdu.datalen = sizeof(cmd1);
 	apdu.data = cmd1;
+
+	r = sc_lock(card);
+	if (r < 0)
+		return r;
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r < 0) {
@@ -1894,6 +1843,7 @@ skip_change_lifecycle:
 
 	printf("security update applied successfully.\n");
 end:
+	sc_unlock(card);
 	return 0;
 }
 
@@ -1917,7 +1867,6 @@ int main(int argc, char * const argv[])
 	int do_verify_pin = 0;
 	int do_change_pin = 0;
 	int do_unblock_pin = 0;
-	int do_learn_card = 0;
 	int do_test_update = 0;
 	int do_update = 0;
 	int do_print_version = 0;
@@ -2007,10 +1956,6 @@ int main(int argc, char * const argv[])
 			opt_rfc4716 = 1;
 			break;
 #endif
-		case 'L':
-			do_learn_card = 1;
-			action_count++;
-			break;
 		case 'T':
 			do_test_update = 1;
 			action_count++;
@@ -2050,6 +1995,10 @@ int main(int argc, char * const argv[])
 		case OPT_NO_CACHE:
 			opt_no_cache++;
 			break;
+		case OPT_CLEAR_CACHE:
+			opt_clear_cache = 1;
+			action_count++;
+			break;
 		case 'w':
 			opt_wait = 1;
 			break;
@@ -2076,12 +2025,18 @@ int main(int argc, char * const argv[])
 		return 1;
 	}
 
+	if (opt_clear_cache) {
+		if ((err = clear_cache()))
+			goto end;
+		action_count--;
+	}
+
 	if (verbose > 1) {
 		ctx->debug = verbose;
 		sc_ctx_log_to_file(ctx, "stderr");
 	}
 
-	err = util_connect_card(ctx, &card, opt_reader, opt_wait, verbose);
+	err = util_connect_card_ex(ctx, &card, opt_reader, opt_wait, 0, verbose);
 	if (err)
 		goto end;
 
@@ -2117,11 +2072,6 @@ int main(int argc, char * const argv[])
 		if ((err = verify_pin()))
 			goto end;
 
-	if (do_learn_card) {
-		if ((err = learn_card()))
-			goto end;
-		action_count--;
-	}
 	if (do_list_certs) {
 		if ((err = list_certificates()))
 			goto end;
@@ -2209,10 +2159,8 @@ int main(int argc, char * const argv[])
 end:
 	if (p15card)
 		sc_pkcs15_unbind(p15card);
-	if (card) {
-		sc_unlock(card);
+	if (card)
 		sc_disconnect_card(card);
-	}
 	if (ctx)
 		sc_release_context(ctx);
 	return err;

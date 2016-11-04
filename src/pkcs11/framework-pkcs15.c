@@ -960,7 +960,7 @@ pkcs15_init_slot(struct sc_pkcs15_card *p15card, struct sc_pkcs11_slot *slot,
 		}
 		else   {
 			if (auth->label[0])
-				snprintf(label, sizeof(label), "%.*s: %s", (int) sizeof auth->label, auth->label, p15card->tokeninfo->label);
+				snprintf(label, sizeof(label), "%.*s (%s)", (int) sizeof auth->label, auth->label, p15card->tokeninfo->label);
 			else
 				snprintf(label, sizeof(label), "%s", p15card->tokeninfo->label);
 			slot->token_info.flags |= CKF_LOGIN_REQUIRED;
@@ -3608,7 +3608,7 @@ pkcs15_prkey_decrypt(struct sc_pkcs11_session *session, void *obj,
 	struct sc_pkcs11_card *p11card = session->slot->p11card;
 	struct pkcs15_fw_data *fw_data = NULL;
 	struct pkcs15_prkey_object *prkey;
-	unsigned char decrypted[256]; /* FIXME: Will not work for keys above 2048 bits */
+	unsigned char decrypted[512]; /* FIXME: Will not work for keys above 4096 bits */
 	int	buff_too_small, rv, flags = 0, prkey_has_path = 0;
 
 	sc_log(context, "Initiating decryption.");

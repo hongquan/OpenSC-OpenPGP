@@ -31,6 +31,9 @@
 #include "asn1.h"
 #include "pkcs15.h"
 
+int _sc_pkcs15_verify_pin(struct sc_pkcs15_card *, struct sc_pkcs15_object *,
+		const unsigned char *, size_t);
+
 static const struct sc_asn1_entry c_asn1_com_ao_attr[] = {
 	{ "authId",       SC_ASN1_PKCS15_ID, SC_ASN1_TAG_OCTET_STRING, 0, NULL, NULL },
 	{ NULL, 0, 0, 0, NULL, NULL }
@@ -69,15 +72,16 @@ static const struct sc_asn1_entry c_asn1_auth_type[] = {
 	{ NULL, 0, 0, 0, NULL, NULL }
 };
 static const struct sc_asn1_entry c_asn1_auth_type_choice[] = {
-        { "pin", SC_ASN1_PKCS15_OBJECT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
-        { "biometricTemplate", SC_ASN1_PKCS15_OBJECT,  SC_ASN1_CTX | 0 | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
-        { "authKey", SC_ASN1_PKCS15_OBJECT,  SC_ASN1_CTX | 1 | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "pin", SC_ASN1_PKCS15_OBJECT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "biometricTemplate", SC_ASN1_PKCS15_OBJECT,  SC_ASN1_CTX | 0 | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "authKey", SC_ASN1_PKCS15_OBJECT,  SC_ASN1_CTX | 1 | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
 	{ NULL, 0, 0, 0, NULL, NULL }
 };
 
-int sc_pkcs15_decode_aodf_entry(struct sc_pkcs15_card *p15card,
-				struct sc_pkcs15_object *obj,
-				const u8 ** buf, size_t *buflen)
+
+int
+sc_pkcs15_decode_aodf_entry(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *obj,
+		const u8 ** buf, size_t *buflen)
 {
 	sc_context_t *ctx = p15card->card->ctx;
 	struct sc_pkcs15_auth_info info;
@@ -133,6 +137,7 @@ int sc_pkcs15_decode_aodf_entry(struct sc_pkcs15_card *p15card,
 	/* Fill in defaults */
 	memset(&info, 0, sizeof(info));
 	info.tries_left = -1;
+	info.logged_in = SC_PIN_STATE_UNKNOWN;
 
 	r = sc_asn1_decode(ctx, asn1_auth_type, *buf, *buflen, buf, buflen);
 	if (r == SC_ERROR_ASN1_END_OF_CONTENTS)
@@ -218,9 +223,9 @@ int sc_pkcs15_encode_aodf_entry(sc_context_t *ctx,
 
 	sc_copy_asn1_entry(c_asn1_auth_type, asn1_auth_type);
 	sc_copy_asn1_entry(c_asn1_auth_type_choice, asn1_auth_type_choice);
-        sc_copy_asn1_entry(c_asn1_type_pin_attr, asn1_type_pin_attr);
-        sc_copy_asn1_entry(c_asn1_pin_attr, asn1_pin_attr);
-        sc_copy_asn1_entry(c_asn1_com_ao_attr, asn1_com_ao_attr);
+	sc_copy_asn1_entry(c_asn1_type_pin_attr, asn1_type_pin_attr);
+	sc_copy_asn1_entry(c_asn1_pin_attr, asn1_pin_attr);
+	sc_copy_asn1_entry(c_asn1_com_ao_attr, asn1_com_ao_attr);
 
 	sc_format_asn1_entry(asn1_auth_type + 0, asn1_auth_type_choice, NULL, 1);
 	sc_format_asn1_entry(asn1_auth_type_choice + 0, &pin_obj, NULL, 1);
@@ -248,9 +253,8 @@ int sc_pkcs15_encode_aodf_entry(sc_context_t *ctx,
 }
 
 
-static int _validate_pin(struct sc_pkcs15_card *p15card,
-                         struct sc_pkcs15_auth_info *auth_info,
-                         size_t pinlen)
+static int
+_validate_pin(struct sc_pkcs15_card *p15card, struct sc_pkcs15_auth_info *auth_info, size_t pinlen)
 {
 	size_t max_length;
 	assert(p15card != NULL);
@@ -282,9 +286,26 @@ static int _validate_pin(struct sc_pkcs15_card *p15card,
  * should ask the card reader to obtain the PIN from the
  * reader's PIN pad
  */
-int sc_pkcs15_verify_pin(struct sc_pkcs15_card *p15card,
-			 struct sc_pkcs15_object *pin_obj,
-			 const unsigned char *pincode, size_t pinlen)
+int
+sc_pkcs15_verify_pin(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *pin_obj,
+		const unsigned char *pincode, size_t pinlen)
+{
+	struct sc_context *ctx = p15card->card->ctx;
+	int r;
+
+	LOG_FUNC_CALLED(ctx);
+
+	r = _sc_pkcs15_verify_pin(p15card, pin_obj, pincode, pinlen);
+	if (r == SC_SUCCESS)
+		sc_pkcs15_pincache_add(p15card, pin_obj, pincode, pinlen);
+
+	LOG_FUNC_RETURN(ctx, r);
+}
+
+
+int
+_sc_pkcs15_verify_pin(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *pin_obj,
+		const unsigned char *pincode, size_t pinlen)
 {
 	struct sc_context *ctx = p15card->card->ctx;
 	struct sc_pkcs15_auth_info *auth_info = (struct sc_pkcs15_auth_info *)pin_obj->data;
@@ -293,7 +314,8 @@ int sc_pkcs15_verify_pin(struct sc_pkcs15_card *p15card,
 	struct sc_pin_cmd_data data;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "PIN(type:%X;method:%X;len:)", auth_info->auth_type, auth_info->auth_method, pinlen);
+	sc_log(ctx, "PIN(type:%X; method:%X; value(%p:%i)", auth_info->auth_type, auth_info->auth_method,
+		pincode, pinlen);
 
 	if (pinlen > SC_MAX_PIN_SIZE)
 		LOG_TEST_RET(ctx, SC_ERROR_INVALID_PIN_LENGTH, "Invalid PIN size");
@@ -348,6 +370,7 @@ int sc_pkcs15_verify_pin(struct sc_pkcs15_card *p15card,
 	if(p15card->card->reader->capabilities & SC_READER_CAP_PIN_PAD) {
 		if (!pincode && !pinlen)
 			data.flags |= SC_PIN_CMD_USE_PINPAD;
+
 		if (auth_info->attrs.pin.flags & SC_PKCS15_PIN_FLAG_SO_PIN)
 			data.pin1.prompt = "Please enter SO PIN";
 		else
@@ -366,12 +389,12 @@ int sc_pkcs15_verify_pin(struct sc_pkcs15_card *p15card,
 
 	r = sc_pin_cmd(card, &data, &auth_info->tries_left);
 	sc_log(ctx, "PIN cmd result %i", r);
-	if (r == SC_SUCCESS)
-		sc_pkcs15_pincache_add(p15card, pin_obj, pincode, pinlen);
 out:
 	sc_unlock(card);
 	LOG_FUNC_RETURN(ctx, r);
 }
+
+
 
 /*
  * Change a PIN.
@@ -384,7 +407,7 @@ int sc_pkcs15_change_pin(struct sc_pkcs15_card *p15card,
 	struct sc_context *ctx = p15card->card->ctx;
 	struct sc_pin_cmd_data data;
 	struct sc_pkcs15_auth_info *auth_info = (struct sc_pkcs15_auth_info *)pin_obj->data;
-	struct sc_card *card = p15card->card;
+	struct sc_card *card;
 	int r;
 
 	LOG_FUNC_CALLED(ctx);
@@ -633,7 +656,11 @@ void sc_pkcs15_pincache_add(struct sc_pkcs15_card *p15card, struct sc_pkcs15_obj
 
 	LOG_FUNC_CALLED(ctx);
 
-	if (!p15card->opts.use_pin_cache)   {
+	if (!pin || !pinlen)   {
+		sc_log(ctx, "No cache for zero length PIN");
+		return;
+	}
+	else if (!p15card->opts.use_pin_cache)   {
 		sc_log(ctx, "PIN caching not enabled");
 		return;
 	}
@@ -675,7 +702,8 @@ void sc_pkcs15_pincache_add(struct sc_pkcs15_card *p15card, struct sc_pkcs15_obj
 }
 
 /* Validate the PIN code associated with an object */
-int sc_pkcs15_pincache_revalidate(struct sc_pkcs15_card *p15card, const sc_pkcs15_object_t *obj)
+int
+sc_pkcs15_pincache_revalidate(struct sc_pkcs15_card *p15card, const sc_pkcs15_object_t *obj)
 {
 	struct sc_context *ctx = p15card->card->ctx;
 	sc_pkcs15_object_t *pin_obj;
@@ -710,7 +738,7 @@ int sc_pkcs15_pincache_revalidate(struct sc_pkcs15_card *p15card, const sc_pkcs1
 		return SC_ERROR_SECURITY_STATUS_NOT_SATISFIED;
 
 	pin_obj->usage_counter++;
-	r = sc_pkcs15_verify_pin(p15card, pin_obj, pin_obj->content.value, pin_obj->content.len);
+	r = _sc_pkcs15_verify_pin(p15card, pin_obj, pin_obj->content.value, pin_obj->content.len);
 	if (r != SC_SUCCESS) {
 		/* Ensure that wrong PIN isn't used again */
 		sc_pkcs15_free_object_content(pin_obj);

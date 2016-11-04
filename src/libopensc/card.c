@@ -213,6 +213,7 @@ int sc_connect_card(sc_reader_t *reader, sc_card_t **card_out)
 		sc_detect_boxing_cmds(reader);
 
 	memcpy(&card->atr, &reader->atr, sizeof(card->atr));
+	memcpy(&card->uid, &reader->uid, sizeof(card->uid));
 
 	_sc_parse_atr(reader);
 
@@ -391,6 +392,8 @@ int sc_reset(sc_card_t *card, int do_cold_reset)
 int sc_lock(sc_card_t *card)
 {
 	int r = 0, r2 = 0;
+	int was_reset = 0;
+	int reader_lock_obtained  = 0;
 
 	if (card == NULL)
 		return SC_ERROR_INVALID_ARGUMENTS;
@@ -403,29 +406,41 @@ int sc_lock(sc_card_t *card)
 	if (card->lock_count == 0) {
 		if (card->reader->ops->lock != NULL) {
 			r = card->reader->ops->lock(card->reader);
-			if (r == SC_ERROR_CARD_RESET || r == SC_ERROR_READER_REATTACHED) {
+			while (r == SC_ERROR_CARD_RESET || r == SC_ERROR_READER_REATTACHED) {
 				/* invalidate cache */
 				memset(&card->cache, 0, sizeof(card->cache));
 				card->cache.valid = 0;
-#ifdef ENABLE_SM
-				if (card->sm_ctx.ops.open)
-					card->sm_ctx.ops.open(card);
-#endif
+				if (was_reset++ > 4) /* TODO retry a few times */
+					break;
 				r = card->reader->ops->lock(card->reader);
 			}
+			if (r == 0)
+				reader_lock_obtained = 1;
 		}
 		if (r == 0)
 			card->cache.valid = 1;
 	}
 	if (r == 0)
 		card->lock_count++;
+
+	if (r == 0 && was_reset > 0) {
+#ifdef ENABLE_SM
+		if (card->sm_ctx.ops.open)
+			card->sm_ctx.ops.open(card);
+#endif
+	}
+
 	r2 = sc_mutex_unlock(card->ctx, card->mutex);
 	if (r2 != SC_SUCCESS) {
-		sc_log(card->ctx, "unable to release lock");
+		sc_log(card->ctx, "unable to release card->mutex lock");
 		r = r != SC_SUCCESS ? r : r2;
 	}
 
-	return r;
+	/* give card driver a chance to do something when reader lock first obtained */
+	if (r == 0 && reader_lock_obtained == 1  && card->ops->card_reader_lock_obtained)
+		r = card->ops->card_reader_lock_obtained(card, was_reset);
+
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 int sc_unlock(sc_card_t *card)

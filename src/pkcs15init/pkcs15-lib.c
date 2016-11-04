@@ -2175,44 +2175,52 @@ prkey_fixup_rsa(struct sc_pkcs15_card *p15card, struct sc_pkcs15_prkey_rsa *key)
 	 * The cryptoflex does not seem to be able to do any sort
 	 * of RSA without the full set of CRT coefficients either
 	 */
+	 /* We don't really need an RSA structure, only the BIGNUMs */
+
 	if (!key->dmp1.len || !key->dmq1.len || !key->iqmp.len) {
 		static u8 dmp1[256], dmq1[256], iqmp[256];
-		RSA    *rsa;
 		BIGNUM *aux;
 		BN_CTX *bn_ctx;
+		BIGNUM *rsa_n, *rsa_e, *rsa_d, *rsa_p, *rsa_q, *rsa_dmp1, *rsa_dmq1, *rsa_iqmp;
 
-		rsa = RSA_new();
-		rsa->n = BN_bin2bn(key->modulus.data, key->modulus.len, NULL);
-		rsa->e = BN_bin2bn(key->exponent.data, key->exponent.len, NULL);
-		rsa->d = BN_bin2bn(key->d.data, key->d.len, NULL);
-		rsa->p = BN_bin2bn(key->p.data, key->p.len, NULL);
-		rsa->q = BN_bin2bn(key->q.data, key->q.len, NULL);
-		if (!rsa->dmp1)
-			rsa->dmp1 = BN_new();
-		if (!rsa->dmq1)
-			rsa->dmq1 = BN_new();
-		if (!rsa->iqmp)
-			rsa->iqmp = BN_new();
+		rsa_n = BN_bin2bn(key->modulus.data, key->modulus.len, NULL);
+		rsa_e = BN_bin2bn(key->exponent.data, key->exponent.len, NULL);
+		rsa_d = BN_bin2bn(key->d.data, key->d.len, NULL);
+		rsa_p = BN_bin2bn(key->p.data, key->p.len, NULL);
+		rsa_q = BN_bin2bn(key->q.data, key->q.len, NULL);
+		rsa_dmp1 = BN_new();
+		rsa_dmq1 = BN_new();
+		rsa_iqmp = BN_new();
 
 		aux = BN_new();
 		bn_ctx = BN_CTX_new();
 
-		BN_sub(aux, rsa->q, BN_value_one());
-		BN_mod(rsa->dmq1, rsa->d, aux, bn_ctx);
+		BN_sub(aux, rsa_q, BN_value_one());
+		BN_mod(rsa_dmq1, rsa_d, aux, bn_ctx);
 
-		BN_sub(aux, rsa->p, BN_value_one());
-		BN_mod(rsa->dmp1, rsa->d, aux, bn_ctx);
+		BN_sub(aux, rsa_p, BN_value_one());
+		BN_mod(rsa_dmp1, rsa_d, aux, bn_ctx);
 
-		BN_mod_inverse(rsa->iqmp, rsa->q, rsa->p, bn_ctx);
+		BN_mod_inverse(rsa_iqmp, rsa_q, rsa_p, bn_ctx);
 
 		BN_clear_free(aux);
 		BN_CTX_free(bn_ctx);
 
 		/* Not thread safe, but much better than a memory leak */
-		GETBN(key->dmp1, rsa->dmp1, dmp1);
-		GETBN(key->dmq1, rsa->dmq1, dmq1);
-		GETBN(key->iqmp, rsa->iqmp, iqmp);
-		RSA_free(rsa);
+		/* TODO put on stack, or allocate and clear and then free */
+		GETBN(key->dmp1, rsa_dmp1, dmp1);
+		GETBN(key->dmq1, rsa_dmq1, dmq1);
+		GETBN(key->iqmp, rsa_iqmp, iqmp);
+
+		BN_clear_free(rsa_n);
+		BN_clear_free(rsa_e);
+		BN_clear_free(rsa_d);
+		BN_clear_free(rsa_p);
+		BN_clear_free(rsa_q);
+		BN_clear_free(rsa_dmp1);
+		BN_clear_free(rsa_dmq1);
+		BN_clear_free(rsa_iqmp);
+
 	}
 #undef GETBN
 #endif
@@ -3334,7 +3342,7 @@ sc_pkcs15init_verify_secret(struct sc_profile *profile, struct sc_pkcs15_card *p
 	int		r, use_pinpad = 0, pin_id = -1;
 	const char	*ident, *label = NULL;
 	unsigned char	pinbuf[0x100];
-	size_t		pinsize = sizeof(pinbuf);
+	size_t		pinsize = 0;
 
 
 	LOG_FUNC_CALLED(ctx);
@@ -3392,7 +3400,7 @@ sc_pkcs15init_verify_secret(struct sc_profile *profile, struct sc_pkcs15_card *p
 	if (pin_obj)   {
 		sc_log(ctx, "PIN object '%.*s'; pin_obj->content.len:%i", (int) sizeof pin_obj->label, pin_obj->label, pin_obj->content.len);
 		if (pin_obj->content.value && pin_obj->content.len)   {
-			if (pin_obj->content.len > pinsize)
+			if (pin_obj->content.len > sizeof(pinbuf))
 				LOG_TEST_RET(ctx, SC_ERROR_BUFFER_TOO_SMALL, "PIN buffer is too small");
 			memcpy(pinbuf, pin_obj->content.value, pin_obj->content.len);
 			pinsize = pin_obj->content.len;
@@ -3407,6 +3415,7 @@ sc_pkcs15init_verify_secret(struct sc_profile *profile, struct sc_pkcs15_card *p
 	switch (type) {
 	case SC_AC_CHV:
 		if (callbacks.get_pin)   {
+			pinsize = sizeof(pinbuf);
 			r = callbacks.get_pin(profile, pin_id, &auth_info, label, pinbuf, &pinsize);
 			sc_log(ctx, "'get_pin' callback returned %i; pinsize:%i", r, pinsize);
 		}
@@ -3417,6 +3426,7 @@ sc_pkcs15init_verify_secret(struct sc_profile *profile, struct sc_pkcs15_card *p
 		r = 0;
 		break;
 	default:
+		pinsize = sizeof(pinbuf);
 		r = sc_pkcs15init_get_transport_key(profile, p15card, type, reference, pinbuf, &pinsize);
 		break;
 	}

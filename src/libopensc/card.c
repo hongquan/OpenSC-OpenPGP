@@ -29,7 +29,7 @@
 #endif
 #include <string.h>
 
-#include "boxing.h"
+#include "reader-tr03119.h"
 #include "internal.h"
 #include "asn1.h"
 #include "common/compat_strlcpy.h"
@@ -56,7 +56,9 @@ int sc_check_sw(sc_card_t *card, unsigned int sw1, unsigned int sw2)
 void sc_format_apdu(sc_card_t *card, sc_apdu_t *apdu,
 		    int cse, int ins, int p1, int p2)
 {
-	assert(card != NULL && apdu != NULL);
+	if (card == NULL || apdu == NULL) {
+		return;
+	}
 	memset(apdu, 0, sizeof(*apdu));
 	apdu->cla = (u8) card->cla;
 	apdu->cse = cse;
@@ -99,8 +101,7 @@ static void sc_card_free(sc_card_t *card)
 	sc_free_apps(card);
 	sc_free_ef_atr(card);
 
-	if (card->ef_dir != NULL)
-		sc_file_free(card->ef_dir);
+	sc_file_free(card->ef_dir);
 
 	free(card->ops);
 
@@ -121,11 +122,8 @@ static void sc_card_free(sc_card_t *card)
 		card->algorithm_count = 0;
 	}
 
-	if (card->cache.current_ef)
-		sc_file_free(card->cache.current_ef);
-
-	if (card->cache.current_df)
-		sc_file_free(card->cache.current_df);
+	sc_file_free(card->cache.current_ef);
+	sc_file_free(card->cache.current_df);
 
 	if (card->mutex != NULL) {
 		int r = sc_mutex_destroy(card->ctx, card->mutex);
@@ -139,7 +137,9 @@ static void sc_card_free(sc_card_t *card)
 size_t sc_get_max_recv_size(const sc_card_t *card)
 {
 	size_t max_recv_size;
-	assert(card != NULL && card->reader != NULL);
+	if (card == NULL || card->reader == NULL) {
+		return 0;
+	}
 	max_recv_size = card->max_recv_size;
 
 	/* initialize max_recv_size to a meaningfull value */
@@ -163,12 +163,15 @@ size_t sc_get_max_send_size(const sc_card_t *card)
 {
 	size_t max_send_size;
 
-	assert(card != NULL && card->reader != NULL);
+	if (card == NULL || card->reader == NULL) {
+		return 0;
+	}
 
 	max_send_size = card->max_send_size;
 
 	/* initialize max_send_size to a meaningfull value */
-	if (card->caps & SC_CARD_CAP_APDU_EXT) {
+	if (card->caps & SC_CARD_CAP_APDU_EXT
+			&& card->reader->active_protocol != SC_PROTO_T0) {
 		if (!max_send_size)
 			max_send_size = 65535;
 	} else {
@@ -209,10 +212,11 @@ int sc_connect_card(sc_reader_t *reader, sc_card_t **card_out)
 	card->reader = reader;
 	card->ctx = ctx;
 
-	if (reader->flags & SC_READER_TEST_BOXING)
-		sc_detect_boxing_cmds(reader);
+	if (reader->flags & SC_READER_ENABLE_ESCAPE)
+		sc_detect_escape_cmds(reader);
 
 	memcpy(&card->atr, &reader->atr, sizeof(card->atr));
+	memcpy(&card->uid, &reader->uid, sizeof(card->uid));
 
 	_sc_parse_atr(reader);
 
@@ -307,8 +311,10 @@ int sc_connect_card(sc_reader_t *reader, sc_card_t **card_out)
 	card->max_recv_size = sc_get_max_recv_size(card);
 	card->max_send_size = sc_get_max_send_size(card);
 
-	sc_log(ctx, "card info name:'%s', type:%i, flags:0x%X, max_send/recv_size:%i/%i",
-		card->name, card->type, card->flags, card->max_send_size, card->max_recv_size);
+	sc_log(ctx,
+	       "card info name:'%s', type:%i, flags:0x%lX, max_send/recv_size:%"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u",
+	       card->name, card->type, card->flags, card->max_send_size,
+	       card->max_recv_size);
 
 #ifdef ENABLE_SM
         /* Check, if secure messaging module present. */
@@ -339,7 +345,8 @@ int sc_disconnect_card(sc_card_t *card)
 	ctx = card->ctx;
 	LOG_FUNC_CALLED(ctx);
 
-	assert(card->lock_count == 0);
+	if (card->lock_count != 0)
+		return SC_ERROR_NOT_ALLOWED;
 	if (card->ops->finish) {
 		int r = card->ops->finish(card);
 		if (r)
@@ -391,6 +398,8 @@ int sc_reset(sc_card_t *card, int do_cold_reset)
 int sc_lock(sc_card_t *card)
 {
 	int r = 0, r2 = 0;
+	int was_reset = 0;
+	int reader_lock_obtained  = 0;
 
 	if (card == NULL)
 		return SC_ERROR_INVALID_ARGUMENTS;
@@ -403,29 +412,41 @@ int sc_lock(sc_card_t *card)
 	if (card->lock_count == 0) {
 		if (card->reader->ops->lock != NULL) {
 			r = card->reader->ops->lock(card->reader);
-			if (r == SC_ERROR_CARD_RESET || r == SC_ERROR_READER_REATTACHED) {
+			while (r == SC_ERROR_CARD_RESET || r == SC_ERROR_READER_REATTACHED) {
 				/* invalidate cache */
 				memset(&card->cache, 0, sizeof(card->cache));
 				card->cache.valid = 0;
-#ifdef ENABLE_SM
-				if (card->sm_ctx.ops.open)
-					card->sm_ctx.ops.open(card);
-#endif
+				if (was_reset++ > 4) /* TODO retry a few times */
+					break;
 				r = card->reader->ops->lock(card->reader);
 			}
+			if (r == 0)
+				reader_lock_obtained = 1;
 		}
 		if (r == 0)
 			card->cache.valid = 1;
 	}
 	if (r == 0)
 		card->lock_count++;
+
+	if (r == 0 && was_reset > 0) {
+#ifdef ENABLE_SM
+		if (card->sm_ctx.ops.open)
+			card->sm_ctx.ops.open(card);
+#endif
+	}
+
 	r2 = sc_mutex_unlock(card->ctx, card->mutex);
 	if (r2 != SC_SUCCESS) {
-		sc_log(card->ctx, "unable to release lock");
+		sc_log(card->ctx, "unable to release card->mutex lock");
 		r = r != SC_SUCCESS ? r : r2;
 	}
 
-	return r;
+	/* give card driver a chance to do something when reader lock first obtained */
+	if (r == 0 && reader_lock_obtained == 1  && card->ops->card_reader_lock_obtained)
+		r = card->ops->card_reader_lock_obtained(card, was_reset);
+
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 int sc_unlock(sc_card_t *card)
@@ -441,7 +462,9 @@ int sc_unlock(sc_card_t *card)
 	if (r != SC_SUCCESS)
 		return r;
 
-	assert(card->lock_count >= 1);
+	if (card->lock_count < 1) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	if (--card->lock_count == 0) {
 #ifdef INVALIDATE_CARD_CACHE_IN_UNLOCK
 		/* invalidate cache */
@@ -466,7 +489,9 @@ int sc_list_files(sc_card_t *card, u8 *buf, size_t buflen)
 {
 	int r;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	LOG_FUNC_CALLED(card->ctx);
 
 	if (card->ops->list_files == NULL)
@@ -482,14 +507,18 @@ int sc_create_file(sc_card_t *card, sc_file_t *file)
 	char pbuf[SC_MAX_PATH_STRING_SIZE];
 	const sc_path_t *in_path;
 
-	assert(card != NULL && file != NULL);
+	if (card == NULL || file == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	in_path = &file->path;
 	r = sc_path_print(pbuf, sizeof(pbuf), in_path);
 	if (r != SC_SUCCESS)
 		pbuf[0] = '\0';
 
-	sc_log(card->ctx, "called; type=%d, path=%s, id=%04i, size=%u",  in_path->type, pbuf, file->id, file->size);
+	sc_log(card->ctx,
+	       "called; type=%d, path=%s, id=%04i, size=%"SC_FORMAT_LEN_SIZE_T"u",
+	       in_path->type, pbuf, file->id, file->size);
 	/* ISO 7816-4: "Number of data bytes in the file, including structural information if any"
 	 * can not be bigger than two bytes */
 	if (file->size > 0xFFFF)
@@ -507,7 +536,9 @@ int sc_delete_file(sc_card_t *card, const sc_path_t *path)
 	int r;
 	char pbuf[SC_MAX_PATH_STRING_SIZE];
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	r = sc_path_print(pbuf, sizeof(pbuf), path);
 	if (r != SC_SUCCESS)
@@ -527,8 +558,11 @@ int sc_read_binary(sc_card_t *card, unsigned int idx,
 	size_t max_le = sc_get_max_recv_size(card);
 	int r;
 
-	assert(card != NULL && card->ops != NULL && buf != NULL);
-	sc_log(card->ctx, "called; %d bytes at index %d", count, idx);
+	if (card == NULL || card->ops == NULL || buf == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+	sc_log(card->ctx, "called; %"SC_FORMAT_LEN_SIZE_T"u bytes at index %d",
+	       count, idx);
 	if (count == 0)
 		return 0;
 
@@ -577,8 +611,11 @@ int sc_write_binary(sc_card_t *card, unsigned int idx,
 	size_t max_lc = sc_get_max_send_size(card);
 	int r;
 
-	assert(card != NULL && card->ops != NULL && buf != NULL);
-	sc_log(card->ctx, "called; %d bytes at index %d", count, idx);
+	if (card == NULL || card->ops == NULL || buf == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+	sc_log(card->ctx, "called; %"SC_FORMAT_LEN_SIZE_T"u bytes at index %d",
+	       count, idx);
 	if (count == 0)
 		LOG_FUNC_RETURN(card->ctx, 0);
 	if (card->ops->write_binary == NULL)
@@ -620,8 +657,11 @@ int sc_update_binary(sc_card_t *card, unsigned int idx,
 	size_t max_lc = sc_get_max_send_size(card);
 	int r;
 
-	assert(card != NULL && card->ops != NULL && buf != NULL);
-	sc_log(card->ctx, "called; %d bytes at index %d", count, idx);
+	if (card == NULL || card->ops == NULL || buf == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+	sc_log(card->ctx, "called; %"SC_FORMAT_LEN_SIZE_T"u bytes at index %d",
+	       count, idx);
 	if (count == 0)
 		return 0;
 
@@ -671,8 +711,12 @@ int sc_erase_binary(struct sc_card *card, unsigned int offs, size_t count,  unsi
 {
 	int r;
 
-	assert(card != NULL && card->ops != NULL);
-	sc_log(card->ctx, "called; erase %d bytes from offset %d", count, offs);
+	if (card == NULL || card->ops == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+	sc_log(card->ctx,
+	       "called; erase %"SC_FORMAT_LEN_SIZE_T"u bytes from offset %d",
+	       count, offs);
 
 	if (card->ops->erase_binary == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
@@ -687,7 +731,9 @@ int sc_select_file(sc_card_t *card, const sc_path_t *in_path,  sc_file_t **file)
 	int r;
 	char pbuf[SC_MAX_PATH_STRING_SIZE];
 
-	assert(card != NULL && in_path != NULL);
+	if (card == NULL || in_path == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	r = sc_path_print(pbuf, sizeof(pbuf), in_path);
 	if (r != SC_SUCCESS)
@@ -767,7 +813,9 @@ int sc_get_challenge(sc_card_t *card, u8 *rnd, size_t len)
 {
 	int r;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	LOG_FUNC_CALLED(card->ctx);
 
 	if (card->ops->get_challenge == NULL)
@@ -782,7 +830,9 @@ int sc_read_record(sc_card_t *card, unsigned int rec_nr, u8 *buf,
 {
 	int r;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	LOG_FUNC_CALLED(card->ctx);
 
 	if (card->ops->read_record == NULL)
@@ -797,7 +847,9 @@ int sc_write_record(sc_card_t *card, unsigned int rec_nr, const u8 * buf,
 {
 	int r;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	LOG_FUNC_CALLED(card->ctx);
 
 	if (card->ops->write_record == NULL)
@@ -812,7 +864,9 @@ int sc_append_record(sc_card_t *card, const u8 * buf, size_t count,
 {
 	int r;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	LOG_FUNC_CALLED(card->ctx);
 
 	if (card->ops->append_record == NULL)
@@ -827,7 +881,9 @@ int sc_update_record(sc_card_t *card, unsigned int rec_nr, const u8 * buf,
 {
 	int r;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	LOG_FUNC_CALLED(card->ctx);
 
 	if (card->ops->update_record == NULL)
@@ -841,7 +897,9 @@ int sc_delete_record(sc_card_t *card, unsigned int rec_nr)
 {
 	int r;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	LOG_FUNC_CALLED(card->ctx);
 
 	if (card->ops->delete_record == NULL)
@@ -856,7 +914,9 @@ sc_card_ctl(sc_card_t *card, unsigned long cmd, void *args)
 {
 	int r = SC_ERROR_NOT_SUPPORTED;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	LOG_FUNC_CALLED(card->ctx);
 
 	if (card->ops->card_ctl != NULL)
@@ -874,7 +934,9 @@ int _sc_card_add_algorithm(sc_card_t *card, const sc_algorithm_info_t *info)
 {
 	sc_algorithm_info_t *p;
 
-	assert(info != NULL);
+	if (info == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	p = (sc_algorithm_info_t *) realloc(card->algorithms, (card->algorithm_count + 1) * sizeof(*info));
 	if (!p) {
 		if (card->algorithms)
@@ -1161,7 +1223,8 @@ scconf_block *sc_get_conf_block(sc_context_t *ctx, const char *name1, const char
 void sc_print_cache(struct sc_card *card)   {
 	struct sc_context *ctx = NULL;
 
-	assert(card != NULL);
+	if (card == NULL)
+		return;
 	ctx = card->ctx;
 
 	if (!card->cache.valid || (!card->cache.current_ef && !card->cache.current_df))   {
@@ -1174,9 +1237,11 @@ void sc_print_cache(struct sc_card *card)   {
 				sc_print_path(&card->cache.current_ef->path));
 
 	if (card->cache.current_df)
-		sc_log(ctx, "current_df(type=%i, aid_len=%i) %s", card->cache.current_df->path.type,
-				card->cache.current_df->path.aid.len,
-				sc_print_path(&card->cache.current_df->path));
+		sc_log(ctx,
+		       "current_df(type=%i, aid_len=%"SC_FORMAT_LEN_SIZE_T"u) %s",
+		       card->cache.current_df->path.type,
+		       card->cache.current_df->path.aid.len,
+		       sc_print_path(&card->cache.current_df->path));
 }
 
 int sc_copy_ec_params(struct sc_ec_parameters *dst, struct sc_ec_parameters *src)
@@ -1232,13 +1297,15 @@ sc_card_sm_load(struct sc_card *card, const char *module_path, const char *in_mo
 	char *module = NULL;
 #ifdef _WIN32
 	char temp_path[PATH_MAX];
-	int temp_len;
+	size_t temp_len;
 	const char path_delim = '\\';
 #else
 	const char path_delim = '/';
 #endif
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	ctx = card->ctx;
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
 	if (!in_module)
@@ -1347,12 +1414,12 @@ sc_card_sm_check(struct sc_card *card)
         for (ii = 0; ctx->conf_blocks[ii]; ii++) {
 		scconf_block **blocks;
 
-                blocks = scconf_find_blocks(ctx->conf, ctx->conf_blocks[ii], "secure_messaging", sm);
+		blocks = scconf_find_blocks(ctx->conf, ctx->conf_blocks[ii], "secure_messaging", sm);
 		if (blocks) {
 			sm_conf_block = blocks[0];
 			free(blocks);
 		}
-                if (sm_conf_block != NULL)
+		if (sm_conf_block != NULL)
 			break;
 	}
 

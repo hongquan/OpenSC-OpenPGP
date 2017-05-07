@@ -276,8 +276,8 @@ struct sc_pkcs15_cert {
 	size_t issuer_len;
 	u8 *subject;
 	size_t subject_len;
-	u8 *crl;
-	size_t crl_len;
+	u8 *extensions;
+	size_t extensions_len;
 
 	struct sc_pkcs15_pubkey * key;
 
@@ -423,7 +423,7 @@ struct sc_pkcs15_skey_info {
 	int native, key_reference;
 	size_t value_len;
 	unsigned long key_type;
-	int algo_refs[SC_MAX_SUPPORTED_ALGORITHMS];
+	unsigned int algo_refs[SC_MAX_SUPPORTED_ALGORITHMS];
 	struct sc_path path; /* if on card */
 	struct sc_pkcs15_der data;
 };
@@ -610,6 +610,18 @@ typedef struct sc_pkcs15_card {
 /* flags suitable for struct sc_pkcs15_card */
 #define SC_PKCS15_CARD_FLAG_EMULATED			0x02000000
 
+/* X509 bits for certificate usage extansion */
+#define SC_X509_DIGITAL_SIGNATURE     0x0001UL
+#define SC_X509_NON_REPUDIATION       0x0002UL
+#define SC_X509_KEY_ENCIPHERMENT      0x0004UL
+#define SC_X509_DATA_ENCIPHERMENT     0x0008UL
+#define SC_X509_KEY_AGREEMENT         0x0010UL
+#define SC_X509_KEY_CERT_SIGN         0x0020UL
+#define SC_X509_CRL_SIGN              0x0040UL
+#define SC_X509_ENCIPHER_ONLY         0x0080UL
+#define SC_X509_DECIPHER_ONLY         0x0100UL
+
+
 /* sc_pkcs15_bind:  Binds a card object to a PKCS #15 card object
  * and initializes a new PKCS #15 card object.  Will return
  * SC_ERROR_PKCS15_APP_NOT_FOUND, if the card hasn't got a
@@ -713,6 +725,20 @@ void sc_pkcs15_free_certificate(struct sc_pkcs15_cert *cert);
 int sc_pkcs15_find_cert_by_id(struct sc_pkcs15_card *card,
 			      const struct sc_pkcs15_id *id,
 			      struct sc_pkcs15_object **out);
+int sc_pkcs15_get_name_from_dn(struct sc_context *ctx,
+                              const u8 *dn, size_t dn_len,
+                              const struct sc_object_id *type,
+                              u8 **name, size_t *name_len);
+int sc_pkcs15_get_extension(struct sc_context *ctx,
+                            struct sc_pkcs15_cert *cert,
+                            const struct sc_object_id *type,
+                            u8 **ext_val, size_t *ext_val_len,
+                            int *is_critical);
+int sc_pkcs15_get_bitstring_extension(struct sc_context *ctx,
+                                      struct sc_pkcs15_cert *cert,
+                                      const struct sc_object_id *type,
+                                      unsigned long long *value,
+                                      int *is_critical);
 /* sc_pkcs15_create_cdf:  Creates a new certificate DF on a card pointed
  * by <card>.  Information about the file, such as the file ID, is read
  * from <file>.  <certs> has to be NULL-terminated. */

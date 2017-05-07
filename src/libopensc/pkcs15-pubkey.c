@@ -34,11 +34,8 @@
 #include <unistd.h>
 #endif
 
-#include "internal.h"
-#include "asn1.h"
-#include "pkcs15.h"
-
 #ifdef ENABLE_OPENSSL
+#include <openssl/bn.h>
 #include <openssl/rsa.h>
 #include <openssl/dsa.h>
 #include <openssl/evp.h>
@@ -49,6 +46,11 @@
 #endif
 #endif
 #endif
+
+#include "internal.h"
+#include "asn1.h"
+#include "pkcs15.h"
+
 
 #define C_ASN1_PKINFO_ATTR_SIZE 3
 static const struct sc_asn1_entry c_asn1_pkinfo[C_ASN1_PKINFO_ATTR_SIZE] = {
@@ -724,7 +726,8 @@ sc_pkcs15_decode_pubkey_ec(sc_context_t *ctx,
 	if (*ecpoint_data != 0x04)
 		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Supported only uncompressed EC pointQ value");
 
-	sc_log(ctx, "decode-EC key=%p, buf=%p, buflen=%d", key, buf, buflen);
+	sc_log(ctx, "decode-EC key=%p, buf=%p, buflen=%"SC_FORMAT_LEN_SIZE_T"u",
+	       key, buf, buflen);
 
 	key->ecpointQ.len = ecpoint_len;
 	key->ecpointQ.value = ecpoint_data;
@@ -753,7 +756,9 @@ sc_pkcs15_encode_pubkey_ec(sc_context_t *ctx, struct sc_pkcs15_pubkey_ec *key,
 	r = sc_asn1_encode(ctx, asn1_ec_pointQ, buf, buflen);
 	LOG_TEST_RET(ctx, r, "ASN.1 encoding failed");
 
-	sc_log(ctx, "EC key->ecpointQ=%p:%d *buf=%p:%d", key->ecpointQ.value, key->ecpointQ.len, *buf, *buflen);
+	sc_log(ctx,
+	       "EC key->ecpointQ=%p:%"SC_FORMAT_LEN_SIZE_T"u *buf=%p:%"SC_FORMAT_LEN_SIZE_T"u",
+	       key->ecpointQ.value, key->ecpointQ.len, *buf, *buflen);
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 }
 
@@ -905,7 +910,9 @@ sc_pkcs15_read_pubkey(struct sc_pkcs15_card *p15card, const struct sc_pkcs15_obj
 	size_t	len;
 	int	algorithm, r;
 
-	assert(p15card != NULL && obj != NULL && out != NULL);
+	if (p15card == NULL || obj == NULL || out == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	LOG_FUNC_CALLED(ctx);
 	sc_log(ctx, "Public key type 0x%X", obj->type);
 
@@ -992,7 +999,9 @@ err:
 static int
 sc_pkcs15_dup_bignum (struct sc_pkcs15_bignum *dst, struct sc_pkcs15_bignum *src)
 {
-	assert(dst && src);
+	if (!dst || !src) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	if (src->data && src->len)   {
 		dst->data = calloc(1, src->len);
@@ -1013,7 +1022,9 @@ sc_pkcs15_pubkey_from_prvkey(struct sc_context *ctx, struct sc_pkcs15_prkey *prv
 	struct sc_pkcs15_pubkey *pubkey = NULL;
 	int rv = SC_SUCCESS;
 
-	assert(prvkey && out);
+	if (!prvkey || !out) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	*out = NULL;
 	pubkey = calloc(1, sizeof(struct sc_pkcs15_pubkey));
@@ -1069,7 +1080,9 @@ sc_pkcs15_dup_pubkey(struct sc_context *ctx, struct sc_pkcs15_pubkey *key, struc
 	u8* alg;
 	size_t alglen;
 
-	assert(key && out);
+	if (!key || !out) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	*out = NULL;
 	pubkey = calloc(1, sizeof(struct sc_pkcs15_pubkey));
@@ -1082,6 +1095,8 @@ sc_pkcs15_dup_pubkey(struct sc_context *ctx, struct sc_pkcs15_pubkey *key, struc
 		rv = sc_asn1_encode_algorithm_id(ctx, &alg, &alglen,key->alg_id, 0);
 		if (rv == SC_SUCCESS) {
 			pubkey->alg_id = (struct sc_algorithm_id *)calloc(1, sizeof(struct sc_algorithm_id));
+			if (pubkey->alg_id == NULL)
+				LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
 			rv = sc_asn1_decode_algorithm_id(ctx, alg, alglen, pubkey->alg_id, 0);
 			free(alg);
 		}
@@ -1144,7 +1159,9 @@ sc_pkcs15_dup_pubkey(struct sc_context *ctx, struct sc_pkcs15_pubkey *key, struc
 void
 sc_pkcs15_erase_pubkey(struct sc_pkcs15_pubkey *key)
 {
-	assert(key != NULL);
+	if (key == NULL) {
+		return;
+	}
 	if (key->alg_id) {
 		sc_asn1_clear_algorithm_id(key->alg_id);
 		free(key->alg_id);
@@ -1198,6 +1215,10 @@ sc_pkcs15_free_pubkey_info(sc_pkcs15_pubkey_info_t *info)
 {
 	if (info->subject.value)
 		free(info->subject.value);
+	if (info->direct.spki.value)
+		free(info->direct.spki.value);
+	if (info->direct.raw.value)
+		free(info->direct.raw.value);
 	sc_pkcs15_free_key_params(&info->params);
 	free(info);
 }
@@ -1298,7 +1319,9 @@ sc_pkcs15_pubkey_from_spki_fields(struct sc_context *ctx, struct sc_pkcs15_pubke
 	unsigned char *tmp_buf = NULL;
 	int r;
 
-	sc_log(ctx, "sc_pkcs15_pubkey_from_spki_fields() called: %p:%d\n%s", buf, buflen, sc_dump_hex(buf, buflen));
+	sc_log(ctx,
+	       "sc_pkcs15_pubkey_from_spki_fields() called: %p:%"SC_FORMAT_LEN_SIZE_T"u\n%s",
+	       buf, buflen, sc_dump_hex(buf, buflen));
 
 	tmp_buf = malloc(buflen);
 	if (!tmp_buf) {
@@ -1401,6 +1424,8 @@ sc_pkcs15_pubkey_from_spki_sequence(struct sc_context *ctx, const unsigned char 
 
 	if(outpubkey)
 		*outpubkey = pubkey;
+	else
+		free(pubkey);
 
 	LOG_FUNC_RETURN(ctx, r);
 }
@@ -1507,7 +1532,8 @@ sc_pkcs15_fix_ec_parameters(struct sc_context *ctx, struct sc_ec_parameters *ecp
 			sc_format_oid(&ecparams->id, ec_curve_infos[ii].oid_str);
 
 		ecparams->field_length = ec_curve_infos[ii].size;
-		sc_log(ctx, "Curve length %i", ecparams->field_length);
+		sc_log(ctx, "Curve length %"SC_FORMAT_LEN_SIZE_T"u",
+		       ecparams->field_length);
 	}
 	else if (ecparams->named_curve)   {	/* it can be name of curve or OID in ASCII form */
 		for (ii=0; ec_curve_infos[ii].name; ii++)   {
@@ -1544,14 +1570,19 @@ sc_pkcs15_convert_pubkey(struct sc_pkcs15_pubkey *pkcs15_key, void *evp_key)
 {
 #ifdef ENABLE_OPENSSL
 	EVP_PKEY *pk = (EVP_PKEY *)evp_key;
+	int pk_type;
+	pk_type = EVP_PKEY_base_id(pk);
 
-	switch (pk->type) {
+	switch (pk_type) {
 	case EVP_PKEY_RSA: {
 		struct sc_pkcs15_pubkey_rsa *dst = &pkcs15_key->u.rsa;
 		RSA *src = EVP_PKEY_get1_RSA(pk);
+		const BIGNUM *src_n, *src_e;
+
+		RSA_get0_key(src, &src_n, &src_e, NULL);
 
 		pkcs15_key->algorithm = SC_ALGORITHM_RSA;
-		if (!sc_pkcs15_convert_bignum(&dst->modulus, src->n) || !sc_pkcs15_convert_bignum(&dst->exponent, src->e))
+		if (!sc_pkcs15_convert_bignum(&dst->modulus, src_n) || !sc_pkcs15_convert_bignum(&dst->exponent, src_e))
 			return SC_ERROR_INVALID_DATA;
 		RSA_free(src);
 		break;
@@ -1559,12 +1590,16 @@ sc_pkcs15_convert_pubkey(struct sc_pkcs15_pubkey *pkcs15_key, void *evp_key)
 	case EVP_PKEY_DSA: {
 		struct sc_pkcs15_pubkey_dsa *dst = &pkcs15_key->u.dsa;
 		DSA *src = EVP_PKEY_get1_DSA(pk);
+		const BIGNUM *src_pub_key, *src_priv_key, *src_p, *src_q, *src_g;
+
+		DSA_get0_key(src, &src_pub_key, &src_priv_key);
+		DSA_get0_pqg(src, &src_p, &src_q, &src_g);
 
 		pkcs15_key->algorithm = SC_ALGORITHM_DSA;
-		sc_pkcs15_convert_bignum(&dst->pub, src->pub_key);
-		sc_pkcs15_convert_bignum(&dst->p, src->p);
-		sc_pkcs15_convert_bignum(&dst->q, src->q);
-		sc_pkcs15_convert_bignum(&dst->g, src->g);
+		sc_pkcs15_convert_bignum(&dst->pub, src_pub_key);
+		sc_pkcs15_convert_bignum(&dst->p, src_p);
+		sc_pkcs15_convert_bignum(&dst->q, src_q);
+		sc_pkcs15_convert_bignum(&dst->g, src_g);
 		DSA_free(src);
 		break;
 	}

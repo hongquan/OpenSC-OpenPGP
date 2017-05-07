@@ -500,8 +500,7 @@ gpk_store_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	if (r >= 0)
 		r = gpk_store_pk(profile, p15card, keyfile, &data);
 
-	if (keyfile)
-		sc_file_free(keyfile);
+	sc_file_free(keyfile);
 	return r;
 }
 
@@ -519,8 +518,10 @@ gpk_generate_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	sc_file_t	*keyfile;
 	int             r, n;
 
-	sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, "path=%s, %d bits\n", sc_print_path(&key_info->path),
-			key_info->modulus_length);
+	sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL,
+		 "path=%s, %"SC_FORMAT_LEN_SIZE_T"u bits\n",
+		 sc_print_path(&key_info->path),
+		 key_info->modulus_length);
 
 	if (obj->type != SC_PKCS15_TYPE_PRKEY_RSA) {
 		sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, "GPK supports generating only RSA keys.");
@@ -595,8 +596,7 @@ gpk_pkfile_create(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file_t *f
 	if (r >= 0)
 		r = sc_pkcs15init_authenticate(profile, p15card, file,
 				SC_AC_OP_UPDATE);
-	if (found)
-		sc_file_free(found);
+	sc_file_free(found);
 
 	return r;
 }
@@ -727,8 +727,7 @@ gpk_pkfile_init_public(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file
 		r = sc_append_record(p15card->card, sysrec, sizeof(sysrec), 0);
 	}
 
-out:	if (tmp)
-		sc_file_free(tmp);
+out:	sc_file_free(tmp);
 	return r;
 }
 

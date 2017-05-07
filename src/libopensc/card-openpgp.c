@@ -581,10 +581,8 @@ pgp_get_card_features(sc_card_t *card)
 			unsigned long flags;
 
 			/* Is this correct? */
-			/* OpenPGP card spec 1.1 & 2.0, section 2.1 */
-			flags = SC_ALGORITHM_RSA_RAW;
 			/* OpenPGP card spec 1.1 & 2.0, section 7.2.9 & 7.2.10 */
-			flags |= SC_ALGORITHM_RSA_PAD_PKCS1;
+			flags = SC_ALGORITHM_RSA_PAD_PKCS1;
 			flags |= SC_ALGORITHM_RSA_HASH_NONE;
 			/* Can be generated in card */
 			flags |= SC_ALGORITHM_ONBOARD_KEY_GEN;
@@ -804,8 +802,7 @@ pgp_free_blob(pgp_blob_t *blob)
 				*p = blob->next;
 		}
 
-		if (blob->file)
-			sc_file_free(blob->file);
+		sc_file_free(blob->file);
 		if (blob->data)
 			free(blob->data);
 		free(blob);
@@ -977,7 +974,9 @@ pgp_get_blob(sc_card_t *card, pgp_blob_t *blob, unsigned int id,
 			return SC_SUCCESS;
 		}
 		else
-			sc_log(card->ctx, "Not enough memory to create blob for DO %X");
+			sc_log(card->ctx,
+			       "Not enough memory to create blob for DO %X",
+			       id);
 	}
 
 	return SC_ERROR_FILE_NOT_FOUND;
@@ -1376,7 +1375,9 @@ gnuk_write_certificate(sc_card_t *card, const u8 *buf, size_t length)
 		size_t plen = MIN(length - i*256, 256);
 		u8 roundbuf[256];	/* space to build APDU data with even length for Gnuk */
 
-		sc_log(card->ctx, "Write part %d from offset 0x%X, len %d", i+1, part, plen);
+		sc_log(card->ctx,
+		       "Write part %"SC_FORMAT_LEN_SIZE_T"u from offset 0x%"SC_FORMAT_LEN_SIZE_T"X, len %"SC_FORMAT_LEN_SIZE_T"u",
+		       i+1, i*256, plen);
 
 		/* 1st chunk: P1 = 0x85, further chunks: P1 = chunk no */
 		sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0xD6, (i == 0) ? 0x85 : i, 0);
@@ -1495,7 +1496,9 @@ pgp_put_data(sc_card_t *card, unsigned int tag, const u8 *buf, size_t buf_len)
 	 * If we check here, the driver may be stuck to a limit version number of card.
 	 * 7F21 size is soft-coded, so we can check it. */
 	if (tag == DO_CERT && buf_len > priv->max_cert_size) {
-		sc_log(card->ctx, "Data size %ld exceeds DO size limit %ld.", buf_len, priv->max_cert_size);
+		sc_log(card->ctx,
+		       "Data size %"SC_FORMAT_LEN_SIZE_T"u exceeds DO size limit %"SC_FORMAT_LEN_SIZE_T"u.",
+		       buf_len, priv->max_cert_size);
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_WRONG_LENGTH);
 	}
 
@@ -1532,6 +1535,8 @@ pgp_put_data(sc_card_t *card, unsigned int tag, const u8 *buf, size_t buf_len)
 static int
 pgp_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data, int *tries_left)
 {
+	struct pgp_priv_data *priv = DRVDATA(card);
+
 	LOG_FUNC_CALLED(card->ctx);
 
 	if (data->pin_type != SC_AC_CHV)
@@ -1545,8 +1550,17 @@ pgp_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data, int *tries_left)
 	 * So, if we receive Ref=1, Ref=2, we must convert to 81, 82...
 	 * In OpenPGP v1, the PINs are named CHV1, CHV2, CHV3.
 	 * In v2, they are named PW1, PW3 (PW1 operates in 2 modes).
-	 * However, the PIN references (P2 in APDU) are the same in both versions:
-	 * 81 (CHV1 or PW1), 82 (CHV2 or PW1-mode 2), 83 (CHV3 or PW3).
+	 *
+	 * The PIN references (P2 in APDU) for "VERIFY" are the same in both versions:
+	 * 81 (CHV1 or PW1), 82 (CHV2 or PW1-mode 2), 83 (CHV3 or PW3),
+	 * On the other hand from version 2.0 "CHANGE REFERENCE DATA" and
+	 * "RESET RETRY COUNTER" don't support PW1-mode 2 (82) and need this
+	 * value changed to PW1 (81).
+	 * Both of these commands also differ between card versions in that
+	 * v1 cards can use only implicit old PIN or CHV3 test for both commands
+	 * whereas v2 can use both implicit (for PW3) and explicit
+	 * (for special "Resetting Code") PIN test for "RESET RETRY COUNTER"
+	 * and only explicit test for "CHANGE REFERENCE DATA".
 	 *
 	 * Note that if this function is called from sc_pkcs15_verify_pin() in pkcs15-pin.c,
 	 * the Ref is already 81, 82, 83.
@@ -1554,6 +1568,39 @@ pgp_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data, int *tries_left)
 
 	/* convert the PIN Reference if needed */
 	data->pin_reference |= 0x80;
+
+	/* check version-dependent constraints */
+	if (data->cmd == SC_PIN_CMD_CHANGE || data->cmd == SC_PIN_CMD_UNBLOCK) {
+		if (priv->bcd_version >= OPENPGP_CARD_2_0) {
+			if (data->pin_reference == 0x82)
+				data->pin_reference = 0x81;
+
+			if (data->cmd == SC_PIN_CMD_CHANGE) {
+				if (data->pin1.len == 0 &&
+				    !(data->flags & SC_PIN_CMD_USE_PINPAD))
+					LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_ARGUMENTS,
+						     "v2 cards don't support implicit old PIN for PIN change.");
+
+				data->flags &= ~SC_PIN_CMD_IMPLICIT_CHANGE;
+			}
+		} else {
+			if (data->pin1.len != 0) {
+				sc_log(card->ctx,
+				       "v1 cards don't support explicit old or CHV3 PIN, PIN ignored.");
+				sc_log(card->ctx,
+				       "please make sure that you have verified the relevant PIN first.");
+				data->pin1.len = 0;
+			}
+
+			data->flags |= SC_PIN_CMD_IMPLICIT_CHANGE;
+		}
+	}
+
+	if (data->cmd == SC_PIN_CMD_UNBLOCK && data->pin2.len == 0 &&
+	    !(data->flags & SC_PIN_CMD_USE_PINPAD))
+		LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_ARGUMENTS,
+			     "new PIN must be provided for unblock operation.");
+
 	/* ensure pin_reference is 81, 82, 83 */
 	if (!(data->pin_reference == 0x81 || data->pin_reference == 0x82 || data->pin_reference == 0x83)) {
 		LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_ARGUMENTS,
@@ -1762,9 +1809,13 @@ pgp_update_new_algo_attr(sc_card_t *card, sc_cardctl_openpgp_keygen_info_t *key_
 	r = pgp_seek_blob(card, priv->mf, (0x00C0 | key_info->keytype), &algo_blob);
 	LOG_TEST_RET(card->ctx, r, "Cannot get old algorithm attributes");
 	old_modulus_len = bebytes2ushort(algo_blob->data + 1);  /* modulus length is coded in byte 2 & 3 */
-	sc_log(card->ctx, "Old modulus length %d, new %d.", old_modulus_len, key_info->modulus_len);
+	sc_log(card->ctx,
+	       "Old modulus length %d, new %"SC_FORMAT_LEN_SIZE_T"u.",
+	       old_modulus_len, key_info->modulus_len);
 	old_exponent_len = bebytes2ushort(algo_blob->data + 3);  /* exponent length is coded in byte 3 & 4 */
-	sc_log(card->ctx, "Old exponent length %d, new %d.", old_exponent_len, key_info->exponent_len);
+	sc_log(card->ctx,
+	       "Old exponent length %d, new %"SC_FORMAT_LEN_SIZE_T"u.",
+	       old_exponent_len, key_info->exponent_len);
 
 	/* Modulus */
 	/* If passed modulus_len is zero, it means using old key size */
@@ -2074,7 +2125,9 @@ pgp_update_card_algorithms(sc_card_t *card, sc_cardctl_openpgp_keygen_info_t *ke
 	LOG_FUNC_CALLED(card->ctx);
 
 	if (id > card->algorithm_count) {
-		sc_log(card->ctx, "This key ID %d is out of the card's algorithm list.");
+		sc_log(card->ctx,
+		       "This key ID %u is out of the card's algorithm list.",
+		       (unsigned int)id);
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 
@@ -2457,7 +2510,9 @@ pgp_store_key(sc_card_t *card, sc_cardctl_openpgp_keystore_info_t *key_info)
 
 	/* we only support exponent of maximum 32 bits */
 	if (key_info->e_len > 4) {
-		sc_log(card->ctx, "Exponent %bit (>32) is not supported.", key_info->e_len*8);
+		sc_log(card->ctx,
+		       "Exponent %"SC_FORMAT_LEN_SIZE_T"u-bit (>32) is not supported.",
+		       key_info->e_len * 8);
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
 	}
 

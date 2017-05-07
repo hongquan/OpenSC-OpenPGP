@@ -27,6 +27,7 @@
 #include <assert.h>
 #include <string.h>
 
+#include "internal.h"
 #include "common/compat_strlcat.h"
 
 #include <libopensc/errors.h>
@@ -82,6 +83,7 @@ sc_aux_data_set_md_guid(struct sc_context *ctx, struct sc_auxiliary_data *aux_da
 	case SC_AUX_DATA_TYPE_NO_DATA:
 		memset(aux_data, 0, sizeof(*aux_data));
 		aux_data->type = SC_AUX_DATA_TYPE_MD_CMAP_RECORD;
+		/* fallthrough */
 	case SC_AUX_DATA_TYPE_MD_CMAP_RECORD:
 		rec = &aux_data->data.cmap_record;
 		memcpy(rec->guid, guid, strlen(guid));
@@ -112,6 +114,7 @@ sc_aux_data_set_md_flags(struct sc_context *ctx, struct sc_auxiliary_data *aux_d
 	case SC_AUX_DATA_TYPE_NO_DATA:
 		memset(aux_data, 0, sizeof(*aux_data));
 		aux_data->type = SC_AUX_DATA_TYPE_MD_CMAP_RECORD;
+		/* fallthrough */
 	case SC_AUX_DATA_TYPE_MD_CMAP_RECORD:
 		aux_data->data.cmap_record.flags = flags;
 		sc_log(ctx, "set MD container flags '0x%X'", flags);
@@ -154,7 +157,9 @@ sc_aux_data_get_md_guid(struct sc_context *ctx, struct sc_auxiliary_data *aux_da
 		strlcat(guid, "}", sizeof(guid));
 
 	if (*out_size < strlen(guid))   {
-		sc_log(ctx, "aux-data: buffer too small: out_size:%i < guid-length:%i", *out_size, strlen(guid));
+		sc_log(ctx,
+		       "aux-data: buffer too small: out_size:%"SC_FORMAT_LEN_SIZE_T"u < guid-length:%"SC_FORMAT_LEN_SIZE_T"u",
+		       *out_size, strlen(guid));
 		LOG_FUNC_RETURN(ctx, SC_ERROR_BUFFER_TOO_SMALL);
 	}
 

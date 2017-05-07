@@ -37,6 +37,7 @@ int sc_pkcs15emu_tcos_init_ex(sc_pkcs15_card_t *,	struct sc_aid *, sc_pkcs15emu_
 int sc_pkcs15emu_esteid_init_ex(sc_pkcs15_card_t *,	struct sc_aid *, sc_pkcs15emu_opt_t *);
 int sc_pkcs15emu_postecert_init_ex(sc_pkcs15_card_t *,	struct sc_aid *, sc_pkcs15emu_opt_t *);
 int sc_pkcs15emu_piv_init_ex(sc_pkcs15_card_t *p15card,	struct sc_aid *, sc_pkcs15emu_opt_t *opts);
+int sc_pkcs15emu_cac_init_ex(sc_pkcs15_card_t *p15card,	struct sc_aid *, sc_pkcs15emu_opt_t *opts);
 int sc_pkcs15emu_gemsafeGPK_init_ex(sc_pkcs15_card_t *p15card,	struct sc_aid *, sc_pkcs15emu_opt_t *opts);
 int sc_pkcs15emu_gemsafeV1_init_ex(sc_pkcs15_card_t *p15card,	struct sc_aid *, sc_pkcs15emu_opt_t *opts);
 int sc_pkcs15emu_actalis_init_ex(sc_pkcs15_card_t *p15card,	struct sc_aid *, sc_pkcs15emu_opt_t *opts);
@@ -51,6 +52,7 @@ int sc_pkcs15emu_dnie_init_ex(sc_pkcs15_card_t *,	struct sc_aid *, sc_pkcs15emu_
 int sc_pkcs15emu_gids_init_ex(sc_pkcs15_card_t *,	struct sc_aid *, sc_pkcs15emu_opt_t *);
 int sc_pkcs15emu_iasecc_init_ex(sc_pkcs15_card_t *,	struct sc_aid *, sc_pkcs15emu_opt_t *);
 int sc_pkcs15emu_jpki_init_ex(sc_pkcs15_card_t *,	struct sc_aid *, sc_pkcs15emu_opt_t *);
+int sc_pkcs15emu_coolkey_init_ex(sc_pkcs15_card_t *p15card,	struct sc_aid *, sc_pkcs15emu_opt_t *opts);
 
 struct sc_pkcs15_emulator_handler {
 	const char *name;

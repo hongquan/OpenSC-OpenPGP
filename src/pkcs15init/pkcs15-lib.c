@@ -46,6 +46,7 @@
 #endif
 #include <assert.h>
 #ifdef ENABLE_OPENSSL
+#include <openssl/opensslv.h>
 #include <openssl/bn.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -55,6 +56,7 @@
 #include <openssl/pkcs12.h>
 #endif
 
+#include "libopensc/sc-ossl-compat.h"
 #include "common/compat_strlcpy.h"
 #include "common/libscdl.h"
 #include "libopensc/pkcs15.h"
@@ -72,11 +74,11 @@
 
 /* Default ID for new key/pin */
 #define DEFAULT_ID			0x45
-#define DEFAULT_PIN_FLAGS		0x03
-#define DEFAULT_PRKEY_FLAGS		0x03
-#define DEFAULT_PUBKEY_FLAGS		0x02
-#define DEFAULT_CERT_FLAGS		0x02
-#define DEFAULT_DATA_FLAGS		0x02
+#define DEFAULT_PIN_FLAGS		(SC_PKCS15_CO_FLAG_PRIVATE|SC_PKCS15_CO_FLAG_MODIFIABLE)
+#define DEFAULT_PRKEY_FLAGS		(SC_PKCS15_CO_FLAG_PRIVATE|SC_PKCS15_CO_FLAG_MODIFIABLE)
+#define DEFAULT_PUBKEY_FLAGS		(SC_PKCS15_CO_FLAG_MODIFIABLE)
+#define DEFAULT_CERT_FLAGS		(SC_PKCS15_CO_FLAG_MODIFIABLE)
+#define DEFAULT_DATA_FLAGS		(SC_PKCS15_CO_FLAG_MODIFIABLE)
 
 #define TEMPLATE_INSTANTIATE_MIN_INDEX	0x0
 #define TEMPLATE_INSTANTIATE_MAX_INDEX	0xFE
@@ -201,6 +203,8 @@ get_profile_from_config(struct sc_card *card, char *buffer, size_t size)
 		blocks = scconf_find_blocks(ctx->conf, ctx->conf_blocks[i],
 					"card_driver",
 					card->driver->short_name);
+		if (!blocks)
+			continue;
 		blk = blocks[0];
 		free(blocks);
 		if (blk == NULL)
@@ -226,18 +230,22 @@ find_library(struct sc_context *ctx, const char *name)
 
 	for (i = 0; ctx->conf_blocks[i]; i++) {
 		blocks = scconf_find_blocks(ctx->conf, ctx->conf_blocks[i], "framework", "pkcs15");
-                blk = blocks[0];
-                free(blocks);
-                if (blk == NULL)
-                        continue;
-		blocks = scconf_find_blocks(ctx->conf, blk, "pkcs15init", name);
+		if (!blocks)
+			continue;
 		blk = blocks[0];
-                free(blocks);
-                if (blk == NULL)
-                        continue;
-                libname = scconf_get_str(blk, "module", NULL);
-                break;
-        }
+		free(blocks);
+		if (blk == NULL)
+			continue;
+		blocks = scconf_find_blocks(ctx->conf, blk, "pkcs15init", name);
+		if (!blocks)
+			continue;
+		blk = blocks[0];
+		free(blocks);
+		if (blk == NULL)
+			continue;
+		libname = scconf_get_str(blk, "module", NULL);
+		break;
+	}
 	if (!libname) {
 		sc_log(ctx, "unable to locate pkcs15init driver for '%s'", name);
 	}
@@ -465,8 +473,7 @@ sc_pkcs15init_set_p15card(struct sc_profile *profile, struct sc_pkcs15_card *p15
 			}
 		}
 
-                if (file)
-			sc_file_free(file);
+		sc_file_free(file);
 	}
 
 	profile->p15_data = p15card;
@@ -759,7 +766,7 @@ sc_pkcs15init_add_app(struct sc_card *card, struct sc_profile *profile,
 	struct sc_pkcs15_object	*pin_obj = NULL;
 	struct sc_app_info	*app;
 	struct sc_file		*df = profile->df_info->file;
-	int			r;
+	int			r = SC_SUCCESS;
 
 	LOG_FUNC_CALLED(ctx);
 	p15card->card = card;
@@ -1740,8 +1747,10 @@ sc_pkcs15init_store_certificate(struct sc_pkcs15_card *p15card,
 		cert_info->path = existing_path;
 	}
 
-	sc_log(ctx, "Store cert(%.*s,ID:%s,der(%p,%i))", (int) sizeof object->label, object->label,
-			sc_pkcs15_print_id(&cert_info->id), args->der_encoded.value, args->der_encoded.len);
+	sc_log(ctx, "Store cert(%.*s,ID:%s,der(%p,%"SC_FORMAT_LEN_SIZE_T"u))",
+	       (int) sizeof object->label, object->label,
+	       sc_pkcs15_print_id(&cert_info->id), args->der_encoded.value,
+	       args->der_encoded.len);
 
 	if (!profile->pkcs15.direct_certificates)
 		r = sc_pkcs15init_store_data(p15card, profile, object, &args->der_encoded, &cert_info->path);
@@ -2162,11 +2171,6 @@ prkey_fixup_rsa(struct sc_pkcs15_card *p15card, struct sc_pkcs15_prkey_rsa *key)
 	}
 
 #ifdef ENABLE_OPENSSL
-#define GETBN(dst, src, mem) \
-	do {	dst.len = BN_num_bytes(src); \
-		assert(dst.len <= sizeof(mem)); \
-		BN_bn2bin(src, dst.data = mem); \
-	} while (0)
 
 	/* Generate additional parameters.
 	 * At least the GPK seems to need the full set of CRT
@@ -2175,46 +2179,76 @@ prkey_fixup_rsa(struct sc_pkcs15_card *p15card, struct sc_pkcs15_prkey_rsa *key)
 	 * The cryptoflex does not seem to be able to do any sort
 	 * of RSA without the full set of CRT coefficients either
 	 */
+	 /* We don't really need an RSA structure, only the BIGNUMs */
+
 	if (!key->dmp1.len || !key->dmq1.len || !key->iqmp.len) {
-		static u8 dmp1[256], dmq1[256], iqmp[256];
-		RSA    *rsa;
 		BIGNUM *aux;
 		BN_CTX *bn_ctx;
+		BIGNUM *rsa_n, *rsa_e, *rsa_d, *rsa_p, *rsa_q, *rsa_dmp1, *rsa_dmq1, *rsa_iqmp;
 
-		rsa = RSA_new();
-		rsa->n = BN_bin2bn(key->modulus.data, key->modulus.len, NULL);
-		rsa->e = BN_bin2bn(key->exponent.data, key->exponent.len, NULL);
-		rsa->d = BN_bin2bn(key->d.data, key->d.len, NULL);
-		rsa->p = BN_bin2bn(key->p.data, key->p.len, NULL);
-		rsa->q = BN_bin2bn(key->q.data, key->q.len, NULL);
-		if (!rsa->dmp1)
-			rsa->dmp1 = BN_new();
-		if (!rsa->dmq1)
-			rsa->dmq1 = BN_new();
-		if (!rsa->iqmp)
-			rsa->iqmp = BN_new();
+		rsa_n = BN_bin2bn(key->modulus.data, key->modulus.len, NULL);
+		rsa_e = BN_bin2bn(key->exponent.data, key->exponent.len, NULL);
+		rsa_d = BN_bin2bn(key->d.data, key->d.len, NULL);
+		rsa_p = BN_bin2bn(key->p.data, key->p.len, NULL);
+		rsa_q = BN_bin2bn(key->q.data, key->q.len, NULL);
+		rsa_dmp1 = BN_new();
+		rsa_dmq1 = BN_new();
+		rsa_iqmp = BN_new();
 
 		aux = BN_new();
 		bn_ctx = BN_CTX_new();
 
-		BN_sub(aux, rsa->q, BN_value_one());
-		BN_mod(rsa->dmq1, rsa->d, aux, bn_ctx);
+		BN_sub(aux, rsa_q, BN_value_one());
+		BN_mod(rsa_dmq1, rsa_d, aux, bn_ctx);
 
-		BN_sub(aux, rsa->p, BN_value_one());
-		BN_mod(rsa->dmp1, rsa->d, aux, bn_ctx);
+		BN_sub(aux, rsa_p, BN_value_one());
+		BN_mod(rsa_dmp1, rsa_d, aux, bn_ctx);
 
-		BN_mod_inverse(rsa->iqmp, rsa->q, rsa->p, bn_ctx);
+		BN_mod_inverse(rsa_iqmp, rsa_q, rsa_p, bn_ctx);
 
 		BN_clear_free(aux);
 		BN_CTX_free(bn_ctx);
 
-		/* Not thread safe, but much better than a memory leak */
-		GETBN(key->dmp1, rsa->dmp1, dmp1);
-		GETBN(key->dmq1, rsa->dmq1, dmq1);
-		GETBN(key->iqmp, rsa->iqmp, iqmp);
-		RSA_free(rsa);
+		/* Do not replace, only fill in missing */
+		if (key->dmp1.data == NULL) {
+			key->dmp1.len = BN_num_bytes(rsa_dmp1);
+			key->dmp1.data = malloc(key->dmp1.len);
+			if (key->dmp1.data) {
+				BN_bn2bin(rsa_dmp1, key->dmp1.data);
+			} else {
+				key->dmp1.len = 0;
+			}
+		}
+
+		if (key->dmq1.data == NULL) {
+			key->dmq1.len = BN_num_bytes(rsa_dmq1);
+			key->dmq1.data = malloc(key->dmq1.len);
+			if (key->dmq1.data) {
+				BN_bn2bin(rsa_dmq1, key->dmq1.data);
+			} else {
+				key->dmq1.len = 0;
+			}
+		}
+		if (key->iqmp.data == NULL) {
+			key->iqmp.len = BN_num_bytes(rsa_iqmp);
+			key->iqmp.data = malloc(key->iqmp.len);
+			if (key->iqmp.data) {
+				BN_bn2bin(rsa_iqmp, key->iqmp.data);
+			} else {
+				key->iqmp.len = 0;
+			}
+		}
+
+		BN_clear_free(rsa_n);
+		BN_clear_free(rsa_e);
+		BN_clear_free(rsa_d);
+		BN_clear_free(rsa_p);
+		BN_clear_free(rsa_q);
+		BN_clear_free(rsa_dmp1);
+		BN_clear_free(rsa_dmq1);
+		BN_clear_free(rsa_iqmp);
+
 	}
-#undef GETBN
 #endif
 	return 0;
 }
@@ -2247,12 +2281,15 @@ prkey_bits(struct sc_pkcs15_card *p15card, struct sc_pkcs15_prkey *key)
 		return sc_pkcs15init_keybits(&key->u.dsa.q);
 	case SC_ALGORITHM_GOSTR3410:
 		if (sc_pkcs15init_keybits(&key->u.gostr3410.d) > SC_PKCS15_GOSTR3410_KEYSIZE) {
-			sc_log(ctx, "Unsupported key (keybits %u)", sc_pkcs15init_keybits(&key->u.gostr3410.d));
+			sc_log(ctx,
+			       "Unsupported key (keybits %"SC_FORMAT_LEN_SIZE_T"u)",
+			       sc_pkcs15init_keybits(&key->u.gostr3410.d));
 			return SC_ERROR_OBJECT_NOT_VALID;
 		}
 		return SC_PKCS15_GOSTR3410_KEYSIZE;
 	case SC_ALGORITHM_EC:
-		sc_log(ctx, "Private EC key length %u", key->u.ec.params.field_length);
+		sc_log(ctx, "Private EC key length %"SC_FORMAT_LEN_SIZE_T"u",
+		       key->u.ec.params.field_length);
 		if (key->u.ec.params.field_length == 0)   {
 			sc_log(ctx, "Invalid EC key length");
 			return SC_ERROR_OBJECT_NOT_VALID;
@@ -2571,7 +2608,8 @@ select_object_path(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 	if (!name)
 		LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 
-	sc_log(ctx, "key-domain.%s @%s (auth_id.len=%d)", name, sc_print_path(path), obj->auth_id.len);
+	sc_log(ctx, "key-domain.%s @%s (auth_id.len=%"SC_FORMAT_LEN_SIZE_T"u)",
+	       name, sc_print_path(path), obj->auth_id.len);
 
 	indx_id.len = 1;
 	for (indx = TEMPLATE_INSTANTIATE_MIN_INDEX; indx <= TEMPLATE_INSTANTIATE_MAX_INDEX; indx++)   {
@@ -2815,8 +2853,7 @@ sc_pkcs15init_update_any_df(struct sc_pkcs15_card *p15card,
 		}
 		free(buf);
 	}
-	if (file)
-		sc_file_free(file);
+	sc_file_free(file);
 
 	LOG_TEST_RET(ctx, r, "Failed to encode or update xDF");
 
@@ -3226,8 +3263,7 @@ sc_pkcs15init_update_certificate(struct sc_pkcs15_card *p15card,
 	profile->dirty = 1;
 
 done:
-	if (file)
-		sc_file_free(file);
+	sc_file_free(file);
 
 	LOG_FUNC_RETURN(ctx, r);
 }
@@ -3334,7 +3370,7 @@ sc_pkcs15init_verify_secret(struct sc_profile *profile, struct sc_pkcs15_card *p
 	int		r, use_pinpad = 0, pin_id = -1;
 	const char	*ident, *label = NULL;
 	unsigned char	pinbuf[0x100];
-	size_t		pinsize = sizeof(pinbuf);
+	size_t		pinsize = 0;
 
 
 	LOG_FUNC_CALLED(ctx);
@@ -3367,7 +3403,7 @@ sc_pkcs15init_verify_secret(struct sc_profile *profile, struct sc_pkcs15_card *p
 			LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 		reference = pin_id;
 		type = SC_AC_CHV;
-		sc_log(ctx, "Symbolic PIN resolved to PIN(type:CHV,reference:%i)", type, reference);
+		sc_log(ctx, "Symbolic PIN resolved to PIN(type:CHV,reference:%i)", reference);
 	}
 
 	if (path && path->len)   {
@@ -3390,9 +3426,12 @@ sc_pkcs15init_verify_secret(struct sc_profile *profile, struct sc_pkcs15_card *p
 	}
 
 	if (pin_obj)   {
-		sc_log(ctx, "PIN object '%.*s'; pin_obj->content.len:%i", (int) sizeof pin_obj->label, pin_obj->label, pin_obj->content.len);
+		sc_log(ctx,
+		       "PIN object '%.*s'; pin_obj->content.len:%"SC_FORMAT_LEN_SIZE_T"u",
+		       (int) sizeof pin_obj->label, pin_obj->label,
+		       pin_obj->content.len);
 		if (pin_obj->content.value && pin_obj->content.len)   {
-			if (pin_obj->content.len > pinsize)
+			if (pin_obj->content.len > sizeof(pinbuf))
 				LOG_TEST_RET(ctx, SC_ERROR_BUFFER_TOO_SMALL, "PIN buffer is too small");
 			memcpy(pinbuf, pin_obj->content.value, pin_obj->content.len);
 			pinsize = pin_obj->content.len;
@@ -3407,8 +3446,11 @@ sc_pkcs15init_verify_secret(struct sc_profile *profile, struct sc_pkcs15_card *p
 	switch (type) {
 	case SC_AC_CHV:
 		if (callbacks.get_pin)   {
+			pinsize = sizeof(pinbuf);
 			r = callbacks.get_pin(profile, pin_id, &auth_info, label, pinbuf, &pinsize);
-			sc_log(ctx, "'get_pin' callback returned %i; pinsize:%i", r, pinsize);
+			sc_log(ctx,
+			       "'get_pin' callback returned %i; pinsize:%"SC_FORMAT_LEN_SIZE_T"u",
+			       r, pinsize);
 		}
 		break;
 	case SC_AC_SCB:
@@ -3417,6 +3459,7 @@ sc_pkcs15init_verify_secret(struct sc_profile *profile, struct sc_pkcs15_card *p
 		r = 0;
 		break;
 	default:
+		pinsize = sizeof(pinbuf);
 		r = sc_pkcs15init_get_transport_key(profile, p15card, type, reference, pinbuf, &pinsize);
 		break;
 	}
@@ -3516,8 +3559,7 @@ sc_pkcs15init_authenticate(struct sc_profile *profile, struct sc_pkcs15_card *p1
 		r = sc_pkcs15init_verify_secret(profile, p15card, file_tmp ? file_tmp : file, acl->method, acl->key_ref);
 	}
 
-	if (file_tmp)
-		sc_file_free(file_tmp);
+	sc_file_free(file_tmp);
 
 	LOG_FUNC_RETURN(ctx, r);
 }
@@ -3601,8 +3643,7 @@ sc_pkcs15init_create_file(struct sc_profile *profile, struct sc_pkcs15_card *p15
 	r = sc_create_file(p15card->card, file);
 	LOG_TEST_RET(ctx, r, "Create file failed");
 
-	if (parent)
-		sc_file_free(parent);
+	sc_file_free(parent);
 	LOG_FUNC_RETURN(ctx, r);
 }
 
@@ -3643,8 +3684,10 @@ sc_pkcs15init_update_file(struct sc_profile *profile,
 	}
 
 	if (selected_file->size < datalen) {
-		sc_log(ctx, "File %s too small (require %u, have %u)",
-				sc_print_path(&file->path), datalen, selected_file->size);
+		sc_log(ctx,
+		       "File %s too small (require %u, have %"SC_FORMAT_LEN_SIZE_T"u)",
+		       sc_print_path(&file->path), datalen,
+		       selected_file->size);
 		sc_file_free(selected_file);
 		LOG_TEST_RET(ctx, SC_ERROR_FILE_TOO_SMALL, "Update file failed");
 	}
@@ -3872,11 +3915,15 @@ sc_pkcs15init_qualify_pin(struct sc_card *card, const char *pin_name,
 	pin_attrs = &auth_info->attrs.pin;
 
 	if (pin_len < pin_attrs->min_length) {
-		sc_log(ctx, "%s too short (min length %u)", pin_name, pin_attrs->min_length);
+		sc_log(ctx,
+		       "%s too short (min length %"SC_FORMAT_LEN_SIZE_T"u)",
+		       pin_name, pin_attrs->min_length);
 		LOG_FUNC_RETURN(ctx, SC_ERROR_WRONG_LENGTH);
 	}
 	if (pin_len > pin_attrs->max_length) {
-		sc_log(ctx, "%s too long (max length %u)", pin_name, pin_attrs->max_length);
+		sc_log(ctx,
+		       "%s too long (max length %"SC_FORMAT_LEN_SIZE_T"u)",
+		       pin_name, pin_attrs->max_length);
 		LOG_FUNC_RETURN(ctx, SC_ERROR_WRONG_LENGTH);
 	}
 

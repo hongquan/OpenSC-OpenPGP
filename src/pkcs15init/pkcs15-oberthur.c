@@ -20,20 +20,15 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#include <errno.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "pkcs15-oberthur.h"
 #include <sys/types.h>
 #include <ctype.h>
 
-#include "config.h"
 #include "libopensc/opensc.h"
 #include "libopensc/cardctl.h"
 #include "libopensc/log.h"
 #include "profile.h"
 #include "pkcs15-init.h"
-#include "pkcs15-oberthur.h"
 
 #define COSM_TITLE "OberthurAWP"
 
@@ -116,8 +111,7 @@ cosm_write_tokeninfo (struct sc_pkcs15_card *p15card, struct sc_profile *profile
 		rv = 0;
 
 err:
-	if (file)
-		sc_file_free(file);
+	sc_file_free(file);
 	free(buffer);
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
@@ -282,7 +276,9 @@ cosm_create_reference_data(struct sc_profile *profile, struct sc_pkcs15_card *p1
 	};
 
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_VERBOSE);
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "pin lens %i/%i", pin_len,  puk_len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "pin lens %"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u",
+		 pin_len, puk_len);
 	if (!pin || pin_len>0x40)
 		return SC_ERROR_INVALID_ARGUMENTS;
 	if (puk && !puk_len)
@@ -327,8 +323,7 @@ cosm_create_reference_data(struct sc_profile *profile, struct sc_pkcs15_card *p1
 		rv = sc_pkcs15init_update_file(profile, p15card, file, oberthur_puk, sizeof(oberthur_puk));
 		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "Failed to update pukfile");
 
-		if (file)
-			sc_file_free(file);
+		sc_file_free(file);
 	}
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
@@ -541,8 +536,9 @@ cosm_new_file(struct sc_profile *profile, struct sc_card *card,
 		file->ef_structure = structure;
 	}
 
-	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "cosm_new_file() file size %i; ef type %i/%i; id %04X",file->size,
-			file->type, file->ef_structure, file->id);
+	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+		 "cosm_new_file() file size %"SC_FORMAT_LEN_SIZE_T"u; ef type %i/%i; id %04X",
+		 file->size, file->type, file->ef_structure, file->id);
 	*out = file;
 
 	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_SUCCESS);
@@ -719,8 +715,7 @@ cosm_create_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 	key_info->key_reference = file->path.value[file->path.len - 1];
 
 err:
-	if (file)
-		sc_file_free(file);
+	sc_file_free(file);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
@@ -766,8 +761,7 @@ cosm_store_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 	rv = sc_card_ctl(p15card->card, SC_CARDCTL_OBERTHUR_UPDATE_KEY, &update_info);
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "Cannot update private key");
 
-	if (file)
-		sc_file_free(file);
+	sc_file_free(file);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }

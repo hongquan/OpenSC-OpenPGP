@@ -257,11 +257,18 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
 	load_pkcs11_parameters(&sc_pkcs11_conf, context);
 
 	/* List of sessions */
-	list_init(&sessions);
+	if (0 != list_init(&sessions)) {
+		rv = CKR_HOST_MEMORY;
+		goto out;
+	}
 	list_attributes_seeker(&sessions, session_list_seeker);
 
 	/* List of slots */
 	list_init(&virtual_slots);
+	if (0 != list_init(&virtual_slots)) {
+		rv = CKR_HOST_MEMORY;
+		goto out;
+	}
 	list_attributes_seeker(&virtual_slots, slot_list_seeker);
 
 	/* Create slots for readers found on initialization, only if in 2.11 mode */
@@ -316,7 +323,6 @@ CK_RV C_Finalize(CK_VOID_PTR pReserved)
 
 	while ((slot = list_fetch(&virtual_slots))) {
 		list_destroy(&slot->objects);
-		pop_all_login_states(slot);
 		list_destroy(&slot->logins);
 		free(slot);
 	}
@@ -406,28 +412,32 @@ CK_RV C_GetSlotList(CK_BBOOL       tokenPresent,  /* only slots with token prese
 	prev_reader = NULL;
 	numMatches = 0;
 	for (i=0; i<list_size(&virtual_slots); i++) {
-	        slot = (sc_pkcs11_slot_t *) list_get_at(&virtual_slots, i);
+		slot = (sc_pkcs11_slot_t *) list_get_at(&virtual_slots, i);
 		/* the list of available slots contains:
 		 * - if present, virtual hotplug slot;
 		 * - any slot with token;
 		 * - without token(s), one empty slot per reader;
+		 * - any slot that has already been seen;
 		 */
-	        if ((!tokenPresent && !slot->reader)
+		if ((!tokenPresent && !slot->reader)
 				|| (!tokenPresent && slot->reader != prev_reader)
-				|| (slot->slot_info.flags & CKF_TOKEN_PRESENT))
+				|| (slot->slot_info.flags & CKF_TOKEN_PRESENT)
+				|| (slot->flags & SC_PKCS11_SLOT_FLAG_SEEN)) {
 			found[numMatches++] = slot->id;
+			slot->flags |= SC_PKCS11_SLOT_FLAG_SEEN;
+		}
 		prev_reader = slot->reader;
 	}
 
 	if (pSlotList == NULL_PTR) {
-		sc_log(context, "was only a size inquiry (%d)\n", numMatches);
+		sc_log(context, "was only a size inquiry (%lu)\n", numMatches);
 		*pulCount = numMatches;
 		rv = CKR_OK;
 		goto out;
 	}
 
 	if (*pulCount < numMatches) {
-		sc_log(context, "buffer was too small (needed %d)\n", numMatches);
+		sc_log(context, "buffer was too small (needed %lu)\n", numMatches);
 		*pulCount = numMatches;
 		rv = CKR_BUFFER_TOO_SMALL;
 		goto out;
@@ -437,7 +447,7 @@ CK_RV C_GetSlotList(CK_BBOOL       tokenPresent,  /* only slots with token prese
 	*pulCount = numMatches;
 	rv = CKR_OK;
 
-	sc_log(context, "returned %d slots\n", numMatches);
+	sc_log(context, "returned %lu slots\n", numMatches);
 
 out:
 	if (found != NULL) {
@@ -500,7 +510,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_SLOT_INFO_PTR pInfo)
 	}
 
 	rv = slot_get_slot(slotID, &slot);
-	sc_log(context, "C_GetSlotInfo() get slot rv %i", rv);
+	sc_log(context, "C_GetSlotInfo() get slot rv %lu", rv);
 	if (rv == CKR_OK)   {
 		if (slot->reader == NULL)   {
 			rv = CKR_TOKEN_NOT_PRESENT;
@@ -510,7 +520,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_SLOT_INFO_PTR pInfo)
 			if (now >= slot->slot_state_expires || now == 0) {
 				/* Update slot status */
 				rv = card_detect(slot->reader);
-				sc_log(context, "C_GetSlotInfo() card detect rv 0x%X", rv);
+				sc_log(context, "C_GetSlotInfo() card detect rv 0x%lX", rv);
 
 				if (rv == CKR_TOKEN_NOT_RECOGNIZED || rv == CKR_OK)
 					slot->slot_info.flags |= CKF_TOKEN_PRESENT;
@@ -527,7 +537,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_SLOT_INFO_PTR pInfo)
 	if (rv == CKR_OK)
 		memcpy(pInfo, &slot->slot_info, sizeof(CK_SLOT_INFO));
 
-	sc_log(context, "C_GetSlotInfo() flags 0x%X", pInfo->flags);
+	sc_log(context, "C_GetSlotInfo() flags 0x%lX", pInfo->flags);
 	sc_log(context, "C_GetSlotInfo(0x%lx) = %s", slotID, lookup_enum( RV_T, rv));
 	sc_pkcs11_unlock();
 	return rv;
@@ -641,10 +651,11 @@ CK_RV C_WaitForSlotEvent(CK_FLAGS flags,   /* blocking/nonblocking flag */
 		return  CKR_ARGUMENTS_BAD;
 
 	sc_log(context, "C_WaitForSlotEvent(block=%d)", !(flags & CKF_DONT_BLOCK));
+#ifndef PCSCLITE_GOOD
 	/* Not all pcsc-lite versions implement consistently used functions as they are */
-	/* FIXME: add proper checking into build to check correct pcsc-lite version for SCardStatusChange/SCardCancel */
 	if (!(flags & CKF_DONT_BLOCK))
 		return CKR_FUNCTION_NOT_SUPPORTED;
+#endif /* PCSCLITE_GOOD */
 	rv = sc_pkcs11_lock();
 	if (rv != CKR_OK)
 		return rv;

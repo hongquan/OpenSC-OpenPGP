@@ -49,24 +49,28 @@ static struct sc_atr_table entersafe_atrs[] = {
 		"EJAVA/PK-01C-T0",SC_CARD_TYPE_ENTERSAFE_EJAVA_PK_01C_T0,0,NULL},
 	{
 		"3B:FC:18:00:00:81:31:80:45:90:67:46:4A:21:28:8C:58:00:00:00:00:B7",
-		"ff:00:00:00:00:ff:ff:ff:ff:00:00:00:00:ff:ff:ff:ff",
+		"ff:00:00:00:00:00:00:00:00:ff:ff:ff:ff:00:00:00:00:ff:ff:ff:ff:00",
 		"EJAVA/H10CR/PK-01C-T1",SC_CARD_TYPE_ENTERSAFE_EJAVA_H10CR_PK_01C_T1,0,NULL},
 	{
 		"3B:FC:18:00:00:81:31:80:45:90:67:46:4A:20:25:c3:30:00:00:00:00",
-		"ff:00:00:00:00:ff:ff:ff:ff:00:00:00:00:ff:ff:ff:ff",
+		"ff:00:00:00:00:00:00:00:00:ff:ff:ff:ff:00:00:00:00:00:00:00:00",
 		"EJAVA/D11CR/PK-01C-T1",SC_CARD_TYPE_ENTERSAFE_EJAVA_D11CR_PK_01C_T1,0,NULL},
 	{
 		"3B:FC:18:00:00:81:31:80:45:90:67:46:4A:00:6A:04:24:00:00:00:00:20",
-		"ff:00:00:00:00:ff:ff:ff:ff:00:00:00:00:ff:ff:ff:ff",
+		"ff:00:00:00:00:00:00:00:00:ff:ff:ff:ff:00:00:00:00:ff:ff:ff:ff:00",
 		"EJAVA/C21C/PK-01C-T1",SC_CARD_TYPE_ENTERSAFE_EJAVA_C21C_PK_01C_T1,0,NULL},
 	{
 		"3B:FC:18:00:00:81:31:80:45:90:67:46:4A:00:68:08:04:00:00:00:00:0E",
-		"ff:00:00:00:00:ff:ff:ff:ff:00:00:00:00:ff:ff:ff:ff",
+		"ff:00:00:00:00:00:00:00:00:ff:ff:ff:ff:00:00:00:00:ff:ff:ff:ff:00",
 		"EJAVA/A22CR/PK-01C-T1",SC_CARD_TYPE_ENTERSAFE_EJAVA_A22CR_PK_01C_T1,0,NULL},
 	{
 		"3B:FC:18:00:00:81:31:80:45:90:67:46:4A:10:27:61:30:00:00:00:00:0C",
-		"ff:00:00:00:00:ff:ff:ff:ff:00:00:00:00:ff:ff:ff:ff",
+		"ff:00:00:00:00:00:00:00:00:ff:ff:ff:ff:00:00:00:00:ff:ff:ff:ff:00",
 		"EJAVA/A40CR/PK-01C-T1",SC_CARD_TYPE_ENTERSAFE_EJAVA_A40CR_PK_01C_T1,0,NULL},
+	{
+		"3b:fc:18:00:00:81:31:80:45:90:67:46:4a:00:68:08:06:00:00:00:00:0c",
+		"FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:00:FF:FF:FF:FF:FF:FF:00:00:00",
+		"FTCOS/PK-01C", SC_CARD_TYPE_ENTERSAFE_FTCOS_PK_01C, 0, NULL },
 	{ NULL, NULL, NULL, 0, 0, NULL }
 };
 
@@ -194,7 +198,7 @@ static int entersafe_cipher_apdu(sc_card_t *card, sc_apdu_t *apdu,
 								 u8 *key, size_t keylen,
 								 u8 *buff, size_t buffsize)
 {
-	 EVP_CIPHER_CTX ctx;
+	 EVP_CIPHER_CTX * ctx = NULL;
 	 u8 iv[8]={0};
 	 int len;
 
@@ -211,27 +215,26 @@ static int entersafe_cipher_apdu(sc_card_t *card, sc_apdu_t *apdu,
 	 memcpy(buff+1,apdu->data,apdu->lc);
 	 buff[apdu->lc+1]=0x80;
 
-	 EVP_CIPHER_CTX_init(&ctx);
-	 EVP_CIPHER_CTX_set_padding(&ctx,0);
+	 ctx = EVP_CIPHER_CTX_new();
+	 if (ctx == NULL)
+		 SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
+	 EVP_CIPHER_CTX_set_padding(ctx,0);
 
 	 if(keylen == 8)
-		  EVP_EncryptInit_ex(&ctx, EVP_des_ecb(), NULL, key, iv);
+		  EVP_EncryptInit_ex(ctx, EVP_des_ecb(), NULL, key, iv);
 	 else if (keylen == 16) 
-		  EVP_EncryptInit_ex(&ctx, EVP_des_ede(), NULL, key, iv);
+		  EVP_EncryptInit_ex(ctx, EVP_des_ede(), NULL, key, iv);
 	 else
 		  SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INTERNAL);
 	 
 	 len = apdu->lc;
-	 if(!EVP_EncryptUpdate(&ctx, buff, &len, buff, buffsize)){
+	 if(!EVP_EncryptUpdate(ctx, buff, &len, buff, buffsize)){
 		  sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "entersafe encryption error.");
 		  SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INTERNAL);
 	 }
 	 apdu->lc = len;
 
-	 if (!EVP_CIPHER_CTX_cleanup(&ctx)){
-		  sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "entersafe encryption error.");
-		  SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INTERNAL);
-	 }
+	 EVP_CIPHER_CTX_free(ctx);
 
 	 if(apdu->lc!=buffsize)
 	 {
@@ -254,7 +257,7 @@ static int entersafe_mac_apdu(sc_card_t *card, sc_apdu_t *apdu,
 	 u8 *tmp=0,*tmp_rounded=NULL;
 	 size_t tmpsize=0,tmpsize_rounded=0;
 	 int outl=0;
-	 EVP_CIPHER_CTX ctx;
+	 EVP_CIPHER_CTX * ctx = NULL;
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 
@@ -292,12 +295,16 @@ static int entersafe_mac_apdu(sc_card_t *card, sc_apdu_t *apdu,
 	 tmp_rounded[tmpsize]=0x80;
 
 	 /* block_size-1 blocks*/
-	 EVP_CIPHER_CTX_init(&ctx);
-	 EVP_CIPHER_CTX_set_padding(&ctx,0);
-	 EVP_EncryptInit_ex(&ctx, EVP_des_cbc(), NULL, key, iv);
+	 ctx = EVP_CIPHER_CTX_new();
+	 if (ctx == NULL) {
+		r =  SC_ERROR_OUT_OF_MEMORY;
+		goto out;
+	 }
+	 EVP_CIPHER_CTX_set_padding(ctx,0);
+	 EVP_EncryptInit_ex(ctx, EVP_des_cbc(), NULL, key, iv);
 
 	 if(tmpsize_rounded>8){
-		  if(!EVP_EncryptUpdate(&ctx,tmp_rounded,&outl,tmp_rounded,tmpsize_rounded-8)){
+		  if(!EVP_EncryptUpdate(ctx,tmp_rounded,&outl,tmp_rounded,tmpsize_rounded-8)){
 			   r = SC_ERROR_INTERNAL;
 			   goto out;			   
 		  }
@@ -305,23 +312,18 @@ static int entersafe_mac_apdu(sc_card_t *card, sc_apdu_t *apdu,
 	 /* last block */
 	 if(keylen==8)
 	 {
-		  if(!EVP_EncryptUpdate(&ctx,tmp_rounded+outl,&outl,tmp_rounded+outl,8)){
+		  if(!EVP_EncryptUpdate(ctx,tmp_rounded+outl,&outl,tmp_rounded+outl,8)){
 			   r = SC_ERROR_INTERNAL;
 			   goto out;			   
 		  }
 	 }
 	 else
 	 {
-		  EVP_EncryptInit_ex(&ctx, EVP_des_ede_cbc(), NULL, key,tmp_rounded+outl-8);
-		  if(!EVP_EncryptUpdate(&ctx,tmp_rounded+outl,&outl,tmp_rounded+outl,8)){
+		  EVP_EncryptInit_ex(ctx, EVP_des_ede_cbc(), NULL, key,tmp_rounded+outl-8);
+		  if(!EVP_EncryptUpdate(ctx,tmp_rounded+outl,&outl,tmp_rounded+outl,8)){
 			   r = SC_ERROR_INTERNAL;
 			   goto out;			   
 		  }
-	 }
-
-	 if (!EVP_CIPHER_CTX_cleanup(&ctx)){
-		  r = SC_ERROR_INTERNAL;
-		  goto out;			   
 	 }
 
 	 memcpy(buff,apdu->data,apdu->lc);
@@ -336,6 +338,8 @@ out:
 		  free(tmp);
 	 if(tmp_rounded)
 		  free(tmp_rounded);
+	 if  (ctx)
+		EVP_CIPHER_CTX_free(ctx);
 
 	 SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, r);
 }
@@ -362,7 +366,8 @@ static int entersafe_transmit_apdu(sc_card_t *card, sc_apdu_t *apdu,
 	r = sc_apdu_get_octets(card->ctx, apdu, &sbuf, &ssize, SC_PROTO_RAW);
 	if (r == SC_SUCCESS)
 		sc_apdu_log(card->ctx, SC_LOG_DEBUG_VERBOSE, sbuf, ssize, 1);
-	free(sbuf);
+	if(sbuf)
+		free(sbuf);
 
 	 if(cipher)
 	 {
@@ -382,8 +387,13 @@ static int entersafe_transmit_apdu(sc_card_t *card, sc_apdu_t *apdu,
 	 {	 
 		  mac_data_size=apdu->lc+4;
 		  mac_data=malloc(mac_data_size);
+		  if(!mac_data)
+		  {
+			   r = SC_ERROR_OUT_OF_MEMORY;
+			   goto out;
+		  }
 		  r = entersafe_mac_apdu(card,apdu,key,keylen,mac_data,mac_data_size);
-		  if(r<0)
+		  if(r < 0)
 			   goto out;
 	 }
 	 
@@ -482,7 +492,7 @@ static int entersafe_select_fid(sc_card_t *card,
 								sc_file_t **file_out)
 {
 	int r;
-	sc_file_t *file=0;
+	sc_file_t *file = NULL;
 	sc_path_t path;
 
 	memset(&path, 0, sizeof(sc_path_t));
@@ -493,7 +503,8 @@ static int entersafe_select_fid(sc_card_t *card,
 	path.len=2;
 
 	r = iso_ops->select_file(card,&path,&file);
-	if(r) sc_file_free(file);
+	if (r)
+		sc_file_free(file);
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
 
 	/* update cache */
@@ -511,13 +522,9 @@ static int entersafe_select_fid(sc_card_t *card,
 	}
 	
 	if (file_out)
-	{
-		 *file_out = file;
-	}
+		*file_out = file;
 	else
-	{
 		sc_file_free(file);
-	}
 
 	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_SUCCESS);
 }
@@ -683,13 +690,14 @@ static int entersafe_select_file(sc_card_t *card,
 	  r = sc_path_print(pbuf, sizeof(pbuf), &card->cache.current_path);
 	  if (r != SC_SUCCESS)
 		 pbuf[0] = '\0';
-		
+
 	  sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-		"current path (%s, %s): %s (len: %u)\n",
-		   (card->cache.current_path.type==SC_PATH_TYPE_DF_NAME?"aid":"path"),
-		   (card->cache.valid?"valid":"invalid"), pbuf,
+		   "current path (%s, %s): %s (len: %"SC_FORMAT_LEN_SIZE_T"u)\n",
+		   card->cache.current_path.type == SC_PATH_TYPE_DF_NAME ?
+		   "aid" : "path",
+		   card->cache.valid ? "valid" : "invalid", pbuf,
 		   card->cache.current_path.len);
-	 
+
 	 switch(in_path->type)
 	 {
 	 case SC_PATH_TYPE_FILE_ID:

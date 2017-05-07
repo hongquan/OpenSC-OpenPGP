@@ -36,6 +36,7 @@
 #include <openssl/evp.h>
 #include <openssl/err.h>
 
+#include "libopensc/sc-ossl-compat.h"
 #include "libopensc/opensc.h"
 #include "libopensc/cardctl.h"
 #include "libopensc/card-gids.h"
@@ -276,7 +277,7 @@ static int changeAdminKey(sc_card_t* card, const char *so_pin, const char* new_k
 
 	if (new_key == NULL) {
 		printf("Enter new admin key (48 hexadecimal characters) : ");
-		util_getpass(&_so_pin, NULL, stdin);
+		util_getpass(&_new_key, NULL, stdin);
 		printf("\n");
 	} else {
 		_new_key = (char *)new_key;
@@ -384,12 +385,7 @@ static int print_info(sc_card_t *card) {
 				if (r < 0) {
 					printf("      unable to read the file: %s\n", sc_strerror(r));
 				} else {
-#ifdef _WIN32
-					// visual studio doesn't support %zu
-					printf("      Size: %Iu\n", size);
-#else
-					printf("      Size: %zu\n", size);
-#endif
+					printf("      Size: %"SC_FORMAT_LEN_SIZE_T"u\n", size);
 				}
 				printf("\n");
 				if (strcmp(records[i].directory, "mscp") == 0 && strcmp(records[i].filename, "cmapfile") == 0 ) {
@@ -521,7 +517,9 @@ int main(int argc, char * const argv[])
 		}
 	}
 
-	CRYPTO_malloc_init();
+	/* OpenSSL magic */
+	OPENSSL_malloc_init();
+
 	ERR_load_crypto_strings();
 	OpenSSL_add_all_algorithms();
 

@@ -86,9 +86,7 @@ static int sc_hsm_select_file(sc_card_t *card,
 
 	if (file_out == NULL) {				// Versions before 0.16 of the SmartCard-HSM do not support P2='0C'
 		rv = sc_hsm_select_file(card, in_path, &file);
-		if (file != NULL) {
-			sc_file_free(file);
-		}
+		sc_file_free(file);
 		return rv;
 	}
 
@@ -488,7 +486,9 @@ static int sc_hsm_decode_ecdsa_signature(sc_card_t *card,
 		fieldsizebytes = 64;
 	}
 
-	sc_log(card->ctx, "Field size %d, signature buffer size %d", fieldsizebytes, outlen);
+	sc_log(card->ctx,
+	       "Field size %"SC_FORMAT_LEN_SIZE_T"u, signature buffer size %"SC_FORMAT_LEN_SIZE_T"u",
+	       fieldsizebytes, outlen);
 
 	if (outlen < (fieldsizebytes * 2)) {
 		LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_DATA, "output too small for EC signature");
@@ -538,9 +538,12 @@ static int sc_hsm_compute_signature(sc_card_t *card,
 	sc_apdu_t apdu;
 	u8 rbuf[SC_MAX_APDU_BUFFER_SIZE];
 	u8 sbuf[SC_MAX_APDU_BUFFER_SIZE];
-	sc_hsm_private_data_t *priv = (sc_hsm_private_data_t *) card->drv_data;
+	sc_hsm_private_data_t *priv;
 
-	assert(card != NULL && data != NULL && out != NULL);
+	if (card == NULL || data == NULL || out == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+	priv = (sc_hsm_private_data_t *) card->drv_data;
 
 	if (priv->env == NULL) {
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_OBJECT_NOT_FOUND);
@@ -588,10 +591,13 @@ static int sc_hsm_decipher(sc_card_t *card, const u8 * crgram, size_t crgram_len
 	size_t len;
 	sc_apdu_t apdu;
 	u8 rbuf[SC_MAX_APDU_BUFFER_SIZE];
-	sc_hsm_private_data_t *priv = (sc_hsm_private_data_t *) card->drv_data;
+	sc_hsm_private_data_t *priv;
 
-	assert(card != NULL && crgram != NULL && out != NULL);
+	if (card == NULL || crgram == NULL || out == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	LOG_FUNC_CALLED(card->ctx);
+	priv = (sc_hsm_private_data_t *) card->drv_data;
 
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_4, 0x62, priv->env->key_ref[0], priv->algorithm);
 	apdu.cla = 0x80;

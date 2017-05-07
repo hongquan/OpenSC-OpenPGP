@@ -35,6 +35,7 @@ typedef unsigned char u8;
 #define SC_MAX_EXT_APDU_BUFFER_SIZE	65538
 #define SC_MAX_PIN_SIZE			256 /* OpenPGP card has 254 max */
 #define SC_MAX_ATR_SIZE			33
+#define SC_MAX_UID_SIZE			10
 #define SC_MAX_AID_SIZE			16
 #define SC_MAX_AID_STRING_SIZE		(SC_MAX_AID_SIZE * 2 + 3)
 #define SC_MAX_IIN_SIZE			10
@@ -73,6 +74,11 @@ struct sc_aid {
 
 struct sc_atr {
 	unsigned char value[SC_MAX_ATR_SIZE];
+	size_t len;
+};
+
+struct sc_uid {
+	unsigned char value[SC_MAX_UID_SIZE];
 	size_t len;
 };
 
@@ -273,6 +279,8 @@ typedef struct sc_file {
  * returns 0x6Cxx (wrong length)
  */
 #define SC_APDU_FLAGS_NO_RETRY_WL	0x00000004UL
+/* APDU is from Secure Messaging  */
+#define SC_APDU_FLAGS_NO_SM		0x00000008UL
 
 #define SC_APDU_ALLOCATE_FLAG		0x01
 #define SC_APDU_ALLOCATE_FLAG_DATA	0x02

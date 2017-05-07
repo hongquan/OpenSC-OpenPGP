@@ -92,13 +92,17 @@ static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 			pin_info.attrs.pin.pad_char = 0xff;
 			pin_info.path = path;
 			pin_info.tries_left = -1;
+			pin_info.logged_in = SC_PIN_STATE_UNKNOWN;
 			if (i == 1)
 				strlcpy(pin_obj.label, "Unblock",
 					sizeof(pin_obj.label));
 
-			else
+			else {
 				strlcpy(pin_obj.label, "User",
 					sizeof(pin_obj.label));
+				pin_obj.auth_id.len = 1;
+				pin_obj.auth_id.value[0] = 2;
+			}
 			pin_obj.flags =
 				SC_PKCS15_CO_FLAG_MODIFIABLE |
 				SC_PKCS15_CO_FLAG_PRIVATE;

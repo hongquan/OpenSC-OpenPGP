@@ -44,6 +44,7 @@ struct sc_pkcs15_emulator_handler builtin_emulators[] = {
 	{ "itacns",	sc_pkcs15emu_itacns_init_ex	},
 	{ "postecert",	sc_pkcs15emu_postecert_init_ex  },
 	{ "PIV-II",     sc_pkcs15emu_piv_init_ex	},
+	{ "cac",        sc_pkcs15emu_cac_init_ex	},
 	{ "gemsafeGPK",	sc_pkcs15emu_gemsafeGPK_init_ex	},
 	{ "gemsafeV1",	sc_pkcs15emu_gemsafeV1_init_ex	},
 	{ "actalis",	sc_pkcs15emu_actalis_init_ex	},
@@ -57,6 +58,7 @@ struct sc_pkcs15_emulator_handler builtin_emulators[] = {
 	{ "gids",       sc_pkcs15emu_gids_init_ex   },
 	{ "iasecc",	sc_pkcs15emu_iasecc_init_ex   },
 	{ "jpki",	sc_pkcs15emu_jpki_init_ex },
+	{ "coolkey",    sc_pkcs15emu_coolkey_init_ex	},
 	{ NULL, NULL }
 };
 
@@ -75,7 +77,6 @@ int sc_pkcs15_is_emulation_only(sc_card_t *card)
 		case SC_CARD_TYPE_MCRD_ESTEID_V10:
 		case SC_CARD_TYPE_MCRD_ESTEID_V11:
 		case SC_CARD_TYPE_MCRD_ESTEID_V30:
-		case SC_CARD_TYPE_IAS_PTEID:
 		case SC_CARD_TYPE_GEMSAFEV1_PTEID:
 		case SC_CARD_TYPE_OPENPGP_V1:
 		case SC_CARD_TYPE_OPENPGP_V2:

@@ -178,33 +178,37 @@ CK_RV push_login_state(struct sc_pkcs11_slot *slot,
 	struct sc_pkcs11_login *login = NULL;
 
 	if (!sc_pkcs11_conf.atomic || !slot) {
-		r = CKR_OK;
-		goto err;
+		return CKR_OK;
 	}
 
-	login = (struct sc_pkcs11_login *) malloc(sizeof *login);
+	login = (struct sc_pkcs11_login *) calloc(1, sizeof *login);
 	if (login == NULL) {
 		goto err;
 	}
 
-	login->pPin = sc_mem_alloc_secure(context, (sizeof *pPin)*ulPinLen);
-	if (login->pPin == NULL) {
-		goto err;
+	if (pPin && ulPinLen) {
+		login->pPin = sc_mem_alloc_secure(context, (sizeof *pPin)*ulPinLen);
+		if (login->pPin == NULL) {
+			goto err;
+		}
+		memcpy(login->pPin, pPin, (sizeof *pPin)*ulPinLen);
+		login->ulPinLen = ulPinLen;
 	}
-	memcpy(login->pPin, pPin, (sizeof *pPin)*ulPinLen);
-	login->ulPinLen = ulPinLen;
 	login->userType = userType;
 
 	if (0 > list_append(&slot->logins, login)) {
 		goto err;
 	}
 
+	login = NULL;
 	r = CKR_OK;
 
 err:
-	if (r != CKR_OK && login) {
-		sc_mem_clear(login->pPin, login->ulPinLen);
-		free(login->pPin);
+	if (login) {
+		if (login->pPin) {
+			sc_mem_clear(login->pPin, login->ulPinLen);
+			free(login->pPin);
+		}
 		free(login);
 	}
 

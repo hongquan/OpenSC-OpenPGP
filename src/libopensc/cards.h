@@ -47,6 +47,7 @@ enum {
 	SC_CARD_TYPE_CARDOS_CIE_V1, /* Italian CIE (eID) v1 */
 	SC_CARD_TYPE_CARDOS_M4_4,
 	SC_CARD_TYPE_CARDOS_V5_0,
+	SC_CARD_TYPE_CARDOS_V5_3,
 
 	/* flex/cyberflex drivers */
 	SC_CARD_TYPE_FLEX_BASE = 2000,
@@ -182,10 +183,6 @@ enum {
 	SC_CARD_TYPE_GEMSAFEV1_PTEID,
 	SC_CARD_TYPE_GEMSAFEV1_SEEID,
 
-	/* IAS cards */
-	SC_CARD_TYPE_IAS_BASE = 22000,
-	SC_CARD_TYPE_IAS_PTEID,
-
 	/* Italian CNS cards */
 	SC_CARD_TYPE_ITACNS_BASE = 23000,
 	SC_CARD_TYPE_ITACNS_GENERIC,
@@ -231,6 +228,20 @@ enum {
 
 	/* JPKI cards */
 	SC_CARD_TYPE_JPKI_BASE = 31000,
+
+	SC_CARD_TYPE_COOLKEY_BASE = 32000,
+	SC_CARD_TYPE_COOLKEY_GENERIC,
+
+	/* CAC cards */
+	SC_CARD_TYPE_CAC_BASE = 33000,
+	SC_CARD_TYPE_CAC_GENERIC,
+	SC_CARD_TYPE_CAC_I,
+	SC_CARD_TYPE_CAC_II,
+
+	/* nPA cards */
+	SC_CARD_TYPE_NPA = 34000,
+	SC_CARD_TYPE_NPA_TEST,
+	SC_CARD_TYPE_NPA_ONLINE,
 };
 
 extern sc_card_driver_t *sc_get_default_driver(void);
@@ -260,7 +271,6 @@ extern sc_card_driver_t *sc_get_rutoken_driver(void);
 extern sc_card_driver_t *sc_get_rtecp_driver(void);
 extern sc_card_driver_t *sc_get_westcos_driver(void);
 extern sc_card_driver_t *sc_get_myeid_driver(void);
-extern sc_card_driver_t *sc_get_ias_driver(void);
 extern sc_card_driver_t *sc_get_sc_hsm_driver(void);
 extern sc_card_driver_t *sc_get_itacns_driver(void);
 extern sc_card_driver_t *sc_get_authentic_driver(void);
@@ -271,6 +281,9 @@ extern sc_card_driver_t *sc_get_isoApplet_driver(void);
 extern sc_card_driver_t *sc_get_masktech_driver(void);
 extern sc_card_driver_t *sc_get_gids_driver(void);
 extern sc_card_driver_t *sc_get_jpki_driver(void);
+extern sc_card_driver_t *sc_get_coolkey_driver(void);
+extern sc_card_driver_t *sc_get_cac_driver(void);
+extern sc_card_driver_t *sc_get_npa_driver(void);
 
 #ifdef __cplusplus
 }

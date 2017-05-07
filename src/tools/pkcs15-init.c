@@ -144,13 +144,14 @@ enum {
 	OPT_MD_CONTAINER_GUID,
 	OPT_VERSION,
 
-	OPT_PIN1     = 0x10000,	/* don't touch these values */
-	OPT_PUK1     = 0x10001,
-	OPT_PIN2     = 0x10002,
-	OPT_PUK2     = 0x10003,
-	OPT_SERIAL   = 0x10004,
-	OPT_NO_SOPIN = 0x10005,
-	OPT_NO_PROMPT= 0x10006
+	OPT_PIN1      = 0x10000,	/* don't touch these values */
+	OPT_PUK1      = 0x10001,
+	OPT_PIN2      = 0x10002,
+	OPT_PUK2      = 0x10003,
+	OPT_SERIAL    = 0x10004,
+	OPT_NO_SOPIN  = 0x10005,
+	OPT_USE_PINPAD= 0x10006,
+	OPT_USE_PINPAD_DEPRECATED
 };
 
 const struct option	options[] = {
@@ -201,7 +202,8 @@ const struct option	options[] = {
 	{ "insecure",		no_argument, NULL,		OPT_INSECURE },
 	{ "use-default-transport-keys",
 				no_argument, NULL,		'T' },
-	{ "no-prompt",		no_argument, NULL,		OPT_NO_PROMPT },
+	{ "use-pinpad",		no_argument, NULL,		OPT_USE_PINPAD },
+	{ "no-prompt",		no_argument, NULL,		OPT_USE_PINPAD_DEPRECATED },
 
 	{ "profile",		required_argument, NULL,	'p' },
 	{ "card-profile",	required_argument, NULL,	'c' },
@@ -264,6 +266,7 @@ static const char *		option_help[] = {
 	"Insecure mode: do not require a PIN for private key",
 	"Do not ask for transport keys if the driver thinks it knows the key",
 	"Do not prompt the user; if no PINs supplied, pinpad will be used",
+	NULL,
 
 	"Specify the general profile to use",
 	"Specify the card profile to use",
@@ -344,7 +347,7 @@ static unsigned int		opt_actions;
 static int			opt_extractable = 0,
 				opt_insecure = 0,
 				opt_authority = 0,
-				opt_no_prompt = 0,
+				opt_use_pinpad = 0,
 				opt_no_sopin = 0,
 				opt_use_defkeys = 0,
 				opt_wait = 0,
@@ -621,7 +624,6 @@ out:
 		sc_pkcs15_unbind(p15card);
 	}
 	if (card) {
-		sc_unlock(card);
 		sc_disconnect_card(card);
 	}
 	sc_release_context(ctx);
@@ -649,7 +651,7 @@ open_reader_and_card(char *reader)
 		sc_ctx_log_to_file(ctx, "stderr");
 	}
 
-	if (util_connect_card(ctx, &card, reader, opt_wait, verbose))
+	if (util_connect_card_ex(ctx, &card, reader, opt_wait, 0, verbose))
 		return 0;
 
 	return 1;
@@ -663,6 +665,10 @@ do_assert_pristine(sc_card_t *in_card)
 {
 	sc_path_t	path;
 	int		r, ok = 1;
+
+	r = sc_lock(in_card);
+	if (r < 0)
+		goto end;
 
 	sc_format_path("3F00", &path);
 	r = sc_select_file(in_card, &path, NULL);
@@ -683,6 +689,7 @@ do_assert_pristine(sc_card_t *in_card)
 
 	ok = 0;
 end:
+	sc_unlock(in_card);
 	if (!ok) {
 		fprintf(stderr,
 			"Card not pristine; detected (possibly incomplete) "
@@ -702,14 +709,14 @@ do_erase(sc_card_t *in_card, struct sc_profile *profile)
 {
 	int	r;
 	struct sc_pkcs15_card *p15card;
+	struct sc_aid aid;
+	struct sc_aid *paid = NULL;
 
 	p15card = sc_pkcs15_card_new();
 	p15card->card = in_card;
 
 	ignore_cmdline_pins++;
 	if (opt_bind_to_aid)   {
-		struct sc_aid aid;
-
 		aid.len = sizeof(aid.value);
 		r = sc_hex_to_bin(opt_bind_to_aid, aid.value, &aid.len);
 		if (r < 0)   {
@@ -717,11 +724,15 @@ do_erase(sc_card_t *in_card, struct sc_profile *profile)
 			goto err;
 		}
 
-		r = sc_pkcs15init_erase_card(p15card, profile, &aid);
+		paid = &aid;
 	}
-	else   {
-		r = sc_pkcs15init_erase_card(p15card, profile, NULL);
-	}
+
+	r = sc_lock(p15card->card);
+	if (r < 0)
+		goto err;
+	r = sc_pkcs15init_erase_card(p15card, profile, paid);
+	sc_unlock(p15card->card);
+
 	ignore_cmdline_pins--;
 
 err:
@@ -742,7 +753,13 @@ do_erase_application(sc_card_t *in_card, struct sc_profile *profile)
 
 static int do_finalize_card(sc_card_t *in_card, struct sc_profile *profile)
 {
-	return sc_pkcs15init_finalize_card(in_card, profile);
+	int r;
+	r = sc_lock(in_card);
+	if (r < 0)
+		return r;
+	r = sc_pkcs15init_finalize_card(in_card, profile);
+	sc_unlock(in_card);
+	return r;
 }
 
 /*
@@ -790,14 +807,14 @@ do_init_app(struct sc_profile *profile)
 		so_puk_disabled = 1;
 
 
-	if (!opt_pins[2] && !opt_no_prompt && !opt_no_sopin) {
+	if (!opt_pins[2] && !opt_use_pinpad && !opt_no_sopin) {
 		r = get_new_pin(&hints, role, "pin", &pins[2]);
 		if (r < 0)
 			goto failed;
 		opt_pins[2] = pins[2];
 	}
 
-	if (!so_puk_disabled && opt_pins[2] && !opt_pins[3] && !opt_no_prompt) {
+	if (!so_puk_disabled && opt_pins[2] && !opt_pins[3] && !opt_use_pinpad) {
 		sc_pkcs15init_get_pin_info(profile, SC_PKCS15INIT_SO_PUK, &info);
 
 		if (!(info.attrs.pin.flags & SC_PKCS15_PIN_FLAG_SO_PIN))
@@ -823,7 +840,12 @@ do_init_app(struct sc_profile *profile)
 	args.serial = (const char *) opt_serial;
 	args.label = opt_label;
 
-	return sc_pkcs15init_add_app(card, profile, &args);
+	r = sc_lock(card);
+	if (r < 0)
+		return r;
+	r = sc_pkcs15init_add_app(card, profile, &args);
+	sc_unlock(card);
+	return r;
 
 failed:	fprintf(stderr, "Failed to read PIN: %s\n", sc_strerror(r));
 	return SC_ERROR_PKCS15INIT;
@@ -891,7 +913,12 @@ do_store_pin(struct sc_profile *profile)
 	args.puk = (u8 *) opt_pins[1];
 	args.puk_len = opt_pins[1]? strlen(opt_pins[1]) : 0;
 
-	return sc_pkcs15init_store_pin(p15card, profile, &args);
+	r = sc_lock(p15card->card);
+	if (r < 0)
+		return r;
+	r = sc_pkcs15init_store_pin(p15card, profile, &args);
+	sc_unlock(p15card->card);
+	return r;
 
 failed:	fprintf(stderr, "Failed to read PIN: %s\n", sc_strerror(r));
 	return SC_ERROR_PKCS15INIT;
@@ -963,10 +990,14 @@ do_store_private_key(struct sc_profile *profile)
 		| SC_PKCS15_PRKEY_ACCESS_ALWAYSSENSITIVE
 		| SC_PKCS15_PRKEY_ACCESS_NEVEREXTRACTABLE;
 
-	r = sc_pkcs15init_store_private_key(p15card, profile, &args, NULL);
-
+	r = sc_lock(p15card->card);
 	if (r < 0)
 		return r;
+	r = sc_pkcs15init_store_private_key(p15card, profile, &args, NULL);
+	if (r < 0) {
+		sc_unlock(p15card->card);
+		return r;
+	}
 
 	/* If there are certificate as well (e.g. when reading the
 	 * private key from a PKCS #12 file) store them, too.
@@ -1015,6 +1046,7 @@ next_cert:
 	if (ncerts == 0)
 		r = do_store_public_key(profile, pkey);
 
+	sc_unlock(p15card->card);
 	return r;
 }
 
@@ -1077,15 +1109,21 @@ do_store_public_key(struct sc_profile *profile, EVP_PKEY *pkey)
 	args.label = (opt_pubkey_label != 0 ? opt_pubkey_label : opt_label);
 	args.x509_usage = opt_x509_usage;
 
-	if (pkey == NULL)
+	if (pkey == NULL) {
 		r = do_read_public_key(opt_infile, opt_format, &pkey);
+	}
 	if (r >= 0) {
 		r = sc_pkcs15_convert_pubkey(&args.key, pkey);
 		if (r >= 0)
 			init_gost_params(&args.params.gost, pkey);
 	}
-	if (r >= 0)
+	if (r >= 0) {
+		r = sc_lock(p15card->card);
+		if (r < 0)
+			return r;
 		r = sc_pkcs15init_store_public_key(p15card, profile, &args, &dummy);
+		sc_unlock(p15card->card);
+	}
 
 	return r;
 }
@@ -1114,8 +1152,13 @@ do_store_certificate(struct sc_profile *profile)
 	r = do_read_certificate(opt_infile, opt_format, &cert);
 	if (r >= 0)
 		r = do_convert_cert(&args.der_encoded, cert);
-	if (r >= 0)
+	if (r >= 0) {
+		r = sc_lock(p15card->card);
+		if (r < 0)
+			return r;
 		r = sc_pkcs15init_store_certificate(p15card, profile, &args, NULL);
+		sc_unlock(p15card->card);
+	}
 
 	if (args.der_encoded.value)
 		free(args.der_encoded.value);
@@ -1216,16 +1259,20 @@ do_update_certificate(struct sc_profile *profile)
 		return SC_ERROR_OBJECT_NOT_FOUND;
 	}
 
+	r = sc_lock(p15card->card);
+	if (r < 0)
+		return r;
+
 	certinfo = (sc_pkcs15_cert_info_t *) obj->data;
 	r = sc_pkcs15_read_certificate(p15card, certinfo, &oldcert);
 	if (r < 0)
-		return r;
+		goto err;
 
 	newcert_raw.value = NULL;
 	r = do_read_check_certificate(oldcert, opt_infile, opt_format, &newcert_raw);
 	sc_pkcs15_free_certificate(oldcert);
 	if (r < 0)
-		return r;
+		goto err;
 
 	r = sc_pkcs15init_update_certificate(p15card, profile, obj,
 		newcert_raw.value, newcert_raw.len);
@@ -1233,6 +1280,8 @@ do_update_certificate(struct sc_profile *profile)
 	if (newcert_raw.value)
 		free(newcert_raw.value);
 
+err:
+	sc_unlock(p15card->card);
 	return r;
 }
 
@@ -1268,7 +1317,13 @@ do_store_data_object(struct sc_profile *profile)
 		/* der_encoded contains the plain data, nothing DER encoded */
 		args.der_encoded.value = data;
 		args.der_encoded.len = datalen;
+		r = sc_lock(p15card->card);
+		if (r < 0) {
+			free(data);
+			return r;
+		}
 		r = sc_pkcs15init_store_data_object(p15card, profile, &args, NULL);
+		sc_unlock(p15card->card);
 	}
 
 	if (data)
@@ -1282,7 +1337,13 @@ do_store_data_object(struct sc_profile *profile)
 static int
 do_sanity_check(struct sc_profile *profile)
 {
-	return sc_pkcs15init_sanity_check(p15card, profile);
+	int r;
+	r = sc_lock(p15card->card);
+	if (r < 0)
+		return r;
+	r = sc_pkcs15init_sanity_check(p15card, profile);
+	sc_unlock(p15card->card);
+	return r;
 }
 
 static int cert_is_root(sc_pkcs15_cert_t *c)
@@ -1430,6 +1491,10 @@ do_delete_objects(struct sc_profile *profile, unsigned int myopt_delete_flags)
 {
 	int r = 0, count = 0;
 
+	r = sc_lock(p15card->card);
+	if (r < 0)
+		return r;
+
 	if (myopt_delete_flags & SC_PKCS15INIT_TYPE_DATA) {
 		struct sc_object_id app_oid;
 		sc_pkcs15_object_t *obj = NULL;
@@ -1464,6 +1529,7 @@ do_delete_objects(struct sc_profile *profile, unsigned int myopt_delete_flags)
 			count += r;
 	}
 
+	sc_unlock(p15card->card);
 	printf("Deleted %d objects\n", count);
 
 	return r;
@@ -1516,7 +1582,11 @@ do_change_attributes(struct sc_profile *profile, unsigned int myopt_type)
 		strlcpy(obj->label, opt_label, sizeof(obj->label));
 	}
 
+	r = sc_lock(p15card->card);
+	if (r < 0)
+		return r;
 	r = sc_pkcs15init_update_any_df(p15card, profile, obj->df, 0);
+	sc_unlock(p15card->card);
 
 	return r;
 }
@@ -1581,7 +1651,11 @@ do_generate_key(struct sc_profile *profile, const char *spec)
 			}
 		}
 	}
+	r = sc_lock(p15card->card);
+	if (r < 0)
+		return r;
 	r = sc_pkcs15init_generate_key(p15card, profile, &keygen_args, keybits, NULL);
+	sc_unlock(p15card->card);
 	return r;
 }
 
@@ -1823,7 +1897,7 @@ get_pin_callback(struct sc_profile *profile,
 		char		prompt[128];
 		int		r;
 
-		if (opt_no_prompt)
+		if (opt_use_pinpad)
 			return SC_ERROR_OBJECT_NOT_FOUND;
 
 		snprintf(prompt, sizeof(prompt), "%s required", name);
@@ -1889,9 +1963,9 @@ get_key_callback(struct sc_profile *profile,
 	}
 
 	printf("Transport key (%s #%d) required.\n", kind, reference);
-	if (opt_no_prompt) {
+	if (opt_use_pinpad) {
 		printf("\n"
-		"Refusing to prompt for transport key because --no-prompt\n"
+		"Refusing to prompt for transport key because --use-pinpad\n"
 		"was specified on the command line. Please invoke without\n"
 		"--no-prompt, or specify the --use-default-transport-keys\n"
 		"option to use the default transport keys without being\n"
@@ -2558,8 +2632,10 @@ handle_option(const struct option *opt)
 	case OPT_NO_SOPIN:
 		opt_no_sopin = 1;
 		break;
-	case OPT_NO_PROMPT:
-		opt_no_prompt = 1;
+	case OPT_USE_PINPAD_DEPRECATED:
+		fprintf(stderr, "'--no-prompt' is deprecated , use '--use-pinpad' instead.\n");
+	case OPT_USE_PINPAD:
+		opt_use_pinpad = 1;
 		break;
 	case OPT_ASSERT_PRISTINE:
 		this_action = ACTION_ASSERT_PRISTINE;
@@ -2900,7 +2976,7 @@ static int verify_pin(struct sc_pkcs15_card *p15card, char *auth_id_str)
 	else   {
 		sc_ui_hints_t   hints;
 
-                if (opt_no_prompt)
+                if (opt_use_pinpad)
 			return SC_ERROR_OBJECT_NOT_FOUND;
 
 		if (pin_obj->label[0])

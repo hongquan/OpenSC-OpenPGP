@@ -152,8 +152,7 @@ awp_new_file(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 	if (otag)   {
 		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "obj template %s",otag);
 		if (sc_profile_get_file(profile, otag, &ofile) < 0) {
-			if (ifile)
-				sc_file_free(ifile);
+			sc_file_free(ifile);
 			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "profile does not defines template '%s'", name);
 			return SC_ERROR_INCONSISTENT_PROFILE;
 		}
@@ -171,8 +170,9 @@ awp_new_file(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 				ifile->path.value[ifile->path.len-2] |= 0x01;
 			}
 
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "info_file(id:%04X,size:%i,rlen:%i)",
-					ifile->id, ifile->size, ifile->record_length);
+			sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+				 "info_file(id:%04X,size:%"SC_FORMAT_LEN_SIZE_T"u,rlen:%i)",
+				 ifile->id, ifile->size, ifile->record_length);
 			*info_out = ifile;
 		}
 		else   {
@@ -181,7 +181,9 @@ awp_new_file(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 	}
 
 	if (ofile)   {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "obj file %04X; size %i; ", ofile->id, ofile->size);
+		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+			 "obj file %04X; size %"SC_FORMAT_LEN_SIZE_T"u; ",
+			 ofile->id, ofile->size);
 		if (obj_out)
 			*obj_out = ofile;
 		else
@@ -347,7 +349,9 @@ awp_update_container_entry (struct sc_pkcs15_card *p15card, struct sc_profile *p
 	unsigned char *buff = NULL;
 
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "update container entry(type:%X,len:%i,count %i,rec %i,offs %i", type, file_id, rec, offs);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "update container entry(type:%X,id %i,rec %i,offs %i",
+		 type, file_id, rec, offs);
 	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "container file(file-id:%X,rlen:%i,rcount:%i)",
 			list_file->id, list_file->record_length, list_file->record_count);
 
@@ -531,8 +535,8 @@ awp_update_container(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 	}
 
 done:
-	if (clist)	sc_file_free(clist);
-	if (file)	sc_file_free(file);
+	sc_file_free(clist);
+	sc_file_free(file);
 	if (list)  free(list);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
@@ -725,7 +729,9 @@ awp_update_object_list(struct sc_pkcs15_card *p15card, struct sc_profile *profil
 		goto done;
 	}
 
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "ii %i, rv %i; %X; %i", ii, rv, file->id, file->size);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "ii %i, rv %i; %X; %"SC_FORMAT_LEN_SIZE_T"u",
+		 ii, rv, file->id, file->size);
 	*(buff + ii) = COSM_LIST_TAG;
 	*(buff + ii + 1) = (file->id >> 8) & 0xFF;
 	*(buff + ii + 2) = file->id & 0xFF;
@@ -776,12 +782,16 @@ awp_encode_key_info(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *obj
 
 	ki->label.value = (unsigned char *)strdup(obj->label);
 	ki->label.len = strlen(obj->label);
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "cosm_encode_key_info() label(%i):%s",ki->label.len, ki->label.value);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "cosm_encode_key_info() label(%u):%s",
+		 ki->label.len, ki->label.value);
 
 	/*
 	 * Oberthur saves modulus value without tag and length.
 	 */
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "pubkey->modulus.len %i",pubkey->modulus.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "pubkey->modulus.len %"SC_FORMAT_LEN_SIZE_T"u",
+		 pubkey->modulus.len);
 	ki->modulus.value = malloc(pubkey->modulus.len);
 	if (!ki->modulus.value)   {
 		r = SC_ERROR_OUT_OF_MEMORY;
@@ -929,8 +939,10 @@ awp_encode_cert_info(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *ob
 
 	cert_info = (struct sc_pkcs15_cert_info *)obj->data;
 
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Encode cert(%s,id:%s,der(%p,%i))", obj->label,
-			sc_pkcs15_print_id(&cert_info->id), obj->content.value, obj->content.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "Encode cert(%s,id:%s,der(%p,%"SC_FORMAT_LEN_SIZE_T"u))",
+		 obj->label, sc_pkcs15_print_id(&cert_info->id),
+		 obj->content.value, obj->content.len);
 	memset(&pubkey, 0, sizeof(pubkey));
 
 	ci->label.value = (unsigned char *)strdup(obj->label);
@@ -1096,8 +1108,10 @@ awp_encode_data_info(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *ob
 
 	data_info = (struct sc_pkcs15_data_info *)obj->data;
 
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Encode data(%s,id:%s,der(%p,%i))", obj->label,
-			sc_pkcs15_print_id(&data_info->id), obj->content.value, obj->content.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "Encode data(%s,id:%s,der(%p,%"SC_FORMAT_LEN_SIZE_T"u))",
+		 obj->label, sc_pkcs15_print_id(&data_info->id),
+		 obj->content.value, obj->content.len);
 
 	di->flags = 0x0000;
 
@@ -1371,7 +1385,8 @@ awp_update_df_create_cert(struct sc_pkcs15_card *p15card, struct sc_profile *pro
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "COSM new file error");
 
 	memset(&icert, 0, sizeof(icert));
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Cert Der(%p,%i)", der.value, der.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "Cert Der(%p,%"SC_FORMAT_LEN_SIZE_T"u)", der.value, der.len);
 	rv = awp_encode_cert_info(p15card, obj, &icert);
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "'Create Cert' update DF failed: cannot encode info");
 
@@ -1392,10 +1407,8 @@ awp_update_df_create_cert(struct sc_pkcs15_card *p15card, struct sc_profile *pro
 
 	awp_free_cert_info(&icert);
 
-	if (info_file)
-		sc_file_free(info_file);
-	if (obj_file)
-		sc_file_free(obj_file);
+	sc_file_free(info_file);
+	sc_file_free(obj_file);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
@@ -1459,7 +1472,8 @@ awp_update_df_create_prvkey(struct sc_pkcs15_card *p15card, struct sc_profile *p
 	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "New private key info file error");
 
 	pubkey.algorithm = SC_ALGORITHM_RSA;
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "PrKey Der(%p,%i)", der.value, der.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "PrKey Der(%p,%"SC_FORMAT_LEN_SIZE_T"u)", der.value, der.len);
 	rv = sc_pkcs15_decode_pubkey(ctx, &pubkey, der.value, der.len);
 	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed: decode public key error");
 
@@ -1478,8 +1492,7 @@ awp_update_df_create_prvkey(struct sc_pkcs15_card *p15card, struct sc_profile *p
 err:
 	if (p15cert)
 		sc_pkcs15_free_certificate(p15cert);
-	if (info_file)
-		sc_file_free(info_file);
+	sc_file_free(info_file);
 	if (cert_obj)
 		awp_free_cert_info(&icert);
 
@@ -1512,7 +1525,8 @@ awp_update_df_create_pubkey(struct sc_pkcs15_card *p15card, struct sc_profile *p
 	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "New public key info file error");
 
 	pubkey.algorithm = SC_ALGORITHM_RSA;
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "PrKey Der(%p,%i)", der.value, der.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "PrKey Der(%p,%"SC_FORMAT_LEN_SIZE_T"u)", der.value, der.len);
 	rv = sc_pkcs15_decode_pubkey(ctx, &pubkey, der.value, der.len);
 	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update public key' DF failed: decode public key error");
 
@@ -1532,8 +1546,7 @@ awp_update_df_create_pubkey(struct sc_pkcs15_card *p15card, struct sc_profile *p
 	awp_free_key_info(&ikey);
 
 err:
-	if (info_file)
-		sc_file_free(info_file);
+	sc_file_free(info_file);
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
 
@@ -1560,7 +1573,8 @@ awp_update_df_create_data(struct sc_pkcs15_card *p15card, struct sc_profile *pro
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "COSM new file error");
 
 	memset(&idata, 0, sizeof(idata));
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Data Der(%p,%i)", der.value, der.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "Data Der(%p,%"SC_FORMAT_LEN_SIZE_T"u)", der.value, der.len);
 	rv = awp_encode_data_info(p15card, obj, &idata);
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "'Create Data' update DF failed: cannot encode info");
 
@@ -1572,10 +1586,8 @@ awp_update_df_create_data(struct sc_pkcs15_card *p15card, struct sc_profile *pro
 
 	awp_free_data_info(&idata);
 
-	if (info_file)
-		sc_file_free(info_file);
-	if (obj_file)
-		sc_file_free(obj_file);
+	sc_file_free(info_file);
+	sc_file_free(obj_file);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
@@ -1689,8 +1701,8 @@ awp_delete_from_container(struct sc_pkcs15_card *p15card,
 	if (rv > 0)
 		rv = 0;
 
-	if (buff)		free(buff);
-	if (clist)		sc_file_free(clist);
+	free(buff);
+	sc_file_free(clist);
 	sc_file_free(file);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
@@ -1766,8 +1778,7 @@ done:
 	if (buff)
 		free(buff);
 	sc_file_free(lst);
-	if (lst_file)
-		sc_file_free(lst_file);
+	sc_file_free(lst_file);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }

@@ -1,5 +1,5 @@
 /**
- * cwa-dnie.h: Defines dnie_transmit_apdu wrapper for sc_transmit_apdu
+ * cwa-dnie.h: CWA specifics for DNIe
  *
  * This work is derived from many sources at OpenSC Project site,
  * (see references), and the information made public for Spanish 
@@ -23,7 +23,7 @@
 #ifndef __CWADNIE_H__
 #define __CWADNIE_H__
 
-#ifdef ENABLE_OPENSSL
+#if defined(ENABLE_OPENSSL) && defined(ENABLE_SM)
 
 #include "libopensc/opensc.h"
 
@@ -61,15 +61,19 @@ struct cwa_provider_st;
 #define GET_DNIE_PRIV_DATA(card) ((dnie_private_data_t *) ((card)->drv_data))
 #define GET_DNIE_UI_CTX(card) (((dnie_private_data_t *) ((card)->drv_data))->ui_ctx)
 
-int dnie_transmit_apdu(sc_card_t * card, sc_apdu_t * apdu);
+#define DNIE_30_VERSION 0x04
+#define DNIE_30_CACHE_COUNTER 30000
+
+cwa_provider_t *dnie_get_cwa_provider(sc_card_t * card);
+
+void dnie_change_cwa_provider_to_pin(sc_card_t * card);
+
+void dnie_change_cwa_provider_to_secure(sc_card_t * card);
 
 void dnie_format_apdu(sc_card_t *card, sc_apdu_t *apdu,
                        int cse, int ins, int p1, int p2, int le, int lc,
                        unsigned char * resp, size_t resplen,
                        const unsigned char * data, size_t datalen);
-
-void dnie_free_apdu_buffers(sc_apdu_t *apdu,
-                               unsigned char * resp, size_t resplen);
 
 #endif
 

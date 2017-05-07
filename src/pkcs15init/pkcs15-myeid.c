@@ -185,8 +185,7 @@ myeid_init_card(sc_profile_t *profile,
         sc_format_path("3F00", &path);
 	r = sc_select_file(p15card->card, &path, &file);
 
-	if (file)
-		sc_file_free(file);
+	sc_file_free(file);
 
 	LOG_FUNC_RETURN(p15card->card->ctx, r);
 }
@@ -231,8 +230,7 @@ myeid_create_dir(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file_t *df
 			sc_log(ctx, "Create '%s'", create_dfs[ii]);
 
 			r = sc_profile_get_file(profile, create_dfs[ii], &file);
-			if (file)
-				sc_file_free(file);
+			sc_file_free(file);
 			if (r) {
 				sc_log(ctx, "Inconsistent profile: cannot find %s", create_dfs[ii]);
 				LOG_FUNC_RETURN(ctx, SC_ERROR_INCONSISTENT_PROFILE);
@@ -292,8 +290,10 @@ myeid_create_pin(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 	int r;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "PIN('%s',ref:%i,flags:0x%X,pin_len:%d,puk_len:%d)\n",
-			pin_obj->label, auth_info->attrs.pin.reference, auth_info->attrs.pin.flags, pin_len, puk_len);
+	sc_log(ctx,
+	       "PIN('%s',ref:%i,flags:0x%X,pin_len:%"SC_FORMAT_LEN_SIZE_T"u,puk_len:%"SC_FORMAT_LEN_SIZE_T"u)\n",
+	       pin_obj->label, auth_info->attrs.pin.reference,
+	       auth_info->attrs.pin.flags, pin_len, puk_len);
 
 	if (auth_info->auth_type != SC_PKCS15_PIN_AUTH_TYPE_PIN)
 		return SC_ERROR_OBJECT_NOT_VALID;
@@ -411,7 +411,7 @@ myeid_encode_public_key(sc_profile_t *profile, sc_card_t *card,
 
 
 /*
- * Store a private key
+ * Create a private key file
  */
 static int
 myeid_create_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
@@ -420,7 +420,11 @@ myeid_create_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 	struct sc_card *card = p15card->card;
 	struct sc_pkcs15_prkey_info *key_info = (struct sc_pkcs15_prkey_info *) object->data;
 	struct sc_file *file = NULL;
+	struct sc_pkcs15_object *pin_object = NULL;
+	struct sc_pkcs15_auth_info *pkcs15_auth_info = NULL;
 	int keybits = key_info->modulus_length, r;
+	int pin_reference = -1;
+	unsigned char sec_attrs[] = {0xFF, 0xFF, 0xFF};
 
 	LOG_FUNC_CALLED(card->ctx);
 
@@ -474,6 +478,38 @@ myeid_create_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 	sc_log(ctx, "Path of MyEID private key file to create %s",
 			sc_print_path(&file->path));
 
+	if (object->auth_id.len >= 1) {
+		r = sc_pkcs15_find_pin_by_auth_id(p15card, &object->auth_id, &pin_object);
+
+		if (r != SC_SUCCESS)
+			sc_file_free(file);
+		LOG_TEST_RET(ctx, r, "Failed to get pin object by auth_id");
+
+		if (pin_object->type != SC_PKCS15_TYPE_AUTH_PIN) {
+			sc_file_free(file);
+			LOG_TEST_RET(ctx, SC_ERROR_OBJECT_NOT_VALID, "Invalid object returned when locating pin object.");
+		}
+
+		pkcs15_auth_info =  (struct sc_pkcs15_auth_info*) pin_object->data;
+
+		if (pkcs15_auth_info == NULL || pkcs15_auth_info->auth_type != SC_PKCS15_PIN_AUTH_TYPE_PIN) {
+			sc_file_free(file);
+			LOG_TEST_RET(ctx, SC_ERROR_OBJECT_NOT_VALID, "NULL or invalid sc_pkcs15_auth_info in pin object");
+		}
+
+		pin_reference = pkcs15_auth_info->attrs.pin.reference;
+
+		if (pin_reference >= 1 && pin_reference < MYEID_MAX_PINS) {
+			sec_attrs[0] = (pin_reference << 4 | (pin_reference & 0x0F));
+			sec_attrs[1] = (pin_reference << 4 | (pin_reference & 0x0F));
+			sc_file_set_sec_attr(file, sec_attrs, sizeof(sec_attrs));
+		}
+	}
+	else {
+		sc_file_free(file);
+		LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "Invalid AuthID value for a private key.");
+	}
+
 	/* Now create the key file */
 	r = sc_pkcs15init_create_file(profile, p15card, file);
 	sc_file_free(file);
@@ -512,10 +548,10 @@ myeid_store_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 				keybits = key_info->field_length;
 			else
 				key_info->field_length = keybits;
-			break;
-			
+
 			if (sc_card_find_ec_alg(p15card->card, keybits, &prkey->u.ec.params.id) == NULL)
 				LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "Unsupported algorithm or key size");			
+			break;
 		default:
 			LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "Store key failed: Unsupported key type");
 			break;
@@ -530,8 +566,7 @@ myeid_store_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 	r = sc_pkcs15init_authenticate(profile, p15card, file, SC_AC_OP_UPDATE);
 	LOG_TEST_RET(ctx, r, "No authorisation to store MyEID private key");
 
-	if (file)
-		sc_file_free(file);
+	sc_file_free(file);
 
 	/* Fill in data structure */
 	memset(&args, 0, sizeof (args));
@@ -674,7 +709,10 @@ myeid_generate_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 		else if (object->type == SC_PKCS15_TYPE_PRKEY_EC) {
 			struct sc_ec_parameters *ecparams = (struct sc_ec_parameters *)key_info->params.data;
 
-			sc_log(ctx, "curve '%s', len %i, oid '%s'", ecparams->named_curve, ecparams->field_length, sc_dump_oid(&(ecparams->id)));
+			sc_log(ctx,
+			       "curve '%s', len %"SC_FORMAT_LEN_SIZE_T"u, oid '%s'",
+			       ecparams->named_curve, ecparams->field_length,
+			       sc_dump_oid(&(ecparams->id)));
 			pubkey->algorithm = SC_ALGORITHM_EC;
 
 			r = sc_select_file(card, &file->path, NULL);
@@ -722,8 +760,7 @@ myeid_generate_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 		}
 	}
 
-	if (file)
-		sc_file_free(file);
+	sc_file_free(file);
 
 	LOG_FUNC_RETURN(ctx, r);
 }

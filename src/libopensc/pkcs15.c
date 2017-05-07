@@ -406,14 +406,10 @@ fix_authentic_ddo(struct sc_pkcs15_card *p15card)
 	 * Cleanup this attributes -- default values must be OK.
 	 */
 	if (p15card->card->type == SC_CARD_TYPE_OBERTHUR_AUTHENTIC_3_2)   {
-		if (p15card->file_odf != NULL) {
-			sc_file_free(p15card->file_odf);
-			p15card->file_odf = NULL;
-		}
-		if (p15card->file_tokeninfo != NULL) {
-			sc_file_free(p15card->file_tokeninfo);
-			p15card->file_tokeninfo = NULL;
-		}
+		sc_file_free(p15card->file_odf);
+		p15card->file_odf = NULL;
+		sc_file_free(p15card->file_tokeninfo);
+		p15card->file_tokeninfo = NULL;
 	}
 }
 
@@ -518,18 +514,12 @@ parse_ddo(struct sc_pkcs15_card *p15card, const u8 * buf, size_t buflen)
 	fix_authentic_ddo(p15card);
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 mem_err:
-	if (p15card->file_odf != NULL) {
-		sc_file_free(p15card->file_odf);
-		p15card->file_odf = NULL;
-	}
-	if (p15card->file_tokeninfo != NULL) {
-		sc_file_free(p15card->file_tokeninfo);
-		p15card->file_tokeninfo = NULL;
-	}
-	if (p15card->file_unusedspace != NULL) {
-		sc_file_free(p15card->file_unusedspace);
-		p15card->file_unusedspace = NULL;
-	}
+	sc_file_free(p15card->file_odf);
+	p15card->file_odf = NULL;
+	sc_file_free(p15card->file_tokeninfo);
+	p15card->file_tokeninfo = NULL;
+	sc_file_free(p15card->file_unusedspace);
+	p15card->file_unusedspace = NULL;
 	LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
 }
 
@@ -777,9 +767,8 @@ sc_pkcs15_free_app(struct sc_pkcs15_card *p15card)
 void
 sc_pkcs15_card_free(struct sc_pkcs15_card *p15card)
 {
-	if (p15card == NULL)
+	if (p15card == NULL || p15card->magic != SC_PKCS15_CARD_MAGIC)
 		return;
-	assert(p15card->magic == SC_PKCS15_CARD_MAGIC);
 
 	if (p15card->ops.clear)
 		p15card->ops.clear(p15card);
@@ -794,14 +783,10 @@ sc_pkcs15_card_free(struct sc_pkcs15_card *p15card)
 	sc_pkcs15_free_unusedspace(p15card);
 	p15card->unusedspace_read = 0;
 
-	if (p15card->file_app != NULL)
-		sc_file_free(p15card->file_app);
-	if (p15card->file_tokeninfo != NULL)
-		sc_file_free(p15card->file_tokeninfo);
-	if (p15card->file_odf != NULL)
-		sc_file_free(p15card->file_odf);
-	if (p15card->file_unusedspace != NULL)
-		sc_file_free(p15card->file_unusedspace);
+	sc_file_free(p15card->file_app);
+	sc_file_free(p15card->file_tokeninfo);
+	sc_file_free(p15card->file_odf);
+	sc_file_free(p15card->file_unusedspace);
 
 	p15card->magic = 0;
 	sc_pkcs15_free_tokeninfo(p15card);
@@ -827,22 +812,14 @@ sc_pkcs15_card_clear(struct sc_pkcs15_card *p15card)
 	sc_pkcs15_remove_dfs(p15card);
 
 	p15card->df_list = NULL;
-	if (p15card->file_app != NULL) {
-		sc_file_free(p15card->file_app);
-		p15card->file_app = NULL;
-	}
-	if (p15card->file_tokeninfo != NULL) {
-		sc_file_free(p15card->file_tokeninfo);
-		p15card->file_tokeninfo = NULL;
-	}
-	if (p15card->file_odf != NULL) {
-		sc_file_free(p15card->file_odf);
-		p15card->file_odf = NULL;
-	}
-	if (p15card->file_unusedspace != NULL) {
-		sc_file_free(p15card->file_unusedspace);
-		p15card->file_unusedspace = NULL;
-	}
+	sc_file_free(p15card->file_app);
+	p15card->file_app = NULL;
+	sc_file_free(p15card->file_tokeninfo);
+	p15card->file_tokeninfo = NULL;
+	sc_file_free(p15card->file_odf);
+	p15card->file_odf = NULL;
+	sc_file_free(p15card->file_unusedspace);
+	p15card->file_unusedspace = NULL;
 	if (p15card->tokeninfo->label != NULL) {
 		free(p15card->tokeninfo->label);
 		p15card->tokeninfo->label = NULL;
@@ -1176,6 +1153,10 @@ sc_pkcs15_bind_internal(struct sc_pkcs15_card *p15card, struct sc_aid *aid)
 	if (!p15card->tokeninfo->serial_number && card->serialnr.len)   {
 		char *serial = calloc(1, card->serialnr.len*2 + 1);
 		size_t ii;
+		if (!serial) {
+			err = SC_ERROR_OUT_OF_MEMORY;
+			goto end;
+		}
 
 		for(ii=0;ii<card->serialnr.len;ii++)
 			sprintf(serial + ii*2, "%02X", *(card->serialnr.value + ii));
@@ -1211,7 +1192,9 @@ sc_pkcs15_bind(struct sc_card *card, struct sc_aid *aid,
 	LOG_FUNC_CALLED(ctx);
 	sc_log(ctx, "application(aid:'%s')", aid ? sc_dump_hex(aid->value, aid->len) : "empty");
 
-	assert(p15card_out != NULL);
+	if (p15card_out == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	p15card = sc_pkcs15_card_new();
 	if (p15card == NULL)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
@@ -1283,7 +1266,9 @@ error:
 int
 sc_pkcs15_unbind(struct sc_pkcs15_card *p15card)
 {
-	assert(p15card != NULL && p15card->magic == SC_PKCS15_CARD_MAGIC);
+	if (p15card == NULL || p15card->magic != SC_PKCS15_CARD_MAGIC) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	LOG_FUNC_CALLED(p15card->card->ctx);
 	if (p15card->dll_handle)
@@ -1388,26 +1373,16 @@ compare_obj_id(struct sc_pkcs15_object *obj, const struct sc_pkcs15_id *id)
 {
 	void *data = obj->data;
 
-	switch (obj->type) {
-	case SC_PKCS15_TYPE_CERT_X509:
+	switch (obj->type & SC_PKCS15_TYPE_CLASS_MASK) {
+	case SC_PKCS15_TYPE_CERT:
 		return sc_pkcs15_compare_id(&((struct sc_pkcs15_cert_info *) data)->id, id);
-	case SC_PKCS15_TYPE_PRKEY_RSA:
-	case SC_PKCS15_TYPE_PRKEY_DSA:
-	case SC_PKCS15_TYPE_PRKEY_GOSTR3410:
-	case SC_PKCS15_TYPE_PRKEY_EC:
+	case SC_PKCS15_TYPE_PRKEY:
 		return sc_pkcs15_compare_id(&((struct sc_pkcs15_prkey_info *) data)->id, id);
-	case SC_PKCS15_TYPE_PUBKEY_RSA:
-	case SC_PKCS15_TYPE_PUBKEY_DSA:
-	case SC_PKCS15_TYPE_PUBKEY_GOSTR3410:
-	case SC_PKCS15_TYPE_PUBKEY_EC:
+	case SC_PKCS15_TYPE_PUBKEY:
 		return sc_pkcs15_compare_id(&((struct sc_pkcs15_pubkey_info *) data)->id, id);
-	case SC_PKCS15_TYPE_SKEY_DES:
-	case SC_PKCS15_TYPE_SKEY_2DES:
-	case SC_PKCS15_TYPE_SKEY_3DES:
+	case SC_PKCS15_TYPE_SKEY:
 		return sc_pkcs15_compare_id(&((struct sc_pkcs15_skey_info *) data)->id, id);
-	case SC_PKCS15_TYPE_AUTH_PIN:
-	case SC_PKCS15_TYPE_AUTH_BIO:
-	case SC_PKCS15_TYPE_AUTH_AUTHKEY:
+	case SC_PKCS15_TYPE_AUTH:
 		return sc_pkcs15_compare_id(&((struct sc_pkcs15_auth_info *) data)->auth_id, id);
 	case SC_PKCS15_TYPE_DATA_OBJECT:
 		return sc_pkcs15_compare_id(&((struct sc_pkcs15_data_info *) data)->id, id);
@@ -1419,7 +1394,7 @@ compare_obj_id(struct sc_pkcs15_object *obj, const struct sc_pkcs15_id *id)
 static int
 sc_obj_app_oid(struct sc_pkcs15_object *obj, const struct sc_object_id *app_oid)
 {
-	if (obj->type & SC_PKCS15_TYPE_DATA_OBJECT)
+	if ((obj->type & SC_PKCS15_TYPE_CLASS_MASK) == SC_PKCS15_TYPE_DATA_OBJECT)
 		return sc_compare_oid(&((struct sc_pkcs15_data_info *) obj->data)->app_oid, app_oid);
 	return 0;
 }
@@ -1431,17 +1406,11 @@ compare_obj_usage(struct sc_pkcs15_object *obj, unsigned int mask, unsigned int 
 	void		*data = obj->data;
 	unsigned int	usage;
 
-	switch (obj->type) {
-	case SC_PKCS15_TYPE_PRKEY_RSA:
-	case SC_PKCS15_TYPE_PRKEY_DSA:
-	case SC_PKCS15_TYPE_PRKEY_GOSTR3410:
-	case SC_PKCS15_TYPE_PRKEY_EC:
+	switch (obj->type & SC_PKCS15_TYPE_CLASS_MASK) {
+	case SC_PKCS15_TYPE_PRKEY:
 		usage = ((struct sc_pkcs15_prkey_info *) data)->usage;
 		break;
-	case SC_PKCS15_TYPE_PUBKEY_RSA:
-	case SC_PKCS15_TYPE_PUBKEY_DSA:
-	case SC_PKCS15_TYPE_PUBKEY_GOSTR3410:
-	case SC_PKCS15_TYPE_PUBKEY_EC:
+	case SC_PKCS15_TYPE_PUBKEY:
 		usage = ((struct sc_pkcs15_pubkey_info *) data)->usage;
 		break;
 	default:
@@ -1457,8 +1426,8 @@ compare_obj_flags(struct sc_pkcs15_object *obj, unsigned int mask, unsigned int 
 	struct sc_pkcs15_auth_info *auth_info;
 	unsigned int	flags;
 
-	switch (obj->type) {
-	case SC_PKCS15_TYPE_AUTH_PIN:
+	switch (obj->type & SC_PKCS15_TYPE_CLASS_MASK) {
+	case SC_PKCS15_TYPE_AUTH:
 		auth_info = (struct sc_pkcs15_auth_info *) obj->data;
 		if (auth_info->auth_type != SC_PKCS15_PIN_AUTH_TYPE_PIN)
 			return 0;
@@ -1478,17 +1447,14 @@ compare_obj_reference(struct sc_pkcs15_object *obj, int value)
 	void		*data = obj->data;
 	int		reference;
 
-	switch (obj->type) {
-	case SC_PKCS15_TYPE_AUTH_PIN:
+	switch (obj->type & SC_PKCS15_TYPE_CLASS_MASK) {
+	case SC_PKCS15_TYPE_AUTH:
 		auth_info = (struct sc_pkcs15_auth_info *) obj->data;
 		if (auth_info->auth_type != SC_PKCS15_PIN_AUTH_TYPE_PIN)
 			return 0;
 		reference = auth_info->attrs.pin.reference;
 		break;
-	case SC_PKCS15_TYPE_PRKEY_RSA:
-	case SC_PKCS15_TYPE_PRKEY_DSA:
-	case SC_PKCS15_TYPE_PRKEY_GOSTR3410:
-	case SC_PKCS15_TYPE_PRKEY_EC:
+	case SC_PKCS15_TYPE_PRKEY:
 		reference = ((struct sc_pkcs15_prkey_info *) data)->key_reference;
 		break;
 	default:
@@ -1503,20 +1469,16 @@ compare_obj_path(struct sc_pkcs15_object *obj, const struct sc_path *path)
 {
 	void *data = obj->data;
 
-	switch (obj->type) {
-	case SC_PKCS15_TYPE_CERT_X509:
-		return sc_compare_path(&((struct sc_pkcs15_cert_info *) data)->path, path);
-	case SC_PKCS15_TYPE_PRKEY_RSA:
-	case SC_PKCS15_TYPE_PRKEY_DSA:
-	case SC_PKCS15_TYPE_PRKEY_GOSTR3410:
-	case SC_PKCS15_TYPE_PRKEY_EC:
+	switch (obj->type & SC_PKCS15_TYPE_CLASS_MASK) {
+	case SC_PKCS15_TYPE_PRKEY:
 		return sc_compare_path(&((struct sc_pkcs15_prkey_info *) data)->path, path);
-	case SC_PKCS15_TYPE_PUBKEY_RSA:
-	case SC_PKCS15_TYPE_PUBKEY_DSA:
-	case SC_PKCS15_TYPE_PUBKEY_GOSTR3410:
-	case SC_PKCS15_TYPE_PUBKEY_EC:
+	case SC_PKCS15_TYPE_PUBKEY:
 		return sc_compare_path(&((struct sc_pkcs15_pubkey_info *) data)->path, path);
-	case SC_PKCS15_TYPE_AUTH_PIN:
+	case SC_PKCS15_TYPE_SKEY:
+		return sc_compare_path(&((struct sc_pkcs15_skey_info *) data)->path, path);
+	case SC_PKCS15_TYPE_CERT:
+		return sc_compare_path(&((struct sc_pkcs15_cert_info *) data)->path, path);
+	case SC_PKCS15_TYPE_AUTH:
 		return sc_compare_path(&((struct sc_pkcs15_auth_info *) data)->path, path);
 	case SC_PKCS15_TYPE_DATA_OBJECT:
 		return sc_compare_path(&((struct sc_pkcs15_data_info *) data)->path, path);
@@ -1982,7 +1944,9 @@ sc_pkcs15_encode_df(struct sc_context *ctx, struct sc_pkcs15_card *p15card, stru
 		     unsigned char **nbuf, size_t *nbufsize) = NULL;
 	int r;
 
-	assert(p15card != NULL && p15card->magic == SC_PKCS15_CARD_MAGIC);
+	if (p15card == NULL || p15card->magic != SC_PKCS15_CARD_MAGIC) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	switch (df->type) {
 	case SC_PKCS15_PRKDF:
 		func = sc_pkcs15_encode_prkdf_entry;
@@ -2325,13 +2289,16 @@ int
 sc_pkcs15_read_file(struct sc_pkcs15_card *p15card, const struct sc_path *in_path,
 		unsigned char **buf, size_t *buflen)
 {
-	struct sc_context *ctx = p15card->card->ctx;
+	struct sc_context *ctx;
 	struct sc_file *file = NULL;
 	unsigned char *data = NULL;
 	size_t	len = 0, offset = 0;
 	int	r;
 
-	assert(p15card != NULL && in_path != NULL && buf != NULL);
+	if (p15card == NULL || p15card->card == NULL || in_path == NULL || buf == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+	ctx = p15card->card->ctx;
 
 	LOG_FUNC_CALLED(ctx);
 	sc_log(ctx, "path=%s, index=%u, count=%d", sc_print_path(in_path), in_path->index, in_path->count);
@@ -2392,7 +2359,6 @@ sc_pkcs15_read_file(struct sc_pkcs15_card *p15card, const struct sc_path *in_pat
 				if (r == SC_ERROR_RECORD_NOT_FOUND)
 					break;
 				if (r < 0) {
-					free(data);
 					goto fail_unlock;
 				}
 				if (r < 2)
@@ -2414,7 +2380,6 @@ sc_pkcs15_read_file(struct sc_pkcs15_card *p15card, const struct sc_path *in_pat
 		else {
 			r = sc_read_binary(p15card->card, offset, data, len, 0);
 			if (r < 0) {
-				free(data);
 				goto fail_unlock;
 			}
 			/* sc_read_binary may return less than requested */
@@ -2433,8 +2398,8 @@ sc_pkcs15_read_file(struct sc_pkcs15_card *p15card, const struct sc_path *in_pat
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 
 fail_unlock:
-	if (file)
-		sc_file_free(file);
+	free(data);
+	sc_file_free(file);
 	sc_unlock(p15card->card);
 	LOG_FUNC_RETURN(ctx, r);
 }
@@ -2443,7 +2408,8 @@ fail_unlock:
 int
 sc_pkcs15_compare_id(const struct sc_pkcs15_id *id1, const struct sc_pkcs15_id *id2)
 {
-	assert(id1 != NULL && id2 != NULL);
+	if (id1 == NULL || id2 == NULL)
+		return 0;
 	if (id1->len != id2->len)
 		return 0;
 	return memcmp(id1->value, id2->value, id1->len) == 0;
@@ -2637,12 +2603,15 @@ sc_pkcs15_add_supported_algo_ref(struct sc_pkcs15_object *obj, struct sc_support
 	if (!algo)
 		return SC_SUCCESS;
 
-	switch (obj->type) {
-	case SC_PKCS15_TYPE_PRKEY_RSA:
+	switch (obj->type & SC_PKCS15_TYPE_CLASS_MASK) {
+	case SC_PKCS15_TYPE_PRKEY:
 		algo_refs = ((struct sc_pkcs15_prkey_info *)obj->data)->algo_refs;
 		break;
-	case SC_PKCS15_TYPE_PUBKEY_RSA:
+	case SC_PKCS15_TYPE_PUBKEY:
 		algo_refs = ((struct sc_pkcs15_pubkey_info *)obj->data)->algo_refs;
+		break;
+	case SC_PKCS15_TYPE_SKEY:
+		algo_refs = ((struct sc_pkcs15_skey_info *)obj->data)->algo_refs;
 		break;
 	}
 	if (!algo_refs)
@@ -2669,23 +2638,20 @@ sc_pkcs15_get_object_id(const struct sc_pkcs15_object *obj, struct sc_pkcs15_id 
 	if (!obj || !out)
 		return SC_ERROR_INVALID_ARGUMENTS;
 
-	switch (obj->type) {
-	case SC_PKCS15_TYPE_CERT_X509:
+	switch (obj->type & SC_PKCS15_TYPE_CLASS_MASK) {
+	case SC_PKCS15_TYPE_CERT:
 		*out = ((struct sc_pkcs15_cert_info *) obj->data)->id;
 		break;
-	case SC_PKCS15_TYPE_PRKEY_RSA:
-	case SC_PKCS15_TYPE_PRKEY_DSA:
-	case SC_PKCS15_TYPE_PRKEY_GOSTR3410:
-	case SC_PKCS15_TYPE_PRKEY_EC:
+	case SC_PKCS15_TYPE_PRKEY:
 		*out = ((struct sc_pkcs15_prkey_info *) obj->data)->id;
 		break;
-	case SC_PKCS15_TYPE_PUBKEY_RSA:
-	case SC_PKCS15_TYPE_PUBKEY_DSA:
-	case SC_PKCS15_TYPE_PUBKEY_GOSTR3410:
-	case SC_PKCS15_TYPE_PUBKEY_EC:
+	case SC_PKCS15_TYPE_PUBKEY:
 		*out = ((struct sc_pkcs15_pubkey_info *) obj->data)->id;
 		break;
-	case SC_PKCS15_TYPE_AUTH_PIN:
+	case SC_PKCS15_TYPE_SKEY:
+		*out = ((struct sc_pkcs15_skey_info *) obj->data)->id;
+		break;
+	case SC_PKCS15_TYPE_AUTH:
 		*out = ((struct sc_pkcs15_auth_info *) obj->data)->auth_id;
 		break;
 	case SC_PKCS15_TYPE_DATA_OBJECT:

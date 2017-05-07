@@ -243,8 +243,7 @@ static int infocamere_1200_init(sc_pkcs15_card_t * p15card)
 
 	if (r != SC_SUCCESS || file->size > 255) {
 		/* Not EF.GDO */
-		if (file)
-			sc_file_free(file);
+		sc_file_free(file);
 		return SC_ERROR_WRONG_CARD;
 	}
 
@@ -520,6 +519,11 @@ static int loadCertificate(sc_pkcs15_card_t * p15card, int i,
 	compCert = malloc(compLen * sizeof(unsigned char));
 	len = 4 * compLen;	/*Approximation of the uncompressed size */
 	cert = malloc(len * sizeof(unsigned char));
+	if (!cert || !compCert) {
+		free(cert);
+		free(compCert);
+		return SC_ERROR_OUT_OF_MEMORY;
+	}
 
 	sc_read_binary(card, 4, compCert, compLen, 0);
 

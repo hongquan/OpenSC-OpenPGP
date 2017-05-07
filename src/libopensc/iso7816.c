@@ -28,12 +28,15 @@
 #include "internal.h"
 #include "asn1.h"
 #include "iso7816.h"
+#include "sm/sm-iso.h"
 
 
 static void fixup_transceive_length(const struct sc_card *card,
 		struct sc_apdu *apdu)
 {
-	assert(card != NULL && apdu != NULL);
+	if (card == NULL || apdu == NULL) {
+		return;
+	}
 
 	if (apdu->lc > sc_get_max_send_size(card)) {
 		/* The lower layers will automatically do chaining */
@@ -359,7 +362,8 @@ iso7816_process_fci(struct sc_card *card, struct sc_file *file,
 			continue;
 
 		file->size = size;
-		sc_log(ctx, "  bytes in file: %d", file->size);
+		sc_log(ctx, "  bytes in file: %"SC_FORMAT_LEN_SIZE_T"u",
+		       file->size);
 		break;
 	}
 
@@ -391,6 +395,9 @@ iso7816_process_fci(struct sc_card *card, struct sc_file *file,
 			}
 			sc_log(ctx, "  type: %s", type);
 			sc_log(ctx, "  EF structure: %d", byte & 0x07);
+			sc_log(ctx, "  tag 0x82: 0x%02x", byte);
+			if (SC_SUCCESS != sc_file_set_type_attr(file, &byte, 1))
+				sc_log(ctx, "Warning: Could not set file attributes");
 		}
 	}
 
@@ -450,8 +457,13 @@ iso7816_select_file(struct sc_card *card, const struct sc_path *in_path, struct 
 	int r, pathlen, pathtype;
 	int select_mf = 0;
 	struct sc_file *file = NULL;
+	const u8 *buffer;
+	size_t buffer_len;
+	unsigned int cla, tag;
 
-	assert(card != NULL && in_path != NULL);
+	if (card == NULL || in_path == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	ctx = card->ctx;
 	memcpy(path, in_path->value, in_path->len);
 	pathlen = in_path->len;
@@ -575,8 +587,10 @@ iso7816_select_file(struct sc_card *card, const struct sc_path *in_path, struct 
 			sc_file_free(file);
 			LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_SUPPORTED);
 		}
-		if ((size_t)apdu.resp[1] + 2 <= apdu.resplen)
-			card->ops->process_fci(card, file, apdu.resp+2, apdu.resp[1]);
+		buffer = apdu.resp;
+		r = sc_asn1_read_tag(&buffer, apdu.resplen, &cla, &tag, &buffer_len);
+		if (r == SC_SUCCESS)
+			card->ops->process_fci(card, file, buffer, buffer_len);
 		*file_out = file;
 		break;
 	case 0x00: /* proprietary coding */
@@ -793,7 +807,9 @@ iso7816_set_security_env(struct sc_card *card,
 	u8 *p;
 	int r, locked = 0;
 
-	assert(card != NULL && env != NULL);
+	if (card == NULL || env == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x22, 0x41, 0);
 	switch (env->operation) {
 	case SC_SEC_OPERATION_DECIPHER:
@@ -870,7 +886,9 @@ iso7816_restore_security_env(struct sc_card *card, int se_num)
 	struct sc_apdu apdu;
 	int r;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_1, 0x22, 0xF3, se_num);
 
@@ -891,10 +909,13 @@ iso7816_compute_signature(struct sc_card *card,
 	int r;
 	struct sc_apdu apdu;
 
-	assert(card != NULL && data != NULL && out != NULL);
+	if (card == NULL || data == NULL || out == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	LOG_FUNC_CALLED(card->ctx);
-	sc_log(card->ctx, "ISO7816 compute signature: in-len %i, out-len %i",
-		datalen, outlen);
+	sc_log(card->ctx,
+	       "ISO7816 compute signature: in-len %"SC_FORMAT_LEN_SIZE_T"u, out-len %"SC_FORMAT_LEN_SIZE_T"u",
+	       datalen, outlen);
 
 	/* INS: 0x2A  PERFORM SECURITY OPERATION
 	 * P1:  0x9E  Resp: Digital Signature
@@ -930,9 +951,13 @@ iso7816_decipher(struct sc_card *card,
 	struct sc_apdu apdu;
 	u8 *sbuf = NULL;
 
-	assert(card != NULL && crgram != NULL && out != NULL);
+	if (card == NULL || crgram == NULL || out == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	LOG_FUNC_CALLED(card->ctx);
-	sc_log(card->ctx, "ISO7816 decipher: in-len %i, out-len %i", crgram_len, outlen);
+	sc_log(card->ctx,
+	       "ISO7816 decipher: in-len %"SC_FORMAT_LEN_SIZE_T"u, out-len %"SC_FORMAT_LEN_SIZE_T"u",
+	       crgram_len, outlen);
 
 	sbuf = malloc(crgram_len + 1);
 	if (sbuf == NULL)
@@ -1062,8 +1087,10 @@ iso7816_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_l
 	int r;
 	u8  sbuf[SC_MAX_APDU_BUFFER_SIZE];
 
-	if (tries_left)
-		*tries_left = -1;
+	data->pin1.tries_left = -1;
+	if (tries_left != NULL) {
+		*tries_left = data->pin1.tries_left;
+	}
 
 	/* Many cards do support PIN status queries, but some cards don't and
 	 * mistakenly count the command as a failed PIN attempt, so for now we
@@ -1120,22 +1147,21 @@ iso7816_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_l
 	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 	r = sc_check_sw(card, apdu->sw1, apdu->sw2);
 
-	if (data->cmd == SC_PIN_CMD_GET_INFO) {
-		if (r == SC_SUCCESS) {
-			data->pin1.logged_in = SC_PIN_STATE_LOGGED_IN;
-		} else if (r == SC_ERROR_PIN_CODE_INCORRECT) {
-			data->pin1.tries_left = apdu->sw2 & 0xF;
-			data->pin1.logged_in = SC_PIN_STATE_LOGGED_OUT;
+	if (r == SC_SUCCESS) {
+		data->pin1.logged_in = SC_PIN_STATE_LOGGED_IN;
+	} else if (r == SC_ERROR_PIN_CODE_INCORRECT) {
+		data->pin1.tries_left = apdu->sw2 & 0xF;
+		data->pin1.logged_in = SC_PIN_STATE_LOGGED_OUT;
+		if (data->cmd == SC_PIN_CMD_GET_INFO)
 			r = SC_SUCCESS;
-		} else if (r == SC_ERROR_AUTH_METHOD_BLOCKED) {
-			data->pin1.tries_left = 0;
-			data->pin1.logged_in = SC_PIN_STATE_LOGGED_OUT;
+	} else if (r == SC_ERROR_AUTH_METHOD_BLOCKED) {
+		data->pin1.tries_left = 0;
+		data->pin1.logged_in = SC_PIN_STATE_LOGGED_OUT;
+		if (data->cmd == SC_PIN_CMD_GET_INFO)
 			r = SC_SUCCESS;
-		}
-
-		if (tries_left != NULL) {
-			*tries_left = data->pin1.tries_left;
-		}
+	}
+	if (tries_left != NULL) {
+		*tries_left = data->pin1.tries_left;
 	}
 
 	return r;
@@ -1238,4 +1264,138 @@ static struct sc_card_driver iso_driver = {
 struct sc_card_driver * sc_get_iso7816_driver(void)
 {
 	return &iso_driver;
+}
+
+#define ISO_READ_BINARY  0xB0
+#define ISO_P1_FLAG_SFID 0x80
+int iso7816_read_binary_sfid(sc_card_t *card, unsigned char sfid,
+		u8 **ef, size_t *ef_len)
+{
+	int r;
+	size_t read = MAX_SM_APDU_RESP_SIZE;
+	sc_apdu_t apdu;
+	u8 *p;
+
+	if (!card || !ef || !ef_len) {
+		r = SC_ERROR_INVALID_ARGUMENTS;
+		goto err;
+	}
+	*ef_len = 0;
+
+	if (read > 0xff+1)
+		sc_format_apdu(card, &apdu, SC_APDU_CASE_2_EXT,
+				ISO_READ_BINARY, ISO_P1_FLAG_SFID|sfid, 0);
+	else
+		sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT,
+				ISO_READ_BINARY, ISO_P1_FLAG_SFID|sfid, 0);
+
+	p = realloc(*ef, read);
+	if (!p) {
+		r = SC_ERROR_OUT_OF_MEMORY;
+		goto err;
+	}
+	*ef = p;
+	apdu.resp = *ef;
+	apdu.resplen = read;
+	apdu.le = read;
+
+	r = sc_transmit_apdu(card, &apdu);
+	/* emulate the behaviour of sc_read_binary */
+	if (r >= 0)
+		r = apdu.resplen;
+
+	while(1) {
+		if (r >= 0 && ((size_t) r) != read) {
+			*ef_len += r;
+			break;
+		}
+		if (r < 0) {
+			sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Could not read EF.");
+			goto err;
+		}
+		*ef_len += r;
+
+		p = realloc(*ef, *ef_len + read);
+		if (!p) {
+			r = SC_ERROR_OUT_OF_MEMORY;
+			goto err;
+		}
+		*ef = p;
+
+		r = sc_read_binary(card, *ef_len,
+				*ef + *ef_len, read, 0);
+	}
+
+	r = SC_SUCCESS;
+
+err:
+	return r;
+}
+
+#define ISO_WRITE_BINARY  0xD0
+int iso7816_write_binary_sfid(sc_card_t *card, unsigned char sfid,
+		u8 *ef, size_t ef_len)
+{
+	int r;
+	size_t write = MAX_SM_APDU_DATA_SIZE, wrote = 0;
+	sc_apdu_t apdu;
+#ifdef ENABLE_SM
+	struct iso_sm_ctx *iso_sm_ctx;
+#endif
+
+	if (!card) {
+		r = SC_ERROR_INVALID_ARGUMENTS;
+		goto err;
+	}
+
+#ifdef ENABLE_SM
+	iso_sm_ctx = card->sm_ctx.info.cmd_data;
+	if (write > SC_MAX_APDU_BUFFER_SIZE-2
+			|| (card->sm_ctx.sm_mode == SM_MODE_TRANSMIT
+				&& write > (((SC_MAX_APDU_BUFFER_SIZE-2
+					/* for encrypted APDUs we usually get authenticated status
+					 * bytes (4B), a MAC (11B) and a cryptogram with padding
+					 * indicator (3B without data).  The cryptogram is always
+					 * padded to the block size. */
+					-18) / iso_sm_ctx->block_length)
+					* iso_sm_ctx->block_length - 1)))
+		sc_format_apdu(card, &apdu, SC_APDU_CASE_3_EXT,
+				ISO_WRITE_BINARY, ISO_P1_FLAG_SFID|sfid, 0);
+	else
+#endif
+		sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT,
+				ISO_WRITE_BINARY, ISO_P1_FLAG_SFID|sfid, 0);
+
+	if (write > ef_len) {
+		apdu.datalen = ef_len;
+		apdu.lc = ef_len;
+	} else {
+		apdu.datalen = write;
+		apdu.lc = write;
+	}
+	apdu.data = ef;
+
+
+	r = sc_transmit_apdu(card, &apdu);
+	/* emulate the behaviour of sc_write_binary */
+	if (r >= 0)
+		r = apdu.datalen;
+
+	while (1) {
+		if (r < 0 || ((size_t) r) > ef_len) {
+			sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Could not write EF.");
+			goto err;
+		}
+		wrote += r;
+		apdu.data += r;
+		if (wrote >= ef_len)
+			break;
+
+		r = sc_write_binary(card, wrote, ef, write, 0);
+	}
+
+	r = SC_SUCCESS;
+
+err:
+	return r;
 }

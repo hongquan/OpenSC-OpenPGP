@@ -617,6 +617,8 @@ int msc_extract_rsa_public_key(sc_card_t *card,
 	if(!*modulus) SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
 	memcpy(*modulus, buffer, *modLength);
 	*expLength = (buffer[*modLength] << 8) | buffer[*modLength + 1];
+	if (*expLength > sizeof buffer)
+		return SC_ERROR_OUT_OF_MEMORY;
 	r = msc_read_object(card, inputId, fileLocation, buffer, *expLength);
 	if(r < 0) {
 		free(*modulus); *modulus = NULL;
@@ -788,10 +790,11 @@ static int msc_compute_crypt_final_object(
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
 	if(apdu.sw1 == 0x90 && apdu.sw2 == 0x00) {
 		r = msc_read_object(card, inputId, 2, outputData, dataLength);
-		*outputDataLength = dataLength;
+		if (r >= 0)
+			*outputDataLength = r;
 		msc_delete_object(card, outputId, 0);
 		msc_delete_object(card, inputId, 0);
-		return 0;
+		return r;
 	}
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 	if (r) {

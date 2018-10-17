@@ -33,7 +33,7 @@
 
 #define _FINEID_BROKEN_SELECT_FLAG 1
 
-static struct sc_atr_table setcos_atrs[] = {
+static const struct sc_atr_table setcos_atrs[] = {
 	/* some Nokia branded SC */
 	{ "3B:1F:11:00:67:80:42:46:49:53:45:10:52:66:FF:81:90:00", NULL, NULL, SC_CARD_TYPE_SETCOS_GENERIC, 0, NULL },
 	/* RSA SecurID 3100 */
@@ -405,7 +405,7 @@ static int setcos_pin_index_44(int *pins, int len, int pin)
 	return 0;
 }
 
-/* The ACs are allways for the SETEC_LCSI_ACTIVATED state, even if
+/* The ACs are always for the SETEC_LCSI_ACTIVATED state, even if
  * we have to create the file in the SC_FILE_STATUS_INITIALISATION state. */
 static int setcos_create_file_44(sc_card_t *card, sc_file_t *file)
 {
@@ -485,7 +485,7 @@ static int setcos_create_file_44(sc_card_t *card, sc_file_t *file)
 			}
 		}
 
-		/* Add the commands that are allways allowed */
+		/* Add the commands that are always allowed */
 		if (bCommands_always) {
 			bBuf[len++] = 1;
 			bBuf[len++] = bCommands_always;
@@ -499,7 +499,7 @@ static int setcos_create_file_44(sc_card_t *card, sc_file_t *file)
 			else
 				bBuf[len++] = pins[i] & 0x07;  /* pin ref */
 		}
-		/* Add ommands that require the key */
+		/* Add commands that require the key */
 		if (bCommands_key) {
 			bBuf[len++] = 2 | 0x20;			/* indicate keyNumber present */
 			bBuf[len++] = bCommands_key;
@@ -574,8 +574,8 @@ static int setcos_set_security_env2(sc_card_t *card,
 	if (card->type == SC_CARD_TYPE_SETCOS_44 ||
 	    card->type == SC_CARD_TYPE_SETCOS_NIDEL ||
 	    SETCOS_IS_EID_APPLET(card)) {
-		if (env->flags & SC_SEC_ENV_KEY_REF_ASYMMETRIC) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "asymmetric keyref not supported.\n");
+		if (env->flags & SC_SEC_ENV_KEY_REF_SYMMETRIC) {
+			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "symmetric keyref not supported.\n");
 			return SC_ERROR_NOT_SUPPORTED;
 		}
 		if (se_num > 0) {
@@ -619,7 +619,7 @@ static int setcos_set_security_env2(sc_card_t *card,
 	if (env->flags & SC_SEC_ENV_KEY_REF_PRESENT &&
 	    !(card->type == SC_CARD_TYPE_SETCOS_NIDEL ||
 	      card->type == SC_CARD_TYPE_SETCOS_FINEID_V2_2048)) {
-		if (env->flags & SC_SEC_ENV_KEY_REF_ASYMMETRIC)
+		if (env->flags & SC_SEC_ENV_KEY_REF_SYMMETRIC)
 			*p++ = 0x83;
 		else
 			*p++ = 0x84;
@@ -786,17 +786,19 @@ static void parse_sec_attr_44(sc_file_t *file, const u8 *buf, size_t len)
 	int		iOperation;
 	const int*	p_idx;
 
-	/* Check all sub-AC definitions whitin the total AC */
+	/* Check all sub-AC definitions within the total AC */
 	while (len > 1) {				/* minimum length = 2 */
-		int	iACLen   = buf[iOffset] & 0x0F;
+		size_t iACLen   = buf[iOffset] & 0x0F;
+		if (iACLen > len)
+			break;
 
 		iPinCount = -1;			/* default no pin required */
 		iMethod = SC_AC_NONE;		/* default no authentication required */
 
 		if (buf[iOffset] & 0X80) { /* AC in adaptive coding */
 			/* Evaluates only the command-byte, not the optional P1/P2/Option bytes */
-			int	iParmLen = 1;			/* command-byte is always present */
-			int	iKeyLen  = 0;			/* Encryption key is optional */
+			size_t	iParmLen = 1;			/* command-byte is always present */
+			size_t	iKeyLen  = 0;			/* Encryption key is optional */
 
 			if (buf[iOffset]   & 0x20) iKeyLen++;
 			if (buf[iOffset+1] & 0x40) iParmLen++;
@@ -806,7 +808,10 @@ static void parse_sec_attr_44(sc_file_t *file, const u8 *buf, size_t len)
 
 			/* Get KeyNumber if available */
 			if(iKeyLen) {
-				int iSC = buf[iOffset+iACLen];
+				int iSC;
+				if (len < 1+(size_t)iACLen)
+					break;
+				iSC = buf[iOffset+iACLen];
 
 				switch( (iSC>>5) & 0x03 ){
 				case 0:
@@ -825,11 +830,15 @@ static void parse_sec_attr_44(sc_file_t *file, const u8 *buf, size_t len)
 
 			/* Get PinNumber if available */
 			if (iACLen > (1+iParmLen+iKeyLen)) {  /* check via total length if pin is present */
+				if (len < 1+1+1+(size_t)iParmLen)
+					break;
 				iKeyRef = buf[iOffset+1+1+iParmLen];  /* PTL + AM-header + parameter-bytes */
 				iMethod = SC_AC_CHV;
 			}
 
 			/* Convert SETCOS command to OpenSC command group */
+			if (len < 1+2)
+				break;
 			switch(buf[iOffset+2]){
 			case 0x2A:			/* crypto operation */
 				iOperation = SC_AC_OP_CRYPTO;
@@ -863,7 +872,10 @@ static void parse_sec_attr_44(sc_file_t *file, const u8 *buf, size_t len)
 			iPinCount = iACLen - 1;		
 
 			if (buf[iOffset] & 0x20) {
-				int iSC = buf[iOffset + iACLen];
+				int iSC;
+				if (len < 1 + (size_t)iACLen)
+					break;
+				iSC = buf[iOffset + iACLen];
 
 				switch( (iSC>>5) & 0x03 ) {
 				case 0:
@@ -884,6 +896,8 @@ static void parse_sec_attr_44(sc_file_t *file, const u8 *buf, size_t len)
 
 			/* Pin present ? */
 			if ( iPinCount > 0 ) {
+				if (len < 1 + 2)
+					break;
 				iKeyRef = buf[iOffset + 2];	/* pin ref */
 				iMethod = SC_AC_CHV;
 			}
@@ -1038,7 +1052,7 @@ static int setcos_generate_store_key(sc_card_t *card,
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 
-	/* Setup key-generation paramters */
+	/* Setup key-generation parameters */
 	len = 0;
 	if (data->op_type == OP_TYPE_GENERATE)
 		sbuf[len++] = 0x92;	/* algo ID: RSA CRT */

@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include "../common/compat_strlcpy.h"
 
 #include "pkcs15.h"
 #include "log.h"
@@ -205,8 +206,10 @@ sc_oberthur_get_certificate_authority(struct sc_pkcs15_der *der, int *out_author
 	buf_mem.max = buf_mem.length = der->len;
 
 	bio = BIO_new(BIO_s_mem());
-	if(!bio)
+	if (!bio) {
+		free(buf_mem.data);
 		return SC_ERROR_OUT_OF_MEMORY;
+	}
 
 	BIO_set_mem_buf(bio, &buf_mem, BIO_NOCLOSE);
 	x = d2i_X509_bio(bio, 0);
@@ -593,7 +596,7 @@ sc_pkcs15emu_oberthur_add_pubkey(struct sc_pkcs15_card *p15card,
 		LOG_TEST_RET(ctx, SC_ERROR_UNKNOWN_DATA_RECEIVED, "Failed to add public key: no 'ID'");
 	len = *(info_blob + offs + 1) + *(info_blob + offs) * 0x100;
 	if (!len || len > sizeof(key_info.id.value))
-		LOG_TEST_RET(ctx, SC_ERROR_INVALID_DATA, "Failed to add public key: invalie 'ID' length");
+		LOG_TEST_RET(ctx, SC_ERROR_INVALID_DATA, "Failed to add public key: invalid 'ID' length");
 	memcpy(key_info.id.value, info_blob + offs + 2, len);
 	key_info.id.len = len;
 
@@ -663,7 +666,7 @@ sc_pkcs15emu_oberthur_add_cert(struct sc_pkcs15_card *p15card, unsigned int file
 		LOG_TEST_RET(ctx, SC_ERROR_UNKNOWN_DATA_RECEIVED, "Failed to add certificate: no 'ID'");
 	len = *(info_blob + offs + 1) + *(info_blob + offs) * 0x100;
 	if (len > sizeof(cinfo.id.value))
-		LOG_TEST_RET(ctx, SC_ERROR_INVALID_DATA, "Failed to add certificate: invalie 'ID' length");
+		LOG_TEST_RET(ctx, SC_ERROR_INVALID_DATA, "Failed to add certificate: invalid 'ID' length");
 	memcpy(cinfo.id.value, info_blob + offs + 2, len);
 	cinfo.id.len = len;
 
@@ -738,7 +741,7 @@ sc_pkcs15emu_oberthur_add_prvkey(struct sc_pkcs15_card *p15card,
 			unsigned int id = path.value[path.len - 2] * 0x100 + path.value[path.len - 1];
 
 			if (id == ccont.id_cert)   {
-				strncpy(kobj.label, objs[ii]->label, sizeof(kobj.label) - 1);
+				strlcpy(kobj.label, objs[ii]->label, sizeof(kobj.label));
 				break;
 			}
 		}
@@ -1081,7 +1084,7 @@ sc_awp_parse_df(struct sc_pkcs15_card *p15card, struct sc_pkcs15_df *df)
 		LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 
 	rv = sc_oberthur_read_file(p15card, AWP_OBJECTS_LIST_PRV, &buf, &buf_len, 1);
-	LOG_TEST_RET(ctx, rv, "Parse DF: read pribate objects info failed");
+	LOG_TEST_RET(ctx, rv, "Parse DF: read private objects info failed");
 
 	rv = sc_oberthur_parse_privateinfo(p15card, buf, buf_len, 0);
 

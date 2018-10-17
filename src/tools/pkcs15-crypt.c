@@ -34,6 +34,7 @@
 #endif
 
 #include "common/compat_getpass.h"
+#include "libopensc/internal.h"
 #include "libopensc/opensc.h"
 #include "libopensc/pkcs15.h"
 #include "libopensc/asn1.h"
@@ -129,7 +130,7 @@ static char *readpin_stdin(void)
 
 static char * get_pin(struct sc_pkcs15_object *obj)
 {
-	char buf[80];
+	char buf[(sizeof obj->label) + 20];
 	char *pincode;
 	struct sc_pkcs15_auth_info *pinfo = (struct sc_pkcs15_auth_info *) obj->data;
 
@@ -143,7 +144,8 @@ static char * get_pin(struct sc_pkcs15_object *obj)
 			return strdup(opt_pincode);
 	}
 
-	sprintf(buf, "Enter PIN [%.*s]: ", (int) sizeof obj->label, obj->label);
+	snprintf(buf, sizeof(buf), "Enter PIN [%.*s]: ",
+		(int) sizeof obj->label, obj->label);
 	while (1) {
 		pincode = getpass(buf);
 		if (strlen(pincode) == 0)
@@ -285,7 +287,7 @@ static int decipher(struct sc_pkcs15_object *obj)
 	}
 	r = write_output(out, r);
 
-	return 0;
+	return r;
 }
 
 static int get_key(unsigned int usage, sc_pkcs15_object_t **result)
@@ -352,7 +354,7 @@ static int get_key(unsigned int usage, sc_pkcs15_object_t **result)
 	return 0;
 }
 
-int main(int argc, char * const argv[])
+int main(int argc, char *argv[])
 {
 	int err = 0, r, c, long_optind = 0;
 	int do_decipher = 0;
@@ -461,7 +463,7 @@ int main(int argc, char * const argv[])
 		sc_ctx_log_to_file(ctx, "stderr");
 	}
 
-	err = util_connect_card(ctx, &card, opt_reader, opt_wait, verbose);
+	err = util_connect_card_ex(ctx, &card, opt_reader, opt_wait, 0, verbose);
 	if (err)
 		goto end;
 
@@ -508,7 +510,6 @@ end:
 	if (p15card)
 		sc_pkcs15_unbind(p15card);
 	if (card) {
-		sc_unlock(card);
 		sc_disconnect_card(card);
 	}
 	if (ctx)

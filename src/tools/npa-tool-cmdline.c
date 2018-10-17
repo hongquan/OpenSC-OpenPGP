@@ -55,7 +55,7 @@ const char *gengetopt_args_info_help[] = {
   "  -P, --private-key=FILENAME    Terminal's private key",
   "      --cvc-dir=DIRECTORY       Where to look for the CVCA's certificate\n                                  (default=`/home/fm/.local/etc/eac/cvc')",
   "      --x509-dir=DIRECTORY      Where to look for the CSCA's certificate\n                                  (default=`/home/fm/.local/etc/eac/x509')",
-  "      --disable-ta-checks       Disable checking the validity period of CV\n                                  certifcates  (default=off)",
+  "      --disable-ta-checks       Disable checking the validity period of CV\n                                  certificates  (default=off)",
   "      --disable-ca-checks       Disable passive authentication  (default=off)",
   "\nRead and write data groups:",
   "      --read-dg1                Read DG 1   (Document Type)  (default=off)",
@@ -93,7 +93,7 @@ const char *gengetopt_args_info_help[] = {
   "  -t, --translate=FILENAME      File with APDUs of HEX_STRINGs to send through\n                                  the secure channel  (default=`stdin')",
   "      --tr-03110v201            Force compliance to BSI TR-03110 version 2.01\n                                  (default=off)",
   "      --disable-all-checks      Disable all checking of fly-by-data\n                                  (default=off)",
-  "\nReport bugs to opensc-devel@lists.sourceforge.net\n\nWritten by Frank Morgner <frankmorgner@gmail.com>",
+  "\nReport bugs to https://github.com/OpenSC/OpenSC/issues\n\nWritten by Frank Morgner <frankmorgner@gmail.com>",
     0
 };
 
@@ -2085,7 +2085,7 @@ cmdline_parser_internal (
               goto failure;
           
           }
-          /* Disable checking the validity period of CV certifcates.  */
+          /* Disable checking the validity period of CV certificates.  */
           else if (strcmp (long_options[option_index].name, "disable-ta-checks") == 0)
           {
           

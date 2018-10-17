@@ -20,6 +20,8 @@
 #ifndef _FREAD_TO_EOF_H
 #define _FREAD_TO_EOF_H
 
+#include <stddef.h>
+
 int fread_to_eof(const char *file, unsigned char **buf, size_t *buflen);
 
 #endif

@@ -28,7 +28,7 @@
 #include "internal.h"
 #include "cardctl.h"
 
-static struct sc_atr_table jcop_atrs[] = {
+static const struct sc_atr_table jcop_atrs[] = {
 	{ "3B:E6:00:FF:81:31:FE:45:4A:43:4F:50:33:31:06", NULL, NULL, SC_CARD_TYPE_JCOP_GENERIC, 0, NULL },
 	{ NULL, NULL, NULL, 0, 0, NULL }
 };
@@ -434,7 +434,7 @@ static int jcop_process_fci(sc_card_t *card, sc_file_t *file,
 	       /* Files may be locked by anyone who can MODIFY. */
 	       /* opensc seems to think LOCK ACs are only on DFs */
 	       /* sa_to_acl(file, SC_AC_OP_LOCK, sa[0] & 0xf); */
-	       /* there are seperate SIGN, ENCIPHER, and DECIPHER ACs.
+	       /* there are separate SIGN, ENCIPHER, and DECIPHER ACs.
 		  I use SIGN for SC_AC_OP_CRYPTO unless it is NEVER, in 
 		  which case I use DECIPHER */
 	       if ((sa[1] & 0xf0) == 0x10)
@@ -655,7 +655,7 @@ static int jcop_set_security_env(sc_card_t *card,
 	     return SC_ERROR_INVALID_ARGUMENTS;
         }
         apdu.le = 0;
-        if (!env->flags & SC_SEC_ENV_ALG_REF_PRESENT)
+        if (!(env->flags & SC_SEC_ENV_ALG_REF_PRESENT))
 	     return SC_ERROR_INVALID_ARGUMENTS;
         if (!(env->flags & SC_SEC_ENV_FILE_REF_PRESENT))
 	     return SC_ERROR_INVALID_ARGUMENTS;

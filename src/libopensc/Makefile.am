@@ -2,19 +2,21 @@ include $(top_srcdir)/win32/ltrc.inc
 
 MAINTAINERCLEANFILES = $(srcdir)/Makefile.in
 
-EXTRA_DIST = Makefile.mak
+EXTRA_DIST = Makefile.mak opensc.dll.manifest
 
 lib_LTLIBRARIES = libopensc.la
 noinst_HEADERS = cards.h ctbcs.h internal.h esteid.h muscle.h muscle-filesystem.h \
 	internal-winscard.h p15card-helper.h pkcs15-syn.h \
-	opensc.h pkcs15.h \
+	opensc.h pkcs15.h gp.h \
 	cardctl.h asn1.h log.h simpletlv.h \
 	errors.h types.h compression.h itacns.h iso7816.h \
 	authentic.h iasecc.h iasecc-sdo.h sm.h card-sc-hsm.h \
 	pace.h cwa14890.h cwa-dnie.h card-gids.h aux-data.h \
 	jpki.h sc-ossl-compat.h card-npa.h ccid-types.h reader-tr03119.h
 
-AM_CPPFLAGS = -DOPENSC_CONF_PATH=\"$(sysconfdir)/opensc.conf\" \
+AM_CPPFLAGS = -D'OPENSC_CONF_PATH="$(sysconfdir)/opensc.conf"' \
+     -D'DEFAULT_SM_MODULE_PATH="$(DEFAULT_SM_MODULE_PATH)"' \
+     -D'DEFAULT_SM_MODULE="$(DEFAULT_SM_MODULE)"' \
 	-I$(top_srcdir)/src
 AM_CFLAGS = $(OPENPACE_CFLAGS) $(OPTIONAL_OPENSSL_CFLAGS) $(OPTIONAL_OPENCT_CFLAGS) \
 	$(OPTIONAL_PCSC_CFLAGS) $(OPTIONAL_ZLIB_CFLAGS)
@@ -22,8 +24,8 @@ AM_OBJCFLAGS = $(AM_CFLAGS)
 
 libopensc_la_SOURCES_BASE = \
 	sc.c ctx.c log.c errors.c \
-	asn1.c base64.c sec.c card.c iso7816.c dir.c ef-atr.c padding.c apdu.c \
-	simpletlv.c \
+	asn1.c base64.c sec.c card.c iso7816.c dir.c ef-atr.c \
+	ef-gdo.c padding.c apdu.c simpletlv.c gp.c \
 	\
 	pkcs15.c pkcs15-cert.c pkcs15-data.c pkcs15-pin.c \
 	pkcs15-prkey.c pkcs15-pubkey.c pkcs15-skey.c \
@@ -52,7 +54,7 @@ libopensc_la_SOURCES_BASE = \
 	pkcs15-actalis.c pkcs15-atrust-acos.c pkcs15-tccardos.c pkcs15-piv.c \
 	pkcs15-cac.c pkcs15-esinit.c pkcs15-westcos.c pkcs15-pteid.c \
 	pkcs15-oberthur.c pkcs15-itacns.c pkcs15-gemsafeV1.c pkcs15-sc-hsm.c \
-	pkcs15-coolkey.c \
+	pkcs15-coolkey.c pkcs15-din-66291.c \
 	pkcs15-dnie.c pkcs15-gids.c pkcs15-iasecc.c pkcs15-jpki.c \
 	compression.c p15card-helper.c sm.c \
 	aux-data.c
@@ -73,11 +75,13 @@ libopensc_static_la_SOURCES = $(libopensc_la_SOURCES_BASE)
 if WIN32
 libopensc_la_SOURCES += $(top_builddir)/win32/versioninfo.rc
 endif
-libopensc_la_LIBADD = $(OPENPACE_LIBS) $(OPTIONAL_OPENSSL_LIBS) $(OPTIONAL_OPENCT_LIBS) \
-	$(OPTIONAL_ZLIB_LIBS) \
+libopensc_la_LIBADD = $(OPENPACE_LIBS) $(OPTIONAL_OPENSSL_LIBS) \
+	$(OPTIONAL_OPENCT_LIBS) $(OPTIONAL_ZLIB_LIBS) \
 	$(top_builddir)/src/pkcs15init/libpkcs15init.la \
 	$(top_builddir)/src/scconf/libscconf.la \
 	$(top_builddir)/src/common/libscdl.la \
+	$(top_builddir)/src/ui/libnotify.la \
+	$(top_builddir)/src/ui/libstrings.la \
 	$(top_builddir)/src/sm/libsmeac.la \
 	$(top_builddir)/src/common/libcompat.la
 if WIN32

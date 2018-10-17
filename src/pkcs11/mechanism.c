@@ -262,11 +262,20 @@ sc_pkcs11_sign_init(struct sc_pkcs11_session *session, CK_MECHANISM_PTR pMechani
 	if (mt->key_type != key_type)
 		LOG_FUNC_RETURN(context, CKR_KEY_TYPE_INCONSISTENT);
 
+	if (pMechanism->pParameter &&
+	    pMechanism->ulParameterLen > sizeof(operation->mechanism_params))
+		LOG_FUNC_RETURN(context, CKR_ARGUMENTS_BAD);
+
 	rv = session_start_operation(session, SC_PKCS11_OPERATION_SIGN, mt, &operation);
 	if (rv != CKR_OK)
 		LOG_FUNC_RETURN(context, rv);
 
 	memcpy(&operation->mechanism, pMechanism, sizeof(CK_MECHANISM));
+	if (pMechanism->pParameter) {
+		memcpy(&operation->mechanism_params, pMechanism->pParameter,
+		       pMechanism->ulParameterLen);
+		operation->mechanism.pParameter = &operation->mechanism_params;
+	}
 	rv = mt->sign_init(operation, key);
 	if (rv != CKR_OK)
 		session_stop_operation(session, SC_PKCS11_OPERATION_SIGN);
@@ -382,6 +391,16 @@ sc_pkcs11_signature_init(sc_pkcs11_operation_t *operation,
 		}
 		else  {
 			/* Mechanism recognised but cannot be performed by pkcs#15 card, or some general error. */
+			free(data);
+			LOG_FUNC_RETURN(context, rv);
+		}
+	}
+
+	/* Validate the mechanism parameters */
+	if (key->ops->init_params) {
+		rv = key->ops->init_params(operation->session, &operation->mechanism);
+		if (rv != CKR_OK) {
+			/* Probably bad arguments */
 			free(data);
 			LOG_FUNC_RETURN(context, rv);
 		}
@@ -636,6 +655,16 @@ sc_pkcs11_verify_init(sc_pkcs11_operation_t *operation,
 		}
 	}
 
+	/* Validate the mechanism parameters */
+	if (key->ops->init_params) {
+		rv = key->ops->init_params(operation->session, &operation->mechanism);
+		if (rv != CKR_OK) {
+			/* Probably bad arguments */
+			free(data);
+			LOG_FUNC_RETURN(context, rv);
+		}
+	}
+
 	/* If this is a verify with hash operation, set up the
 	 * hash operation */
 	info = (struct hash_signature_info *) operation->type->mech_data;
@@ -688,7 +717,7 @@ sc_pkcs11_verify_final(sc_pkcs11_operation_t *operation,
 	struct sc_pkcs11_object *key;
 	unsigned char *pubkey_value = NULL;
 	CK_KEY_TYPE key_type;
-	CK_BYTE params[9 /* GOST_PARAMS_OID_SIZE */] = { 0 };
+	CK_BYTE params[9 /* GOST_PARAMS_ENCODED_OID_SIZE */] = { 0 };
 	CK_ATTRIBUTE attr = {CKA_VALUE, NULL, 0};
 	CK_ATTRIBUTE attr_key_type = {CKA_KEY_TYPE, &key_type, sizeof(key_type)};
 	CK_ATTRIBUTE attr_key_params = {CKA_GOSTR3410_PARAMS, &params, sizeof(params)};
@@ -729,7 +758,7 @@ sc_pkcs11_verify_final(sc_pkcs11_operation_t *operation,
 
 	rv = sc_pkcs11_verify_data(pubkey_value, attr.ulValueLen,
 		params, sizeof(params),
-		operation->mechanism.mechanism, data->md,
+		&operation->mechanism, data->md,
 		data->buffer, data->buffer_len, pSignature, ulSignatureLen);
 
 done:
@@ -847,7 +876,7 @@ sc_pkcs11_deri(struct sc_pkcs11_session *session,
 	/* Get the size of the data to be returned
 	 * If the card could derive a key an leave it on the card
 	 * then no data is returned.
-	 * If the card returns the data, we will store it in the sercet key CKA_VALUE
+	 * If the card returns the data, we will store it in the secret key CKA_VALUE
 	 */
 
 	ulDataLen = 0;
@@ -867,7 +896,7 @@ sc_pkcs11_deri(struct sc_pkcs11_session *session,
 		goto out;
 	}
 
-	/* Now do the actuall derivation */
+	/* Now do the actual derivation */
 
 	rv = operation->type->derive(operation, basekey,
 	    pMechanism->pParameter, pMechanism->ulParameterLen,
@@ -1041,6 +1070,7 @@ sc_pkcs11_register_sign_and_hash_mechanism(struct sc_pkcs11_card *p11card,
 	sc_pkcs11_mechanism_type_t *hash_type, *new_type;
 	struct hash_signature_info *info;
 	CK_MECHANISM_INFO mech_info = sign_type->mech_info;
+	CK_RV rv;
 
 	if (!(hash_type = sc_pkcs11_find_mechanism(p11card, hash_mech, CKF_DIGEST)))
 		return CKR_MECHANISM_INVALID;
@@ -1059,8 +1089,16 @@ sc_pkcs11_register_sign_and_hash_mechanism(struct sc_pkcs11_card *p11card,
 	info->hash_mech = hash_mech;
 
 	new_type = sc_pkcs11_new_fw_mechanism(mech, &mech_info, sign_type->key_type, info, free_info);
-
-	if (!new_type)
+	if (!new_type) {
+		free_info(info);
 		return CKR_HOST_MEMORY;
-	return sc_pkcs11_register_mechanism(p11card, new_type);
+	}
+
+	rv = sc_pkcs11_register_mechanism(p11card, new_type);
+	if (CKR_OK != rv) {
+		new_type->free_mech_data(new_type->mech_data);
+		free(new_type);
+	}
+
+	return rv;
 }

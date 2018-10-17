@@ -106,7 +106,7 @@ static int starcert_detect_card(sc_pkcs15_card_t *p15card)
 	sc_card_t *card = p15card->card;
 
 	/* check if we have the correct card OS */
-	if (strcmp(card->name, "STARCOS SPK 2.3"))
+	if (strcmp(card->name, "STARCOS"))
 		return SC_ERROR_WRONG_CARD;
 	/* read EF_Info file */
 	sc_format_path("3F00FE13", &path);
@@ -164,6 +164,8 @@ static int sc_pkcs15emu_starcert_init(sc_pkcs15_card_t *p15card)
 
 	/* get serial number */
 	r = sc_card_ctl(card, SC_CARDCTL_GET_SERIALNR, &serial);
+	if (r != SC_SUCCESS)
+		return SC_ERROR_INTERNAL;
 	r = sc_bin_to_hex(serial.value, serial.len, buf, sizeof(buf), 0);
 	if (r != SC_SUCCESS)
 		return SC_ERROR_INTERNAL;

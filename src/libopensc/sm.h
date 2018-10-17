@@ -45,8 +45,11 @@ extern "C" {
 #define SM_TYPE_CWA14890	0x400
 #define SM_TYPE_DH_RSA		0x500
 
+/** don't use SM */
 #define SM_MODE_NONE		0x0
+/** let the card driver decide when to use SM, possibly based on the card's ACLs */
 #define SM_MODE_ACL		0x100
+/** use SM for all commands */
 #define SM_MODE_TRANSMIT	0x200
 
 #define SM_CMD_INITIALIZE		0x10
@@ -300,7 +303,7 @@ struct sm_card_operations {
 /*
  * @struct sm_module_operations
  *	API to use external SM modules:
- *	- 'initiliaze' - get APDU(s) to initialize SM session;
+ *	- 'initialize' - get APDU(s) to initialize SM session;
  *	- 'get apdus' - get secured APDUs to execute particular command;
  *	- 'finalize' - get APDU(s) to finalize SM session;
  *	- 'module init' - initialize external module (allocate data, read configuration, ...);
@@ -354,7 +357,7 @@ int sc_sm_update_apdu_response(struct sc_card *, unsigned char *, size_t, int, s
 int sc_sm_single_transmit(struct sc_card *, struct sc_apdu *);
 
 /**
- * @brief Stops SM and frees allocated ressources.
+ * @brief Stops SM and frees allocated resources.
  *
  * Calls \a card->sm_ctx.ops.close() if available and \c card->sm_ctx.sm_mode
  * is \c SM_MODE_TRANSMIT

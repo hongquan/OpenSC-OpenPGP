@@ -86,7 +86,7 @@ static int	gpk_get_info(sc_card_t *, int, int, u8 *, size_t);
 /*
  * ATRs of GPK4000 cards courtesy of libscez
  */
-static struct sc_atr_table gpk_atrs[] = {
+static const struct sc_atr_table gpk_atrs[] = {
 	{ "3B:27:00:80:65:A2:04:01:01:37", NULL, "GPK 4K", SC_CARD_TYPE_GPK_GPK4000_s, 0, NULL },
 	{ "3B:27:00:80:65:A2:05:01:01:37", NULL, "GPK 4K", SC_CARD_TYPE_GPK_GPK4000_sp, 0, NULL },
 	{ "3B:27:00:80:65:A2:0C:01:01:37", NULL, "GPK 4K", SC_CARD_TYPE_GPK_GPK4000_su256, 0, NULL },
@@ -206,7 +206,7 @@ gpk_init(sc_card_t *card)
 	/* Make sure max send/receive size is 4 byte aligned and <256. */
 	card->max_recv_size = 252;
 
-	return 0;
+	return SC_SUCCESS;
 }
 
 /*
@@ -408,6 +408,9 @@ gpk_parse_fileinfo(sc_card_t *card,
 		} else
 		if (sp[0] == 0x85) {
 			unsigned int	ac[3], n;
+
+			if (sp + 11 + 2*3 >= end)
+				break;
 
 			file->id = (sp[4] << 8) | sp[5];
 			file->size = (sp[8] << 8) | sp[9];
@@ -1507,7 +1510,7 @@ gpk_generate_key(sc_card_t *card, struct sc_cardctl_gpk_genkey *args)
 }
 
 /*
- * Store a privat key component
+ * Store a private key component
  */
 static int
 gpk_pkfile_load(sc_card_t *card, struct sc_cardctl_gpk_pkload *args)
@@ -1527,13 +1530,8 @@ gpk_pkfile_load(sc_card_t *card, struct sc_cardctl_gpk_pkload *args)
 		return SC_ERROR_INTERNAL;
 
 	if (0) {
-		char buf[2048];
-
-		sc_hex_dump(card->ctx, SC_LOG_DEBUG_NORMAL,
-				args->data, args->datalen,
-				buf, sizeof(buf));
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Sending %d bytes (cleartext):\n%s",
-				args->datalen, buf);
+		sc_log_hex(card->ctx, "Sending (cleartext)",
+				args->data, args->datalen);
 	}
 
 	memset(&apdu, 0, sizeof(apdu));

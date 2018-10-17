@@ -30,6 +30,8 @@
 #endif
 #include <ctype.h>
 #include "util.h"
+#include "ui/notify.h"
+#include "common/compat_strlcat.h"
 
 int
 is_string_valid_atr(const char *atr_str)
@@ -53,6 +55,8 @@ util_connect_card_ex(sc_context_t *ctx, sc_card_t **cardp,
 	struct sc_reader *reader = NULL, *found = NULL;
 	struct sc_card *card = NULL;
 	int r;
+
+	sc_notify_init();
 
 	if (do_wait) {
 		unsigned int event;
@@ -99,7 +103,7 @@ util_connect_card_ex(sc_context_t *ctx, sc_card_t **cardp,
 		else {
 			/* If the reader identifier looks like an ATR, try to find the reader with that card */
 			if (is_string_valid_atr(reader_id))   {
-				unsigned char atr_buf[SC_MAX_ATR_SIZE * 3];
+				unsigned char atr_buf[SC_MAX_ATR_SIZE];
 				size_t atr_buf_len = sizeof(atr_buf);
 				unsigned int i;
 
@@ -232,7 +236,8 @@ void util_hex_dump_asc(FILE *f, const u8 *in, size_t count, int addr)
 	}
 }
 
-void util_print_usage_and_die(const char *app_name, const struct option options[],
+NORETURN void
+util_print_usage_and_die(const char *app_name, const struct option options[],
 	const char *option_help[], const char *args)
 {
 	int i;
@@ -335,15 +340,16 @@ const char * util_acl_to_str(const sc_acl_entry_t *e)
 			strcpy(buf, "????");
 			break;
 		}
-		strcat(line, buf);
-		strcat(line, " ");
+		strlcat(line, buf, sizeof line);
+		strlcat(line, " ", sizeof line);
 		e = e->next;
 	}
+	line[(sizeof line)-1] = '\0'; /* make sure it's NUL terminated */
 	line[strlen(line)-1] = 0; /* get rid of trailing space */
 	return line;
 }
 
-void
+NORETURN void
 util_fatal(const char *fmt, ...)
 {
 	va_list	ap;
@@ -353,6 +359,9 @@ util_fatal(const char *fmt, ...)
 	vfprintf(stderr, fmt, ap);
 	fprintf(stderr, "\nAborting.\n");
 	va_end(ap);
+
+	sc_notify_close();
+
 	exit(1);
 }
 

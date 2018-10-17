@@ -152,7 +152,7 @@ static int westcos_check_sw(sc_card_t * card, unsigned int sw1,
 	return iso_ops->check_sw(card, sw1, sw2);
 }
 
-static struct sc_atr_table westcos_atrs[] = {
+static const struct sc_atr_table westcos_atrs[] = {
 	/* westcos 2ko */
 	{ "3F:69:00:00:00:64:01:00:00:00:80:90:00", "ff:ff:ff:ff:ff:ff:ff:00:00:00:f0:ff:ff", NULL, 0x00, 0, NULL },
 	/* westcos applet */
@@ -349,7 +349,7 @@ static int westcos_process_fci(sc_card_t * card, sc_file_t * file,
 				file->ef_structure = SC_FILE_EF_CYCLIC;
 				break;
 			default:
-				type = "unknow";
+				type = "unknown";
 			}
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
 				"  type: %s\n", type);
@@ -361,13 +361,7 @@ static int westcos_process_fci(sc_card_t * card, sc_file_t * file,
 	if (tag != NULL && taglen > 0 && taglen <= 16) {
 		memcpy(file->name, tag, taglen);
 		file->namelen = taglen;
-		{
-			char tbuf[128];
-			sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL,
-				file->name, file->namelen, tbuf, sizeof(tbuf));
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-				"  File name: %s\n", tbuf);
-		}
+		sc_log_hex(card->ctx, "  File name", file->name, file->namelen);
 	}
 	if (file->type == SC_FILE_TYPE_DF) {
 		tag = sc_asn1_find_tag(ctx, p, len, 0x85, &taglen);
@@ -458,7 +452,7 @@ static int _convertion_ac_methode(sc_file_t * file, int low,
 	acl = sc_file_get_acl_entry(file, operation);
 	if (acl == NULL) {
 
-		/* par defaut always */
+		/* per default always */
 		*buf = 0xff;
 		*buf_key = 0x00;
 		return 0;
@@ -978,7 +972,7 @@ static int westcos_card_ctl(sc_card_t * card, unsigned long cmd, void *ptr)
 		data.pin1.data = priv_data->default_key.key_value;
 		return sc_pin_cmd(card, &data, NULL);
 	case SC_CARDCTL_WESTCOS_CHANGE_KEY:
-		if (1) {
+		{
 			int lrc;
 			u8 temp[7];
 			sc_changekey_t *ck = (sc_changekey_t *) ptr;

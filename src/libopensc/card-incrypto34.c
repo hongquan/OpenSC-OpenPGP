@@ -47,7 +47,7 @@ static struct sc_card_driver incrypto34_drv = {
 	NULL, 0, NULL
 };
 
-static struct sc_atr_table incrypto34_atrs[] = {
+static const struct sc_atr_table incrypto34_atrs[] = {
 	{ "3b:ff:18:00:ff:81:31:fe:55:00:6b:02:09:02:00:01:01:01:44:53:44:10:31:80:92", NULL, NULL, SC_CARD_TYPE_INCRYPTO34_GENERIC, 0, NULL },
 	{ NULL, NULL, NULL, 0, 0, NULL }
 };
@@ -141,7 +141,7 @@ static const struct sc_card_error incrypto34_errors[] = {
 /* no error, maybe a note */
 { 0x9000, SC_SUCCESS,		NULL},
 { 0x9001, SC_SUCCESS,		"success, but eeprom weakness detected"},
-{ 0x9850, SC_SUCCESS,		"over/underflow useing in/decrease"}
+{ 0x9850, SC_SUCCESS,		"over/underflow using in/decrease"}
 };
 
 static int incrypto34_check_sw(sc_card_t *card, unsigned int sw1, unsigned int sw2)
@@ -357,6 +357,7 @@ static int incrypto34_create_file(sc_card_t *card, sc_file_t *file)
 				 * generation. */
 			case SC_FILE_EF_LINEAR_VARIABLE_TLV:
 				type[1] = 0xff;
+				/* fall through */
 			default:
 				type[0] |= file->ef_structure & 7;
 				break;

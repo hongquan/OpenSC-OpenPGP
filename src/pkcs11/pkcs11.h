@@ -153,6 +153,8 @@ extern "C" {
 
 #define ck_mechanism_type_t CK_MECHANISM_TYPE
 
+#define ck_rsa_pkcs_mgf_type_t CK_RSA_PKCS_MGF_TYPE
+
 #define ck_mechanism _CK_MECHANISM
 #define parameter pParameter
 #define parameter_len ulParameterLen
@@ -508,6 +510,8 @@ typedef unsigned long ck_mechanism_type_t;
 #define CKM_SHA256_RSA_PKCS_PSS		(0x43UL)
 #define CKM_SHA384_RSA_PKCS_PSS		(0x44UL)
 #define CKM_SHA512_RSA_PKCS_PSS		(0x45UL)
+#define CKM_SHA224_RSA_PKCS		(0x46UL)
+#define CKM_SHA224_RSA_PKCS_PSS		(0x47UL)
 #define CKM_RC2_KEY_GEN			(0x100UL)
 #define CKM_RC2_ECB			(0x101UL)
 #define	CKM_RC2_CBC			(0x102UL)
@@ -553,6 +557,9 @@ typedef unsigned long ck_mechanism_type_t;
 #define CKM_SHA256			(0x250UL)
 #define CKM_SHA256_HMAC			(0x251UL)
 #define CKM_SHA256_HMAC_GENERAL		(0x252UL)
+#define CKM_SHA224			(0x255UL)
+#define CKM_SHA224_HMAC			(0x256UL)
+#define CKM_SHA224_HMAC_GENERAL		(0x257UL)
 #define CKM_SHA384			(0x260UL)
 #define CKM_SHA384_HMAC			(0x261UL)
 #define CKM_SHA384_HMAC_GENERAL		(0x262UL)
@@ -755,6 +762,30 @@ typedef struct CK_ECDH1_DERIVE_PARAMS {
 	unsigned char *  pPublicData;
 } CK_ECDH1_DERIVE_PARAMS;
 
+typedef unsigned long ck_rsa_pkcs_mgf_type_t;
+typedef unsigned long CK_RSA_PKCS_OAEP_SOURCE_TYPE;
+
+typedef struct CK_RSA_PKCS_OAEP_PARAMS {
+	CK_MECHANISM_TYPE hashAlg;
+	CK_RSA_PKCS_MGF_TYPE mgf;
+	CK_RSA_PKCS_OAEP_SOURCE_TYPE source;
+	void *pSourceData;
+	unsigned long ulSourceDataLen;
+} CK_RSA_PKCS_OAEP_PARAMS;
+
+typedef struct CK_RSA_PKCS_PSS_PARAMS {
+	ck_mechanism_type_t hashAlg;
+	CK_RSA_PKCS_MGF_TYPE mgf;
+	unsigned long sLen;
+} CK_RSA_PKCS_PSS_PARAMS;
+
+#define CKG_MGF1_SHA1			(0x00000001UL)
+#define CKG_MGF1_SHA224		(0x00000005UL)
+#define CKG_MGF1_SHA256		(0x00000002UL)
+#define CKG_MGF1_SHA384		(0x00000003UL)
+#define CKG_MGF1_SHA512		(0x00000004UL)
+
+#define CKZ_DATA_SPECIFIED	(0x00000001UL)
 
 typedef unsigned long ck_rv_t;
 
@@ -820,7 +851,7 @@ _CK_DECLARE_FUNCTION (C_SetOperationState,
 		       unsigned char *operation_state,
 		       unsigned long operation_state_len,
 		       ck_object_handle_t encryption_key,
-		       ck_object_handle_t authentiation_key));
+		       ck_object_handle_t authentication_key));
 _CK_DECLARE_FUNCTION (C_Login,
 		      (ck_session_handle_t session, ck_user_type_t user_type,
 		       unsigned char *pin, unsigned long pin_len));
@@ -1292,6 +1323,8 @@ typedef struct ck_date *CK_DATE_PTR;
 
 typedef ck_mechanism_type_t *CK_MECHANISM_TYPE_PTR;
 
+typedef ck_rsa_pkcs_mgf_type_t *CK_RSA_PKCS_MGF_TYPE_PTR;
+
 typedef struct ck_mechanism CK_MECHANISM;
 typedef struct ck_mechanism *CK_MECHANISM_PTR;
 
@@ -1361,6 +1394,8 @@ typedef struct ck_c_initialize_args *CK_C_INITIALIZE_ARGS_PTR;
 #undef ck_date
 
 #undef ck_mechanism_type_t
+
+#undef ck_rsa_pkcs_mgf_type_t
 
 #undef ck_mechanism
 #undef parameter

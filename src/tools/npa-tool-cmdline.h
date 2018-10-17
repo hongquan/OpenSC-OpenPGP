@@ -89,8 +89,8 @@ struct gengetopt_args_info
   char * x509_dir_arg;	/**< @brief Where to look for the CSCA's certificate (default='/home/fm/.local/etc/eac/x509').  */
   char * x509_dir_orig;	/**< @brief Where to look for the CSCA's certificate original value given at command line.  */
   const char *x509_dir_help; /**< @brief Where to look for the CSCA's certificate help description.  */
-  int disable_ta_checks_flag;	/**< @brief Disable checking the validity period of CV certifcates (default=off).  */
-  const char *disable_ta_checks_help; /**< @brief Disable checking the validity period of CV certifcates help description.  */
+  int disable_ta_checks_flag;	/**< @brief Disable checking the validity period of CV certificates (default=off).  */
+  const char *disable_ta_checks_help; /**< @brief Disable checking the validity period of CV certificates help description.  */
   int disable_ca_checks_flag;	/**< @brief Disable passive authentication (default=off).  */
   const char *disable_ca_checks_help; /**< @brief Disable passive authentication help description.  */
   int read_dg1_flag;	/**< @brief Read DG 1   (Document Type) (default=off).  */

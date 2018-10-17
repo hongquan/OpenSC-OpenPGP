@@ -45,6 +45,7 @@
 #include "libopensc/opensc.h"
 #include "libopensc/cardctl.h"
 #include "libopensc/asn1.h"
+#include "libopensc/log.h"
 #include "libopensc/card-sc-hsm.h"
 #include "util.h"
 
@@ -62,7 +63,7 @@ static int	verbose = 0;
 // Some reasonable maximums
 #define MAX_CERT		4096
 #define MAX_PRKD		256
-#define MAX_KEY			1024
+#define MAX_KEY			1500
 #define MAX_WRAPPED_KEY	(MAX_CERT + MAX_PRKD + MAX_KEY)
 
 #define SEED_LENGTH 16
@@ -160,12 +161,7 @@ static int generatePrime(BIGNUM *prime, const BIGNUM *s, const int bits, unsigne
 
 	do {
 		// Generate random prime
-#if OPENSSL_VERSION_NUMBER  >= 0x00908000L /* last parm is BN_GENCB which is null in our case */
 		BN_generate_prime_ex(prime, bits, 1, NULL, NULL, NULL);
-#else
-		BN_generate_prime(prime, bits, 1, NULL, NULL, NULL, NULL );
-#endif
-
 	} while ((BN_ucmp(prime, s) == -1) && (max_rounds-- > 0));	// If prime < s or not reached 1000 tries
 
 	if (max_rounds > 0)
@@ -296,7 +292,7 @@ static int createShares(const BIGNUM *s, const unsigned char t, const unsigned c
  * @param shares Shares used to reconstruct secret (should contain t entries)
  * @param t Threshold used to reconstruct the secret
  * @param prime Prime for finite field arithmetic
- * @param s Pointer for storage of calculated secred
+ * @param s Pointer for storage of calculated secret
  */
 static int reconstructSecret(secret_share_t *shares, unsigned char t, const BIGNUM *prime, BIGNUM *s)
 {
@@ -1222,7 +1218,8 @@ static size_t determineLength(const u8 *tlv, size_t buflen)
 	unsigned int cla,tag;
 	size_t len;
 
-	if (sc_asn1_read_tag(&ptr, buflen, &cla, &tag, &len) != SC_SUCCESS) {
+	if (sc_asn1_read_tag(&ptr, buflen, &cla, &tag, &len) != SC_SUCCESS
+			|| ptr == NULL) {
 		return 0;
 	}
 
@@ -1387,8 +1384,9 @@ static int wrap_key(sc_card_t *card, int keyid, const char *outf, const char *pi
 
 	// Encode key in octet string object
 	key_len = 0;
-	wrap_with_tag(0x04, wrapped_key.wrapped_key, wrapped_key.wrapped_key_length,
+	r = wrap_with_tag(0x04, wrapped_key.wrapped_key, wrapped_key.wrapped_key_length,
 						&key, &key_len);
+	LOG_TEST_RET(ctx, r, "Out of memory");
 
 	memcpy(ptr, key, key_len);
 	ptr += key_len;
@@ -1410,7 +1408,8 @@ static int wrap_key(sc_card_t *card, int keyid, const char *outf, const char *pi
 	}
 
 	// Encode key, key decription and certificate object in sequence
-	wrap_with_tag(0x30, keyblob, ptr - keyblob, &key, &key_len);
+	r = wrap_with_tag(0x30, keyblob, ptr - keyblob, &key, &key_len);
+	LOG_TEST_RET(ctx, r, "Out of memory");
 
 	out = fopen(outf, "wb");
 
@@ -1449,7 +1448,7 @@ static int update_ef(sc_card_t *card, u8 prefix, u8 id, int erase, const u8 *buf
 	r = sc_select_file(card, &path, NULL);
 
 	if ((r == SC_SUCCESS) && erase) {
-		r = sc_delete_file(card, &path);
+		sc_delete_file(card, &path);
 		r = SC_ERROR_FILE_NOT_FOUND;
 	}
 
@@ -1504,24 +1503,24 @@ static int unwrap_key(sc_card_t *card, int keyid, const char *inf, const char *p
 		return -1;
 	}
 
-	if ((keybloblen = fread(keyblob, 1, sizeof(keyblob), in)) < 0) {
+	keybloblen = fread(keyblob, 1, sizeof(keyblob), in);
+	fclose(in);
+	if (keybloblen < 0) {
 		perror(inf);
 		return -1;
 	}
 
-	fclose(in);
-
 	ptr = keyblob;
-	if ((sc_asn1_read_tag(&ptr, keybloblen, &cla, &tag, &len) != SC_SUCCESS) ||
-			((cla & SC_ASN1_TAG_CONSTRUCTED) != SC_ASN1_TAG_CONSTRUCTED) ||
-			((tag != SC_ASN1_TAG_SEQUENCE)) ){
+	if ((sc_asn1_read_tag(&ptr, keybloblen, &cla, &tag, &len) != SC_SUCCESS)
+		   	|| ((cla & SC_ASN1_TAG_CONSTRUCTED) != SC_ASN1_TAG_CONSTRUCTED)
+		   	|| (tag != SC_ASN1_TAG_SEQUENCE) ){
 		fprintf(stderr, "Invalid wrapped key format (Outer sequence).\n");
 		return -1;
 	}
 
-	if ((sc_asn1_read_tag(&ptr, len, &cla, &tag, &olen) != SC_SUCCESS) ||
-			(cla & SC_ASN1_TAG_CONSTRUCTED) ||
-			((tag != SC_ASN1_TAG_OCTET_STRING)) ){
+	if ((sc_asn1_read_tag(&ptr, len, &cla, &tag, &olen) != SC_SUCCESS)
+		   	|| ((cla & SC_ASN1_TAG_CONSTRUCTED) == SC_ASN1_TAG_CONSTRUCTED)
+		   	|| (tag != SC_ASN1_TAG_OCTET_STRING) ){
 		fprintf(stderr, "Invalid wrapped key format (Key binary).\n");
 		return -1;
 	}
@@ -1651,7 +1650,7 @@ static int unwrap_key(sc_card_t *card, int keyid, const char *inf, const char *p
 
 
 
-int main(int argc, char * const argv[])
+int main(int argc, char *argv[])
 {
 	int err = 0, r, c, long_optind = 0;
 	int action_count = 0;
@@ -1757,7 +1756,7 @@ int main(int argc, char * const argv[])
 		}
 	}
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !(defined LIBRESSL_VERSION_NUMBER)
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L || (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER >= 0x20700000L)
 	OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS
 		| OPENSSL_INIT_ADD_ALL_CIPHERS
 		| OPENSSL_INIT_ADD_ALL_DIGESTS,

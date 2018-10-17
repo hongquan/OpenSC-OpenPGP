@@ -33,10 +33,17 @@
 #include <ctype.h>
 #include <sys/stat.h>
 
+#include <openssl/opensslv.h>
+#include "libopensc/sc-ossl-compat.h"
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L
+#include <openssl/opensslconf.h>
+#include <openssl/crypto.h>
+#endif
+#include <openssl/conf.h>
+
 #include <openssl/evp.h>
 #include <openssl/err.h>
 
-#include "libopensc/sc-ossl-compat.h"
 #include "libopensc/opensc.h"
 #include "libopensc/cardctl.h"
 #include "libopensc/card-gids.h"
@@ -79,7 +86,7 @@ static const char *option_help[] = {
 	"Define serial number",
 	"Unblock the user PIN after an administrator authentication",
 	"Change the administrator key",
-	"Define the new adminastrator key",
+	"Define the new administrator key",
 	"Uses reader number <arg> [0]",
 	"Wait for a card to be inserted",
 	"Verbose operation. Use several times to enable debug output.",
@@ -232,7 +239,7 @@ static int unblock(sc_card_t* card, const char *so_pin, const char *user_pin) {
 		fprintf(stderr, "reset pin failed with %s\n", sc_strerror(r));
 		return -1;
 	}
-	printf("Unblock PIN done successfuly\n");
+	printf("Unblock PIN done successfully\n");
 	// the card should have deauthenticated the admin, but to be sure:
 	sc_logout(card);
 	return 0;
@@ -336,7 +343,9 @@ static int gids_get_DO(sc_card_t* card, int fileIdentifier, int dataObjectIdenti
 	if (datasize > *responselen) {
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
-	memcpy(response, p, datasize);
+	if (response) {
+		memcpy(response, p, datasize);
+	}
 	*responselen = datasize;
 	return SC_SUCCESS;
 }
@@ -457,7 +466,7 @@ static int print_info(sc_card_t *card) {
 	return SC_SUCCESS;
 }
 
-int main(int argc, char * const argv[])
+int main(int argc, char * argv[])
 {
 	int err = 0, r, c, long_optind = 0;
 	int action_count = 0;
@@ -517,11 +526,23 @@ int main(int argc, char * const argv[])
 		}
 	}
 
+
+	/* OpenSSL magic */
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
+	OPENSSL_config(NULL);
+#endif
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+	OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS
+		| OPENSSL_INIT_ADD_ALL_CIPHERS
+		| OPENSSL_INIT_ADD_ALL_DIGESTS,
+               NULL);
+#else
 	/* OpenSSL magic */
 	OPENSSL_malloc_init();
 
 	ERR_load_crypto_strings();
 	OpenSSL_add_all_algorithms();
+#endif
 
 	memset(&ctx_param, 0, sizeof(sc_context_param_t));
 	ctx_param.app_name = app_name;

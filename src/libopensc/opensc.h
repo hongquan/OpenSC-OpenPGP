@@ -62,8 +62,7 @@ extern "C" {
 #define SC_SEC_ENV_ALG_REF_PRESENT	0x0001
 #define SC_SEC_ENV_FILE_REF_PRESENT	0x0002
 #define SC_SEC_ENV_KEY_REF_PRESENT	0x0004
-/* FIXME: the flag below is misleading */
-#define SC_SEC_ENV_KEY_REF_ASYMMETRIC	0x0008
+#define SC_SEC_ENV_KEY_REF_SYMMETRIC	0x0008
 #define SC_SEC_ENV_ALG_PRESENT		0x0010
 
 /* PK algorithms */
@@ -76,6 +75,7 @@ extern "C" {
 #define SC_ALGORITHM_DES		64
 #define SC_ALGORITHM_3DES		65
 #define SC_ALGORITHM_GOST		66
+#define SC_ALGORITHM_AES		67
 
 /* Hash algorithms */
 #define SC_ALGORITHM_MD5		128
@@ -85,49 +85,88 @@ extern "C" {
 /* Key derivation algorithms */
 #define SC_ALGORITHM_PBKDF2		192
 
-/* Key encryption algoprithms */
+/* Key encryption algorithms */
 #define SC_ALGORITHM_PBES2		256
 
 #define SC_ALGORITHM_ONBOARD_KEY_GEN	0x80000000
 /* need usage = either sign or decrypt. keys with both? decrypt, emulate sign */
 #define SC_ALGORITHM_NEED_USAGE		0x40000000
-#define SC_ALGORITHM_SPECIFIC_FLAGS	0x0001FFFF
+#define SC_ALGORITHM_SPECIFIC_FLAGS	0x001FFFFF
 
-#define SC_ALGORITHM_RSA_RAW		0x00000001
 /* If the card is willing to produce a cryptogram padded with the following
- * methods, set these flags accordingly. */
-#define SC_ALGORITHM_RSA_PADS		0x0000000E
-#define SC_ALGORITHM_RSA_PAD_NONE	0x00000000
-#define SC_ALGORITHM_RSA_PAD_PKCS1	0x00000002
+ * methods, set these flags accordingly.  These flags are exclusive: an RSA card
+ * must support at least one of them, and exactly one of them must be selected
+ * for a given operation. */
+#define SC_ALGORITHM_RSA_RAW		0x00000001
+#define SC_ALGORITHM_RSA_PADS		0x0000001F
+#define SC_ALGORITHM_RSA_PAD_NONE	0x00000001
+#define SC_ALGORITHM_RSA_PAD_PKCS1	0x00000002 /* PKCS#1 v1.5 padding */
 #define SC_ALGORITHM_RSA_PAD_ANSI	0x00000004
 #define SC_ALGORITHM_RSA_PAD_ISO9796	0x00000008
+#define SC_ALGORITHM_RSA_PAD_PSS	0x00000010 /* PKCS#1 v2.0 PSS */
 
 /* If the card is willing to produce a cryptogram with the following
- * hash values, set these flags accordingly. */
-#define SC_ALGORITHM_RSA_HASH_NONE	0x00000010
-#define SC_ALGORITHM_RSA_HASH_SHA1	0x00000020
-#define SC_ALGORITHM_RSA_HASH_MD5	0x00000040
-#define SC_ALGORITHM_RSA_HASH_MD5_SHA1	0x00000080
-#define SC_ALGORITHM_RSA_HASH_RIPEMD160	0x00000100
-#define SC_ALGORITHM_RSA_HASH_SHA256	0x00000200
-#define SC_ALGORITHM_RSA_HASH_SHA384	0x00000400
-#define SC_ALGORITHM_RSA_HASH_SHA512	0x00000800
-#define SC_ALGORITHM_RSA_HASH_SHA224	0x00001000
-#define SC_ALGORITHM_RSA_HASHES		0x00001FE0
+ * hash values, set these flags accordingly.  The interpretation of the hash
+ * flags depends on the algorithm and padding chosen: for RSA, the hash flags
+ * determine how the padding is constructed and do not describe the first
+ * hash applied to the document before padding begins.
+ *
+ *   - For PAD_NONE, ANSI X9.31, (and ISO9796?), the hash value is therefore
+ *     ignored.  For ANSI X9.31, the input data must already have the hash
+ *     identifier byte appended (eg 0x33 for SHA-1).
+ *   - For PKCS1 (v1.5) the hash is recorded in the padding, and HASH_NONE is a
+ *     valid value, meaning that the hash's DigestInfo has already been
+ *     prepended to the data, otherwise the hash id is put on the front.
+ *   - For PSS (PKCS#1 v2.0) the hash is used to derive the padding from the
+ *     already-hashed message.
+ *
+ * In no case is the hash actually applied to the entire document.
+ *
+ * It's possible that the card may support different hashes for PKCS1 and PSS
+ * signatures; in this case the card driver has to pick the lowest-denominator
+ * when it sets these flags to indicate its capabilities. */
+#define SC_ALGORITHM_RSA_HASH_NONE	0x00000100 /* only applies to PKCS1 padding */
+#define SC_ALGORITHM_RSA_HASH_SHA1	0x00000200
+#define SC_ALGORITHM_RSA_HASH_MD5	0x00000400
+#define SC_ALGORITHM_RSA_HASH_MD5_SHA1	0x00000800
+#define SC_ALGORITHM_RSA_HASH_RIPEMD160	0x00001000
+#define SC_ALGORITHM_RSA_HASH_SHA256	0x00002000
+#define SC_ALGORITHM_RSA_HASH_SHA384	0x00004000
+#define SC_ALGORITHM_RSA_HASH_SHA512	0x00008000
+#define SC_ALGORITHM_RSA_HASH_SHA224	0x00010000
+#define SC_ALGORITHM_RSA_HASHES		0x0001FF00
 
-#define SC_ALGORITHM_GOSTR3410_RAW		0x00002000
-#define SC_ALGORITHM_GOSTR3410_HASH_NONE	0x00004000
-#define SC_ALGORITHM_GOSTR3410_HASH_GOSTR3411	0x00008000
-#define SC_ALGORITHM_GOSTR3410_HASHES		0x00008000
-/*TODO: -DEE Should the above be 0x0000E000 */
-/* Or should the HASH_NONE be 0x00000010  and HASHES be 0x00008010 */
+/* This defines the hashes to be used with MGF1 in PSS padding */
+#define SC_ALGORITHM_MGF1_SHA1		0x00100000
+#define SC_ALGORITHM_MGF1_SHA256	0x00200000
+#define SC_ALGORITHM_MGF1_SHA384	0x00400000
+#define SC_ALGORITHM_MGF1_SHA512	0x00800000
+#define SC_ALGORITHM_MGF1_SHA224	0x01000000
+#define SC_ALGORITHM_MGF1_HASHES	0x01F00000
 
+/* These flags are exclusive: a GOST R34.10 card must support at least one or the
+ * other of the methods, and exactly one of them applies to any given operation.
+ * Note that the GOST R34.11 hash is actually applied to the data (ie if this
+ * algorithm is chosen the entire unhashed document is passed in). */
+#define SC_ALGORITHM_GOSTR3410_RAW		0x00020000
+#define SC_ALGORITHM_GOSTR3410_HASH_NONE	SC_ALGORITHM_GOSTR3410_RAW /*XXX*/
+#define SC_ALGORITHM_GOSTR3410_HASH_GOSTR3411	0x00080000
+#define SC_ALGORITHM_GOSTR3410_HASHES		0x000A0000
+/*TODO: -DEE Should the above be 0x000E0000 */
+/* Or should the HASH_NONE be 0x00000100  and HASHES be 0x00080010 */
+
+/* The ECDSA flags are exclusive, and exactly one of them applies to any given
+ * operation.  If ECDSA with a hash is specified, then the data passed in is
+ * the entire document, unhashed, and the hash is applied once to it before
+ * truncating and signing.  These flags are distinct from the RSA hash flags,
+ * which determine the hash ids the card is willing to put in RSA message
+ * padding. */
 /* May need more bits if card can do more hashes */
 /* TODO: -DEE Will overload RSA_HASHES with EC_HASHES */
 /* Not clear if these need their own bits or not */
 /* The PIV card does not support and hashes */
-#define SC_ALGORITHM_ECDSA_RAW		0x00010000
-#define SC_ALGORITHM_ECDH_CDH_RAW	0x00020000
+#define SC_ALGORITHM_ECDH_CDH_RAW	0x00200000
+#define SC_ALGORITHM_ECDSA_RAW		0x00100000
 #define SC_ALGORITHM_ECDSA_HASH_NONE		SC_ALGORITHM_RSA_HASH_NONE
 #define SC_ALGORITHM_ECDSA_HASH_SHA1		SC_ALGORITHM_RSA_HASH_SHA1
 #define SC_ALGORITHM_ECDSA_HASH_SHA224		SC_ALGORITHM_RSA_HASH_SHA224
@@ -141,9 +180,11 @@ extern "C" {
 							SC_ALGORITHM_ECDSA_HASH_SHA512)
 
 /* define mask of all algorithms that can do raw */
-#define SC_ALGORITHM_RAW_MASK (SC_ALGORITHM_RSA_RAW | SC_ALGORITHM_GOSTR3410_RAW | SC_ALGORITHM_ECDSA_RAW)
+#define SC_ALGORITHM_RAW_MASK (SC_ALGORITHM_RSA_RAW | \
+                               SC_ALGORITHM_GOSTR3410_RAW | \
+                               SC_ALGORITHM_ECDSA_RAW)
 
-/* extened algorithm bits for selected mechs */
+/* extended algorithm bits for selected mechs */
 #define SC_ALGORITHM_EXT_EC_F_P          0x00000001
 #define SC_ALGORITHM_EXT_EC_F_2M         0x00000002
 #define SC_ALGORITHM_EXT_EC_ECPARAMETERS 0x00000004
@@ -162,6 +203,7 @@ extern "C" {
 struct sc_supported_algo_info {
 	unsigned int reference;
 	unsigned int mechanism;
+	struct sc_object_id *parameters; /* OID for ECC, NULL for RSA */
 	unsigned int operations;
 	struct sc_object_id algo_id;
 	unsigned int algo_ref;
@@ -342,6 +384,7 @@ typedef struct sc_reader {
 #define SC_PIN_CMD_CHANGE	1
 #define SC_PIN_CMD_UNBLOCK	2
 #define SC_PIN_CMD_GET_INFO	3
+#define SC_PIN_CMD_GET_SESSION_PIN	4
 
 #define SC_PIN_CMD_USE_PINPAD		0x0001
 #define SC_PIN_CMD_NEED_PADDING		0x0002
@@ -359,7 +402,7 @@ typedef struct sc_reader {
 struct sc_pin_cmd_pin {
 	const char *prompt;	/* Prompt to display */
 
-	const unsigned char *data;		/* PIN, if given by the appliction */
+	const unsigned char *data;		/* PIN, if given by the application */
 	int len;		/* set to -1 to get pin from pin pad */
 
 	size_t min_length;	/* min length of PIN */
@@ -450,6 +493,7 @@ struct sc_reader_operations {
 
 /* Hint SC_CARD_CAP_RNG */
 #define SC_CARD_FLAG_RNG		0x00000002
+#define SC_CARD_FLAG_KEEP_ALIVE	0x00000004
 
 /*
  * Card capabilities
@@ -474,6 +518,12 @@ struct sc_reader_operations {
 /* D-TRUST CardOS cards special flags */
 #define SC_CARD_CAP_ONLY_RAW_HASH		0x00000040
 #define SC_CARD_CAP_ONLY_RAW_HASH_STRIPPED	0x00000080
+
+/* Card (or card driver) supports an protected authentication mechanism */
+#define SC_CARD_CAP_PROTECTED_AUTHENTICATION_PATH	0x00000100
+
+/* Card (or card driver) supports generating a session PIN */
+#define SC_CARD_CAP_SESSION_PIN	0x00000200
 
 typedef struct sc_card {
 	struct sc_context *ctx;
@@ -592,7 +642,7 @@ struct sc_card_operations {
 	int (*decipher)(struct sc_card *card, const u8 * crgram,
 		        size_t crgram_len, u8 * out, size_t outlen);
 
-	/* compute_signature:  Generates a digital signature on the card.  Similiar
+	/* compute_signature:  Generates a digital signature on the card.  Similar
 	 *   to the function decipher. */
 	int (*compute_signature)(struct sc_card *card, const u8 * data,
 				 size_t data_len, u8 * out, size_t outlen);
@@ -670,7 +720,7 @@ typedef struct {
 	unsigned long (*thread_id)(void);
 } sc_thread_context_t;
 
-/** Stop modifing or using external resources
+/** Stop modifying or using external resources
  *
  * Currently this is used to avoid freeing duplicated external resources for a
  * process that has been forked. For example, a child process may want to leave
@@ -679,6 +729,7 @@ typedef struct {
  * calling sc_disconnect_card.
  */
 #define SC_CTX_FLAG_TERMINATE				0x00000001
+/** removed in 0.18.0 and later */
 #define SC_CTX_FLAG_PARANOID_MEMORY			0x00000002
 #define SC_CTX_FLAG_DEBUG_MEMORY			0x00000004
 #define SC_CTX_FLAG_ENABLE_DEFAULT_DRIVER	0x00000008
@@ -689,7 +740,6 @@ typedef struct sc_context {
 	scconf_block *conf_blocks[3];
 	char *app_name;
 	int debug;
-	int reopen_log_file;
 	unsigned long flags;
 
 	FILE *debug_file;
@@ -715,7 +765,7 @@ typedef struct sc_context {
 /** Sends a APDU to the card
  *  @param  card  struct sc_card object to which the APDU should be send
  *  @param  apdu  sc_apdu_t object of the APDU to be send
- *  @return SC_SUCCESS on succcess and an error code otherwise
+ *  @return SC_SUCCESS on success and an error code otherwise
  */
 int sc_transmit_apdu(struct sc_card *, struct sc_apdu *);
 
@@ -736,6 +786,24 @@ int sc_check_apdu(struct sc_card *, const struct sc_apdu *);
  *  0. You should modify both if you are expecting data in the response APDU.
  */
 int sc_bytes2apdu(sc_context_t *ctx, const u8 *buf, size_t len, sc_apdu_t *apdu);
+
+/** Encodes a APDU as an octet string
+ *  @param  ctx     sc_context_t object (used for logging)
+ *  @param  apdu    APDU to be encoded as an octet string
+ *  @param  proto   protocol version to be used
+ *  @param  out     output buffer of size outlen.
+ *  @param  outlen  size of hte output buffer
+ *  @return SC_SUCCESS on success and an error code otherwise
+ */
+int sc_apdu2bytes(sc_context_t *ctx, const sc_apdu_t *apdu,
+	unsigned int proto, u8 *out, size_t outlen);
+
+/** Calculates the length of the encoded APDU in octets.
+ *  @param  apdu   the APDU
+ *  @param  proto  the desired protocol
+ *  @return length of the encoded APDU
+ */
+size_t sc_apdu_get_length(const sc_apdu_t *apdu, unsigned int proto);
 
 int sc_check_sw(struct sc_card *card, unsigned int sw1, unsigned int sw2);
 
@@ -761,7 +829,7 @@ typedef struct {
 	/** version number of this structure (0 for this version) */
 	unsigned int  ver;
 	/** name of the application (used for finding application
-	 *  dependend configuration data). If NULL the name "default"
+	 *  dependent configuration data). If NULL the name "default"
 	 *  will be used. */
 	const char    *app_name;
 	/** context flags */
@@ -810,8 +878,9 @@ int sc_ctx_detect_readers(sc_context_t *ctx);
  * @param key path of register key
  * @return SC_SUCCESS on success and an error code otherwise.
  */
-int sc_ctx_win32_get_config_value(char *env, char *reg, char *key, char *out,
-	size_t *out_size);
+int sc_ctx_win32_get_config_value(const char *env,
+		const char *reg, const char *key,
+		void *out, size_t *out_size);
 
 /**
  * Returns a pointer to the specified sc_reader_t object
@@ -892,7 +961,7 @@ int sc_disconnect_card(struct sc_card *card);
 /**
  * Checks if a card is present in a reader
  * @param reader Reader structure
- * @retval If an error occured, the return value is a (negative)
+ * @retval If an error occurred, the return value is a (negative)
  *	OpenSC error code. If no card is present, 0 is returned.
  *	Otherwise, a positive value is returned, which is a
  *	combination of flags. The flag SC_READER_CARD_PRESENT is
@@ -915,9 +984,9 @@ int sc_detect_card_presence(sc_reader_t *reader);
  * @param event (OUT) the events that occurred. This is also ORed
  *   from the SC_EVENT_CARD_* constants listed above.
  * @param timeout Amount of millisecs to wait; -1 means forever
- * @retval < 0 if an error occured
+ * @retval < 0 if an error occurred
  * @retval = 0 if a an event happened
- * @retval = 1 if the timeout occured
+ * @retval = 1 if the timeout occurred
  */
 int sc_wait_for_event(sc_context_t *ctx, unsigned int event_mask,
                       sc_reader_t **event_reader, unsigned int *event,
@@ -1018,7 +1087,7 @@ int sc_read_binary(struct sc_card *card, unsigned int idx, u8 * buf,
  * @param  buf    buffer with the data
  * @param  count  number of bytes to write
  * @param  flags  flags for the WRITE BINARY command (currently not used)
- * @return number of bytes writen or an error code
+ * @return number of bytes written or an error code
  */
 int sc_write_binary(struct sc_card *card, unsigned int idx, const u8 * buf,
 		    size_t count, unsigned long flags);
@@ -1029,7 +1098,7 @@ int sc_write_binary(struct sc_card *card, unsigned int idx, const u8 * buf,
  * @param  buf    buffer with the new data
  * @param  count  number of bytes to update
  * @param  flags  flags for the UPDATE BINARY command (currently not used)
- * @return number of bytes writen or an error code
+ * @return number of bytes written or an error code
  */
 int sc_update_binary(struct sc_card *card, unsigned int idx, const u8 * buf,
 		     size_t count, unsigned long flags);
@@ -1040,7 +1109,7 @@ int sc_update_binary(struct sc_card *card, unsigned int idx, const u8 * buf,
  * @param  idx    index within the file for the data to be erased
  * @param  count  number of bytes to erase
  * @param  flags  flags for the ERASE BINARY command (currently not used)
- * @return number of bytes writen or an error code
+ * @return number of bytes written or an error code
  */
 int sc_erase_binary(struct sc_card *card, unsigned int idx,
 		    size_t count, unsigned long flags);
@@ -1069,10 +1138,10 @@ int sc_read_record(struct sc_card *card, unsigned int rec_nr, u8 * buf,
  * Writes data to a record from the current (i.e. selected) file.
  * @param  card    struct sc_card object on which to issue the command
  * @param  rec_nr  SC_READ_RECORD_CURRENT or a record number starting from 1
- * @param  buf     buffer with to the data to be writen
+ * @param  buf     buffer with to the data to be written
  * @param  count   number of bytes to write
  * @param  flags   flags (may contain a short file id of a file to select)
- * @retval number of bytes writen or an error value
+ * @retval number of bytes written or an error value
  */
 int sc_write_record(struct sc_card *card, unsigned int rec_nr, const u8 * buf,
 		    size_t count, unsigned long flags);
@@ -1082,7 +1151,7 @@ int sc_write_record(struct sc_card *card, unsigned int rec_nr, const u8 * buf,
  * @param  buf     buffer with to the data for the new record
  * @param  count   length of the data
  * @param  flags   flags (may contain a short file id of a file to select)
- * @retval number of bytes writen or an error value
+ * @retval number of bytes written or an error value
  */
 int sc_append_record(struct sc_card *card, const u8 * buf, size_t count,
 		     unsigned long flags);
@@ -1090,10 +1159,10 @@ int sc_append_record(struct sc_card *card, const u8 * buf, size_t count,
  * Updates the data of a record from the current (i.e. selected) file.
  * @param  card    struct sc_card object on which to issue the command
  * @param  rec_nr  SC_READ_RECORD_CURRENT or a record number starting from 1
- * @param  buf     buffer with to the new data to be writen
+ * @param  buf     buffer with to the new data to be written
  * @param  count   number of bytes to update
  * @param  flags   flags (may contain a short file id of a file to select)
- * @retval number of bytes writen or an error value
+ * @retval number of bytes written or an error value
  */
 int sc_update_record(struct sc_card *card, unsigned int rec_nr, const u8 * buf,
 		     size_t count, unsigned long flags);
@@ -1297,7 +1366,8 @@ int sc_base64_decode(const char *in, u8 *out, size_t outlen);
  * @param  len  length of the memory buffer
  */
 void sc_mem_clear(void *ptr, size_t len);
-void *sc_mem_alloc_secure(sc_context_t *ctx, size_t len);
+void *sc_mem_secure_alloc(size_t len);
+void sc_mem_secure_free(void *ptr, size_t len);
 int sc_mem_reverse(unsigned char *buf, size_t len);
 
 int sc_get_cache_dir(sc_context_t *ctx, char *buf, size_t bufsize);
@@ -1308,8 +1378,12 @@ struct sc_app_info *sc_find_app(struct sc_card *card, struct sc_aid *aid);
 void sc_free_apps(struct sc_card *card);
 int sc_parse_ef_atr(struct sc_card *card);
 void sc_free_ef_atr(struct sc_card *card);
+int sc_parse_ef_gdo(struct sc_card *card,
+		unsigned char *iccsn, size_t *iccsn_len,
+		unsigned char *chn, size_t *chn_len);
 int sc_update_dir(struct sc_card *card, sc_app_info_t *app);
 
+void sc_invalidate_cache(struct sc_card *card);
 void sc_print_cache(struct sc_card *card);
 
 struct sc_algorithm_info * sc_card_find_rsa_alg(struct sc_card *card,
@@ -1325,7 +1399,19 @@ scconf_block *sc_match_atr_block(sc_context_t *ctx, struct sc_card_driver *drive
  * @param value pointer to data used for CRC calculation
  * @param len length of data used for CRC calculation
  */
-unsigned sc_crc32(unsigned char *value, size_t len);
+unsigned sc_crc32(const unsigned char *value, size_t len);
+
+/**
+ * Find a given tag in a compact TLV structure
+ * @param[in]  buf  input buffer holding the compact TLV structure
+ * @param[in]  len  length of the input buffer @buf in bytes
+ * @param[in]  tag  compact tag to search for - high nibble: plain tag, low nibble: length.
+ *                  If length is 0, only the plain tag is used for searching,
+ *                  in any other case, the length must also match.
+ * @param[out] outlen pointer where the size of the buffer returned is to be stored
+ * @return pointer to the tag value found within @buf, or NULL if not found/on error
+ */
+const u8 *sc_compacttlv_find_tag(const u8 *buf, size_t len, u8 tag, size_t *outlen);
 
 /**
  * Used to initialize the @c sc_remote_data structure --
@@ -1387,6 +1473,16 @@ int iso7816_read_binary_sfid(sc_card_t *card, unsigned char sfid,
  * */
 int iso7816_write_binary_sfid(sc_card_t *card, unsigned char sfid,
 		u8 *ef, size_t ef_len);
+
+/**
+ * @brief Set verification status of a specific PIN to “not verified”
+ *
+ * @param[in] card
+ * @param[in] pin_reference  PIN reference written to P2
+ *
+ * @note The appropriate directory must be selected before calling this function.
+ * */
+int iso7816_logout(sc_card_t *card, unsigned char pin_reference);
 
 #ifdef __cplusplus
 }

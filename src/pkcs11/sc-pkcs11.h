@@ -36,12 +36,6 @@
 extern "C" {
 #endif
 
-#if defined(_WIN32) || defined(USE_CYGWIN)
-#define PKCS11_DEFAULT_MODULE_NAME      "opensc-pkcs11.dll"
-#else
-#define PKCS11_DEFAULT_MODULE_NAME      "opensc-pkcs11.so"
-#endif
-
 #define SC_PKCS11_PIN_UNBLOCK_NOT_ALLOWED	0
 #define SC_PKCS11_PIN_UNBLOCK_UNLOGGED_SETPIN	1
 #define SC_PKCS11_PIN_UNBLOCK_SCONTEXT_SETPIN	2
@@ -77,13 +71,11 @@ struct sc_pkcs11_config {
 	unsigned int plug_and_play;
 	unsigned int max_virtual_slots;
 	unsigned int slots_per_card;
-	unsigned char hide_empty_tokens;
 	unsigned char lock_login;
 	unsigned char atomic;
 	unsigned char init_sloppy;
 	unsigned int pin_unblock_style;
 	unsigned int create_puk_slot;
-	unsigned int zero_ckaid_for_ca_certs;
 	unsigned int create_slots_flags;
 	unsigned char ignore_pin_length;
 };
@@ -127,6 +119,9 @@ struct sc_pkcs11_object_ops {
 	/* Check compatibility of PKCS#15 object usage and an asked PKCS#11 mechanism. */
 	CK_RV (*can_do)(struct sc_pkcs11_session *, void *, CK_MECHANISM_TYPE, unsigned int);
 
+	/* General validation of mechanism parameters (sign, encrypt, etc) */
+	CK_RV (*init_params)(struct sc_pkcs11_session *, CK_MECHANISM_PTR);
+
 	/* Others to be added when implemented */
 };
 
@@ -164,7 +159,7 @@ struct sc_pkcs11_framework_ops {
 				CK_CHAR_PTR, CK_ULONG,
 				CK_CHAR_PTR, CK_ULONG);
 	/*
-	 * In future: functions to create new objects (ie. certificates, private keys)
+	 * In future: functions to create new objects (i.e. certificates, private keys)
 	 */
 	CK_RV (*init_token)(struct sc_pkcs11_slot *, void *,
 				CK_UTF8CHAR_PTR, CK_ULONG,
@@ -225,7 +220,7 @@ struct sc_pkcs11_slot {
 	sc_timestamp_t slot_state_expires;
 
 	int fw_data_idx;		/* Index of framework data */
-	struct sc_app_info *app_info;	/* Application assosiated to slot */
+	struct sc_app_info *app_info;	/* Application associated to slot */
 	list_t logins;			/* tracks all calls to C_Login if atomic operations are requested */
 	int flags;
 };
@@ -298,6 +293,10 @@ typedef struct sc_pkcs11_mechanism_type sc_pkcs11_mechanism_type_t;
 struct sc_pkcs11_operation {
 	sc_pkcs11_mechanism_type_t *type;
 	CK_MECHANISM	  mechanism;
+	union {
+		CK_RSA_PKCS_PSS_PARAMS pss;
+		CK_RSA_PKCS_OAEP_PARAMS oaep;
+	} mechanism_params;
 	struct sc_pkcs11_session *session;
 	void *		  priv_data;
 };
@@ -391,6 +390,8 @@ CK_RV attr_find(CK_ATTRIBUTE_PTR, CK_ULONG, CK_ULONG, void *, size_t *);
 CK_RV attr_find2(CK_ATTRIBUTE_PTR, CK_ULONG, CK_ATTRIBUTE_PTR, CK_ULONG,
 		CK_ULONG, void *, size_t *);
 CK_RV attr_find_ptr(CK_ATTRIBUTE_PTR, CK_ULONG, CK_ULONG, void **, size_t *);
+CK_RV attr_find_ptr2(CK_ATTRIBUTE_PTR pTemp1, CK_ULONG ulCount1,
+		CK_ATTRIBUTE_PTR pTemp2, CK_ULONG ulCount2, CK_ULONG type, void **ptr, size_t * sizep);
 CK_RV attr_find_and_allocate_ptr(CK_ATTRIBUTE_PTR, CK_ULONG, CK_ULONG, void **, size_t *);
 CK_RV attr_find_var(CK_ATTRIBUTE_PTR, CK_ULONG, CK_ULONG, void *, size_t *);
 CK_RV attr_extract(CK_ATTRIBUTE_PTR, void *, size_t *);
@@ -440,7 +441,7 @@ CK_RV sc_pkcs11_register_sign_and_hash_mechanism(struct sc_pkcs11_card *,
 #ifdef ENABLE_OPENSSL
 CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, int pubkey_len,
 	const unsigned char *pubkey_params, int pubkey_params_len,
-	CK_MECHANISM_TYPE mech, sc_pkcs11_operation_t *md,
+	CK_MECHANISM_PTR mech, sc_pkcs11_operation_t *md,
 	unsigned char *inp, int inp_len,
 	unsigned char *signat, int signat_len);
 #endif

@@ -78,7 +78,7 @@ extern int dnie_read_file(
  * Override APDU response error codes from iso7816.c to allow 
  * handling of SM specific error
  */
-static struct sc_card_error dnie_errors[] = {
+static const struct sc_card_error dnie_errors[] = {
 	{0x6688, SC_ERROR_SM, "Cryptographic checksum invalid"},
 	{0x6987, SC_ERROR_SM, "Expected SM Data Object missing"},
 	{0x6988, SC_ERROR_SM, "SM Data Object incorrect"},
@@ -128,7 +128,7 @@ H13-H15: 0x0F 0x65 0x81 final phase: tarjeta no operativa
  * OpenDNIe defines two ATR's for user and finalized card state
  */
 static struct sc_atr_table dnie_atrs[] = {
-	/* TODO: get ATR for uninitalized DNIe */
+	/* TODO: get ATR for uninitialized DNIe */
 	{		/** card activated; normal operation state */
 	 "3B:7F:00:00:00:00:6A:44:4E:49:65:00:00:00:00:00:00:03:90:00",
 	 "FF:FF:00:FF:FF:FF:FF:FF:FF:FF:FF:00:00:00:00:00:00:FF:FF:FF",
@@ -163,6 +163,7 @@ const char *user_consent_message="Esta a punto de realizar una firma digital\nco
  */
 char *user_consent_msgs[] = { "SETTITLE", "SETDESC", "CONFIRM", "BYE" };
 
+#if !defined(__APPLE__) && !defined(_WIN32)
 /**
  * Do fgets() without interruptions.
  *
@@ -181,6 +182,7 @@ static char *nointr_fgets(char *s, int size, FILE *stream)
 	}
 	return s;
 }
+#endif
 
 /**
  * Ask for user consent.
@@ -201,7 +203,7 @@ int dnie_ask_user_consent(struct sc_card * card, const char *title, const char *
 	CFStringRef header_ref; /* to store title */
 	CFStringRef message_ref; /* to store message */
 #endif
-#ifdef linux
+#if !defined(__APPLE__) && !defined(_WIN32)
 	pid_t pid;
 	FILE *fin=NULL;
 	FILE *fout=NULL;	/* to handle pipes as streams */
@@ -213,7 +215,7 @@ int dnie_ask_user_consent(struct sc_card * card, const char *title, const char *
 	int n = 0;		/* to iterate on to-be-sent messages */
 #endif
 	int res = SC_ERROR_INTERNAL;	/* by default error :-( */
-	char *msg = NULL;	/* to makr errors */
+	char *msg = NULL;	/* to mark errors */
 
 	if ((card == NULL) || (card->ctx == NULL))
 		return SC_ERROR_INVALID_ARGUMENTS;
@@ -246,7 +248,7 @@ int dnie_ask_user_consent(struct sc_card * card, const char *title, const char *
 	header_ref = CFStringCreateWithCString( NULL, title, strlen(title) );
 	message_ref = CFStringCreateWithCString( NULL,message, strlen(message) );
 
-	/* Displlay user notification alert */
+	/* Display user notification alert */
 	CFUserNotificationDisplayAlert(
 		0, /* no timeout */
 		kCFUserNotificationNoteAlertLevel,  /* Alert level */
@@ -269,7 +271,7 @@ int dnie_ask_user_consent(struct sc_card * card, const char *title, const char *
 	if( result == kCFUserNotificationAlternateResponse )
 		LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 	LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_ALLOWED);
-#elif linux
+#else
 	/* check that user_consent_app exists. TODO: check if executable */
 	res = stat(GET_DNIE_UI_CTX(card).user_consent_app, &st_file);
 	if (res != 0) {
@@ -359,8 +361,6 @@ do_error:
 	/* close out channel to force client receive EOF and also die */
 	if (fout != NULL) fclose(fout);
 	if (fin != NULL) fclose(fin);
-#else
-#error "Don't know how to handle user consent in this (rare) Operating System"
 #endif
 	if (msg != NULL)
 		sc_log(card->ctx, "%s", msg);
@@ -396,8 +396,8 @@ static sc_card_driver_t dnie_driver = {
 /**
  * Parse configuration file for dnie parameters.
  *
- * DNIe card driver has two main paramaters:
- * - The name of the user consent Application to be used in Linux. This application shoud be any of pinentry-xxx family
+ * DNIe card driver has two main parameters:
+ * - The name of the user consent Application to be used in Linux. This application should be any of pinentry-xxx family
  * - A flag to indicate if user consent is to be used in this driver. If false, the user won't be prompted for confirmation on signature operations
  *
  * @See ../../etc/opensc.conf for details
@@ -469,7 +469,7 @@ static int dnie_generate_key(sc_card_t * card, void *data)
 /**
  * Analyze a buffer looking for provided data pattern.
  *
- * Comodity function for dnie_get_info() that searches a byte array
+ * Commodity function for dnie_get_info() that searches a byte array
  * in provided buffer
  *
  * @param card pointer to card info data
@@ -645,15 +645,14 @@ static int dnie_get_serialnr(sc_card_t * card, sc_serial_number_t * serial)
 	/* if serial number is cached, use it */
 	if (card->serialnr.len) {
 		memcpy(serial, &card->serialnr, sizeof(*serial));
-		sc_log(card->ctx, "Serial Number (cached): '%s'",
-		       sc_dump_hex(serial->value, serial->len));
+		sc_log_hex(card->ctx, "Serial Number (cached)", serial->value, serial->len);
 		LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 	}
 	/* not cached, retrieve it by mean of an APDU */
 	/* official driver read 0x11 bytes, but only uses 7. Manual says just 7 (for le) */
 	dnie_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0xb8, 0x00, 0x00, 0x07, 0,
 					rbuf, sizeof(rbuf), NULL, 0);
-	apdu.cla = 0x90;	/* propietary cmd */
+	apdu.cla = 0x90;	/* proprietary cmd */
 	/* send apdu */
 	result = sc_transmit_apdu(card, &apdu);
 	if (result != SC_SUCCESS) {
@@ -672,8 +671,7 @@ static int dnie_get_serialnr(sc_card_t * card, sc_serial_number_t * serial)
 	 */
 	/* copy and return serial number */
 	memcpy(serial, &card->serialnr, sizeof(*serial));
-	sc_log(card->ctx, "Serial Number (apdu): '%s'",
-	       sc_dump_hex(serial->value, serial->len));
+	sc_log_hex(card->ctx, "Serial Number (apdu)", serial->value, serial->len);
 	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 }
 
@@ -714,6 +712,7 @@ static void init_flags(struct sc_card *card)
 	/* RSA Support with PKCS1.5 padding */
 	algoflags = SC_ALGORITHM_RSA_HASH_NONE | SC_ALGORITHM_RSA_PAD_PKCS1;
 	_sc_card_add_rsa_alg(card, 1024, algoflags, 0);
+	_sc_card_add_rsa_alg(card, 1920, algoflags, 0);
 	_sc_card_add_rsa_alg(card, 2048, algoflags, 0);
 }
 
@@ -759,15 +758,25 @@ static int dnie_sm_free_wrapped_apdu(struct sc_card *card,
 
 	if ((*sm_apdu) != plain) {
 		rv = cwa_decode_response(card, provider, *sm_apdu);
-		if (plain) {
-			plain->resplen = (*sm_apdu)->resplen;
+		if (plain && rv == SC_SUCCESS) {
+			if (plain->resp) {
+				/* copy the response into the original resp buffer */
+				if ((*sm_apdu)->resplen <= plain->resplen) {
+					memcpy(plain->resp, (*sm_apdu)->resp, (*sm_apdu)->resplen);
+					plain->resplen = (*sm_apdu)->resplen;
+				} else {
+					sc_log(card->ctx, "Invalid initial length,"
+							" needed %"SC_FORMAT_LEN_SIZE_T"u bytes"
+							" but has %"SC_FORMAT_LEN_SIZE_T"u",
+							(*sm_apdu)->resplen, plain->resplen);
+					rv = SC_ERROR_BUFFER_TOO_SMALL;
+				}
+			}
 			plain->sw1 = (*sm_apdu)->sw1;
 			plain->sw2 = (*sm_apdu)->sw2;
-			if (((*sm_apdu)->data) != plain->data)
-				free((unsigned char *) (*sm_apdu)->data);
-			if ((*sm_apdu)->resp != plain->resp)
-				free((*sm_apdu)->resp);
 		}
+		free((unsigned char *) (*sm_apdu)->data);
+		free((*sm_apdu)->resp);
 		free(*sm_apdu);
 	}
 	*sm_apdu = NULL;
@@ -914,10 +923,10 @@ static unsigned long le2ulong(u8 * pt)
 /**
  * Uncompress data if in compressed format.
  *
- * @param card poiner to sc_card_t structure
+ * @param card pointer to sc_card_t structure
  * @param from buffer to get data from
  * @param len pointer to buffer length
- * @return uncompresed or original buffer; len points to new buffer length
+ * @return uncompressed or original buffer; len points to new buffer length
  *        on error return null
  */
 static u8 *dnie_uncompress(sc_card_t * card, u8 * from, size_t *len)
@@ -932,7 +941,7 @@ static u8 *dnie_uncompress(sc_card_t * card, u8 * from, size_t *len)
 		return NULL;
 	LOG_FUNC_CALLED(card->ctx);
 
-	/* if data size not enought for compression header assume uncompressed */
+	/* if data size not enough for compression header assume uncompressed */
 	if (*len < 8)
 		goto compress_exit;
 	/* evaluate compressed an uncompressed sizes (little endian format) */
@@ -962,13 +971,8 @@ static u8 *dnie_uncompress(sc_card_t * card, u8 * from, size_t *len)
 	}
 	/* Done; update buffer len and return pt to uncompressed data */
 	*len = uncompressed;
-	sc_log(card->ctx, "Compressed data:\n%s\n",
-	       sc_dump_hex(from + 8, compressed));
-	sc_log(card->ctx,
-	       "Uncompress() done. Before:'%"SC_FORMAT_LEN_SIZE_T"u' After: '%"SC_FORMAT_LEN_SIZE_T"u'",
-	       compressed, uncompressed);
-	sc_log(card->ctx, "Uncompressed data:\n%s\n",
-	       sc_dump_hex(upt, uncompressed));
+	sc_log_hex(card->ctx, "Compressed data", from + 8, compressed);
+	sc_log_hex(card->ctx, "Uncompressed data", upt, uncompressed);
  compress_exit:
 
 #endif
@@ -1056,7 +1060,7 @@ static int dnie_fill_cache(sc_card_t * card)
 				free(apdu.resp);
 			LOG_FUNC_RETURN(ctx, r);	/* arriving here means response error */
 		}
-		/* copy received data into buffer. realloc() if not enought space */
+		/* copy received data into buffer. realloc() if not enough space */
 		count = apdu.resplen;
 		buffer = realloc(buffer, len + count);
 		if (!buffer) {
@@ -1082,7 +1086,7 @@ static int dnie_fill_cache(sc_card_t * card)
 	if (apdu.resp != tmp)
 		free(apdu.resp);
 	if (pt == NULL) {
-		sc_log(ctx, "Uncompress proccess failed");
+		sc_log(ctx, "Uncompress process failed");
 		free(buffer);
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
 	}
@@ -1106,10 +1110,10 @@ static int dnie_fill_cache(sc_card_t * card)
  *
  * @param card pointer to sc_card_t structure
  * @param idx offset from card file to ask data for
- * @param buf where to store readed data. must be non null
+ * @param buf where to store read data. must be non null
  * @param count number of bytes to read
  * @param flags. not used
- * @return number of bytes readed, 0 on EOF, error code on error
+ * @return number of bytes read, 0 on EOF, error code on error
  */
 static int dnie_read_binary(struct sc_card *card,
 			    unsigned int idx,
@@ -1215,8 +1219,8 @@ static int dnie_compose_and_send_apdu(sc_card_t *card, const u8 *path, size_t pa
  * - only handles some types: 
  * -- <strong>SC_PATH_TYPE_FILE_ID</strong> 2-byte long file ID
  * -- <strong>SC_PATH_TYPE_DF_NAME</strong> named DF's
- * -- <strong>SC_PATH_TYPE_PARENT</strong>  jump to parent DF of current EF/DF - undocummented in DNIe manual
- * -- other file types are marked as unssupported
+ * -- <strong>SC_PATH_TYPE_PARENT</strong>  jump to parent DF of current EF/DF - undocumented in DNIe manual
+ * -- other file types are marked as unsupported
  *
  * - Also MF must be addressed by their Name, not their ID
  * So some magic is needed:
@@ -1259,18 +1263,18 @@ static int dnie_select_file(struct sc_card *card,
 		 */
 		if (in_path->len != 2)
 			LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
-		sc_log(ctx, "select_file(ID): %s", sc_dump_hex(in_path->value, in_path->len));
+		sc_log_hex(ctx, "select_file(ID)", in_path->value, in_path->len);
 		res = dnie_compose_and_send_apdu(card, in_path->value, in_path->len, 0, file_out);
 		break;
 	case SC_PATH_TYPE_DF_NAME:
-		sc_log(ctx, "select_file(NAME): %s", sc_dump_hex(in_path->value, in_path->len));
+		sc_log_hex(ctx, "select_file(NAME)", in_path->value, in_path->len);
 		res = dnie_compose_and_send_apdu(card, in_path->value, in_path->len, 4, file_out);
 		break;
 	case SC_PATH_TYPE_PATH:
 		if ((in_path->len == 0) || ((in_path->len & 1) != 0)) /* not divisible by 2 */
 			LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
-		sc_log(ctx, "select_file(PATH): requested:%s ", sc_dump_hex(in_path->value, in_path->len));
+		sc_log_hex(ctx, "select_file(PATH): requested", in_path->value, in_path->len);
 
 		/* convert to SC_PATH_TYPE_FILE_ID */
 		res = sc_lock(card); /* lock to ensure path traversal */
@@ -1278,7 +1282,7 @@ static int dnie_select_file(struct sc_card *card,
 		if (memcmp(in_path->value, "\x3F\x00", 2) == 0) {
 			/* if MF, use the name as path */
 			strcpy((char *)tmp_path, DNIE_MF_NAME);
-			sc_log(ctx, "select_file(NAME): requested:%s ", sc_dump_hex(tmp_path, sizeof(DNIE_MF_NAME) - 1));
+			sc_log_hex(ctx, "select_file(NAME): requested", tmp_path, sizeof(DNIE_MF_NAME) - 1);
 			res = dnie_compose_and_send_apdu(card, tmp_path, sizeof(DNIE_MF_NAME) - 1, 4, file_out);
 			if (res != SC_SUCCESS) {
 				sc_unlock(card);
@@ -1337,58 +1341,34 @@ static int dnie_select_file(struct sc_card *card,
  * No reason to do it, as is needed to do SM handshake...
  * Also: official driver reads in blocks of 20 bytes. 
  * Why? Manual and iso-7816-4 states that only 8 bytes 
- * are required... so we will obbey Manual
+ * are required... so we will obey Manual
  *
  * @param card Pointer to card Structure
  * @param rnd Where to store challenge
  * @param len requested challenge length
  * @return SC_SUCCESS if OK; else error code
  */
-#define BUFFER_SIZE 8
 
 static int dnie_get_challenge(struct sc_card *card, u8 * rnd, size_t len)
 {
-	sc_apdu_t apdu;
-	u8 buf[MAX_RESP_BUFFER_SIZE];
-	int result = SC_SUCCESS;
-	if ((card == NULL) || (card->ctx == NULL))
-		return SC_ERROR_INVALID_ARGUMENTS;
-	LOG_FUNC_CALLED(card->ctx);
-	/* just a copy of iso7816::get_challenge() but call dnie_check_sw to
-	 * look for extra error codes */
-	if ( (rnd==NULL) || (len==0) ) {
-		/* no valid buffer provided */
-		result = SC_ERROR_INVALID_ARGUMENTS;
-		goto dnie_get_challenge_error;
-	}
-	dnie_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0x84, 0x00, 0x00, BUFFER_SIZE, 0,
-					buf, MAX_RESP_BUFFER_SIZE, NULL, 0);
+	/* As DNIe cannot handle other data length than 0x08 and 0x14 */
+	u8 rbuf[8];
+	size_t out_len;
+	int r;
 
-	/* 
-	* As DNIe cannot handle other data length than 0x08 and 0x14, 
-	* perform consecutive reads of 8 bytes until retrieve requested length
-	*/
-	while (len > 0) {
-		size_t n = len > BUFFER_SIZE ? BUFFER_SIZE : len;
-		sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0x84, 0x00, 0x00);
-		apdu.le = BUFFER_SIZE;
-		apdu.resp = buf;
-		apdu.resplen = MAX_RESP_BUFFER_SIZE;	/* include SW's */
-		result = sc_transmit_apdu(card, &apdu);
-		if (result != SC_SUCCESS) {
-			LOG_TEST_RET(card->ctx, result, "APDU transmit failed");
-		}
-		if (apdu.resplen != BUFFER_SIZE) {
-			result = sc_check_sw(card, apdu.sw1, apdu.sw2);
-			goto dnie_get_challenge_error;
-		}
-		memcpy(rnd, apdu.resp, n);
-		len -= n;
-		rnd += n;
+	LOG_FUNC_CALLED(card->ctx);
+
+	r = iso_ops->get_challenge(card, rbuf, sizeof rbuf);
+	LOG_TEST_RET(card->ctx, r, "GET CHALLENGE cmd failed");
+
+	if (len < (size_t) r) {
+		out_len = len;
+	} else {
+		out_len = (size_t) r;
 	}
-	result = SC_SUCCESS;
- dnie_get_challenge_error:
-	LOG_FUNC_RETURN(card->ctx, result);
+	memcpy(rnd, rbuf, out_len);
+
+	LOG_FUNC_RETURN(card->ctx, (int) out_len);
 }
 
 /*
@@ -1406,14 +1386,26 @@ static int dnie_get_challenge(struct sc_card *card, u8 * rnd, size_t len)
 static int dnie_logout(struct sc_card *card)
 {
 	int result = SC_SUCCESS;
+	sc_file_t *file = NULL;
 
 	if ((card == NULL) || (card->ctx == NULL))
 		return SC_ERROR_INVALID_ARGUMENTS;
+
 	LOG_FUNC_CALLED(card->ctx);
-	/* disable and free any sm channel related data */
-	result =
-	    cwa_create_secure_channel(card, GET_DNIE_PRIV_DATA(card)->cwa_provider, CWA_SM_OFF);
-	/* TODO: _logout() see comments.txt on what to do here */
+	if (card->sm_ctx.sm_mode != SM_MODE_NONE) {
+		/* mark the channel as closed */
+		result = cwa_create_secure_channel(card, 
+			GET_DNIE_PRIV_DATA(card)->cwa_provider, CWA_SM_OFF);
+		LOG_TEST_RET(card->ctx, result, "Cannot close the secure channel");
+		/* request the Master File to provoke an SM error and close the channel */
+		result = dnie_compose_and_send_apdu(card, (const u8 *) DNIE_MF_NAME, 
+			sizeof(DNIE_MF_NAME) - 1, 4, &file);
+		if (result == SC_ERROR_SM)
+			result = SC_SUCCESS;
+	}
+
+	if (file != NULL)
+		sc_file_free(file);
 	LOG_FUNC_RETURN(card->ctx, result);
 }
 
@@ -1632,7 +1624,7 @@ static int dnie_decipher(struct sc_card *card,
  * and applies
  *
  * @param card pointer to sc_card_t structure
- * @param data data to be hased/signed
+ * @param data data to be hashed/signed
  * @param datalen length of provided data
  * @param out buffer to store results into
  * @param outlen available space in result buffer
@@ -1649,7 +1641,7 @@ static int dnie_compute_signature(struct sc_card *card,
 	struct sc_apdu apdu;
 	u8 rbuf[MAX_RESP_BUFFER_SIZE];	/* to receive sign response */
 
-	/* some preliminar checks */
+	/* some preliminary checks */
 	if ((card == NULL) || (card->ctx == NULL))
 		return SC_ERROR_INVALID_ARGUMENTS;
 	/* OK: start working */
@@ -1658,8 +1650,6 @@ static int dnie_compute_signature(struct sc_card *card,
 	if ((data == NULL) || (out == NULL))
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	if (datalen > SC_MAX_APDU_BUFFER_SIZE)	/* should be 256 */
-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
-	if (outlen<256) /* enought space to store 2048 bit response */
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 
 #ifdef ENABLE_DNIE_UI
@@ -1677,9 +1667,9 @@ static int dnie_compute_signature(struct sc_card *card,
 	   So just extract 15+20 DigestInfo+Hash info from ASN.1 provided
 	   data and feed them into sign() command
 	 */
-	sc_log(card->ctx,
-	       "Compute signature len: '%"SC_FORMAT_LEN_SIZE_T"u' bytes:\n%s\n============================================================",
-	       datalen, sc_dump_hex(data, datalen));
+	sc_log_hex(card->ctx,
+	       "Compute signature\n============================================================",
+	       data, datalen);
 
 	/*INS: 0x2A  PERFORM SECURITY OPERATION
 	 * P1:  0x9E  Resp: Digital Signature
@@ -1699,6 +1689,8 @@ static int dnie_compute_signature(struct sc_card *card,
 
 	/* ok: copy result from buffer */
 	result_resplen = apdu.resplen;
+	if ((int)outlen<result_resplen)
+		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	memcpy(out, apdu.resp, result_resplen);
 	/* and return response length */
 	LOG_FUNC_RETURN(card->ctx, result_resplen);
@@ -1884,7 +1876,7 @@ static int dnie_card_ctl(struct sc_card *card,
  * the read_binary() file cache work
  *
  * Extract real file length from compressed file is done by mean of
- * reading 8 first bytes for uncompressed/compressed lenght. 
+ * reading 8 first bytes for uncompressed/compressed length. 
  * Lengths are provided as two 4-byte little endian numbers
  *
  * Implemented just like a direct read binary apdu bypassing dnie file cache
@@ -1934,7 +1926,7 @@ static int dnie_read_header(struct sc_card *card)
 }
 
 /** 
- *  Access control list bytes for propietary DNIe FCI response for DF's.
+ *  Access control list bytes for proprietary DNIe FCI response for DF's.
  *  based in information from official DNIe Driver
  *  Parsing code based on itacns card driver
  */
@@ -1945,7 +1937,7 @@ static int df_acl[] = {		/* to handle DF's */
 };
 
 /** 
- *  Access control list bytes for propietary DNIe FCI response for EF's.
+ *  Access control list bytes for proprietary DNIe FCI response for EF's.
  *  based in information from official DNIe Driver
  *  Parsing code based on itacns card driver
  */
@@ -1960,7 +1952,7 @@ static int ef_acl[] = {		/* to handle EF's */
  *
  * Parse SelectFile's File Control information.
  * - First, std iso_parse_fci is called to parse std fci tags
- * - Then analyze propietary tag according DNIe Manual
+ * - Then analyze proprietary tag according DNIe Manual
  *
  * @param card OpenSC card structure pointer
  * @param file currently selected EF or DF
@@ -2125,7 +2117,7 @@ static int dnie_process_fci(struct sc_card *card,
  * Not implemented yet, as current availability for DNIe user driver 
  * is unknown
  *
- * @param card Pointer to Card Driver data structrure
+ * @param card Pointer to Card Driver data structure
  * @param data Pointer to Pin data structure
  * @return SC_SUCCESS if ok; else error code
  */
@@ -2183,7 +2175,7 @@ static int dnie_pin_verify(struct sc_card *card,
 	dnie_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x20, 0x00, 0x00, 0, pinlen,
 					NULL, 0, pinbuffer, pinlen);
 
-	/* and send to card throught virtual channel */
+	/* and send to card through virtual channel */
 	res = sc_transmit_apdu(card, &apdu);
 	if (res != SC_SUCCESS) {
 		LOG_TEST_RET(card->ctx, res, "VERIFY APDU Transmit fail");
@@ -2232,7 +2224,7 @@ static int dnie_pin_cmd(struct sc_card *card,
 
 	/* 
 	* some flags and settings from documentation 
-	* No (easy) way to handle pinpad throught SM, so disable it
+	* No (easy) way to handle pinpad through SM, so disable it
 	*/
 	data->flags &= ~SC_PIN_CMD_NEED_PADDING; /* no pin padding */
 	data->flags &= ~SC_PIN_CMD_USE_PINPAD;	 /* cannot handle pinpad */

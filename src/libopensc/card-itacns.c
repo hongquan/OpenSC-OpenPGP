@@ -51,7 +51,7 @@ static struct sc_card_driver itacns_drv = {
 
 
 /* List of ATR's for "hard" matching. */
-static struct sc_atr_table itacns_atrs[] = {
+static const struct sc_atr_table itacns_atrs[] = {
 	{ "3b:f4:18:00:ff:81:31:80:55:00:31:80:00:c7", NULL, NULL,
 		SC_CARD_TYPE_ITACNS_CIE_V1, 0, NULL},
 	{ NULL, NULL, NULL, 0, 0, NULL}
@@ -510,7 +510,7 @@ static int itacns_get_serialnr(sc_card_t *card, sc_serial_number_t *serial)
 	//Returned file->size should be 16. 
 	//We choose to not consider it as critical, because some cards 
 	//do not return FCI/FCP templates that include the file size.
-	//Notify abnormal lenght anyway.
+	//Notify abnormal length anyway.
 	if (len != 16) {
 		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, 
 				"Unexpected file length of EF_IDCarta (%lu)\n",

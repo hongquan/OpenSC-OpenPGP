@@ -125,9 +125,11 @@ scconf_block *_sc_match_atr_block(sc_context_t *ctx, struct sc_card_driver *driv
 
 /* Returns an index number if a match was found, -1 otherwise. table has to
  * be null terminated. */
-int _sc_match_atr(struct sc_card *card, struct sc_atr_table *table, int *type_out);
+int _sc_match_atr(struct sc_card *card, const struct sc_atr_table *table, int *type_out);
 
 int _sc_card_add_algorithm(struct sc_card *card, const struct sc_algorithm_info *info);
+int _sc_card_add_symmetric_alg(sc_card_t *card, unsigned int algorithm,
+			       unsigned int key_length, unsigned long flags);
 int _sc_card_add_rsa_alg(struct sc_card *card, unsigned int key_length,
 		unsigned long flags, unsigned long exponent);
 int _sc_card_add_ec_alg(struct sc_card *card, unsigned int key_length,
@@ -157,7 +159,7 @@ int sc_pkcs1_strip_digest_info_prefix(unsigned int *algorithm,
  * @return SC_SUCCESS on success and an error code otherwise
  */
 int sc_pkcs1_encode(sc_context_t *ctx, unsigned long flags,
-		const u8 *in, size_t inlen, u8 *out, size_t *outlen, size_t modlen);
+		const u8 *in, size_t inlen, u8 *out, size_t *outlen, size_t mod_bits);
 /**
  * Get the necessary padding and sec. env. flags.
  * @param  ctx     IN  sc_contex_t object

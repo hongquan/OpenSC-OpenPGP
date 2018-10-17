@@ -27,7 +27,7 @@
 #include "internal.h"
 #include "cardctl.h"
 
-static struct sc_atr_table acos5_atrs[] = {
+static const struct sc_atr_table acos5_atrs[] = {
 	{"3b:be:96:00:00:41:05:20:00:00:00:00:00:00:00:00:00:90:00", NULL, NULL,
 	SC_CARD_TYPE_ACOS5_GENERIC, 0, NULL},
 	{"3b:be:18:00:00:41:05:10:00:00:00:00:00:00:00:00:00:90:00", NULL, NULL,
@@ -181,7 +181,7 @@ static int acos5_list_files(sc_card_t * card, u8 * buf, size_t buflen)
 
 	/*
 	 * Use CARD GET INFO to fetch the number of files under the
-	 * curently selected DF.
+	 * currently selected DF.
 	 */
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_1, 0x14, 0x01, 0x00);
 	apdu.cla |= 0x80;

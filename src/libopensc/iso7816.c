@@ -57,9 +57,14 @@ static const struct sc_card_error iso7816_errors[] = {
 	{ 0x6282, SC_ERROR_FILE_END_REACHED,	"End of file/record reached before reading Le bytes" },
 	{ 0x6283, SC_ERROR_CARD_CMD_FAILED,	"Selected file invalidated" },
 	{ 0x6284, SC_ERROR_CARD_CMD_FAILED,	"FCI not formatted according to ISO 7816-4" },
+	{ 0x6285, SC_ERROR_CARD_CMD_FAILED,	"Selected file in termination state" },
+	{ 0x6286, SC_ERROR_CARD_CMD_FAILED,	"No input data available from a sensor on the card" },
 
 	{ 0x6300, SC_ERROR_CARD_CMD_FAILED,	"Warning: no information given, non-volatile memory has changed" },
 	{ 0x6381, SC_ERROR_CARD_CMD_FAILED,	"Warning: file filled up by last write" },
+
+	{ 0x6400, SC_ERROR_CARD_CMD_FAILED,	"Execution error" },
+	{ 0x6401, SC_ERROR_CARD_CMD_FAILED,	"Immediate response required by the card" },
 
 	{ 0x6581, SC_ERROR_MEMORY_FAILURE,	"Memory failure" },
 
@@ -68,37 +73,36 @@ static const struct sc_card_error iso7816_errors[] = {
 	{ 0x6800, SC_ERROR_NO_CARD_SUPPORT,	"Functions in CLA not supported" },
 	{ 0x6881, SC_ERROR_NO_CARD_SUPPORT,	"Logical channel not supported" },
 	{ 0x6882, SC_ERROR_NO_CARD_SUPPORT,	"Secure messaging not supported" },
+	{ 0x6883, SC_ERROR_CARD_CMD_FAILED,	"Last command of the chain expected" },
+	{ 0x6884, SC_ERROR_NO_CARD_SUPPORT,	"Command chaining not supported" },
 
 	{ 0x6900, SC_ERROR_NOT_ALLOWED,		"Command not allowed" },
 	{ 0x6981, SC_ERROR_CARD_CMD_FAILED,	"Command incompatible with file structure" },
-	{ 0x6982, SC_ERROR_SECURITY_STATUS_NOT_SATISFIED, "Security status not satisfied" },
+	{ 0x6982, SC_ERROR_SECURITY_STATUS_NOT_SATISFIED,"Security status not satisfied" },
 	{ 0x6983, SC_ERROR_AUTH_METHOD_BLOCKED,	"Authentication method blocked" },
 	{ 0x6984, SC_ERROR_REF_DATA_NOT_USABLE,	"Referenced data not usable" },
 	{ 0x6985, SC_ERROR_NOT_ALLOWED,		"Conditions of use not satisfied" },
 	{ 0x6986, SC_ERROR_NOT_ALLOWED,		"Command not allowed (no current EF)" },
 	{ 0x6987, SC_ERROR_INCORRECT_PARAMETERS,"Expected SM data objects missing" },
-	{ 0x6988, SC_ERROR_INCORRECT_PARAMETERS,"SM data objects incorrect" },
+	{ 0x6988, SC_ERROR_INCORRECT_PARAMETERS,"Incorrect SM data objects" },
 
 	{ 0x6A00, SC_ERROR_INCORRECT_PARAMETERS,"Wrong parameter(s) P1-P2" },
 	{ 0x6A80, SC_ERROR_INCORRECT_PARAMETERS,"Incorrect parameters in the data field" },
 	{ 0x6A81, SC_ERROR_NO_CARD_SUPPORT,	"Function not supported" },
-	{ 0x6A82, SC_ERROR_FILE_NOT_FOUND,	"File not found" },
+	{ 0x6A82, SC_ERROR_FILE_NOT_FOUND,	"File or application not found" },
 	{ 0x6A83, SC_ERROR_RECORD_NOT_FOUND,	"Record not found" },
 	{ 0x6A84, SC_ERROR_NOT_ENOUGH_MEMORY,	"Not enough memory space in the file" },
 	{ 0x6A85, SC_ERROR_INCORRECT_PARAMETERS,"Lc inconsistent with TLV structure" },
 	{ 0x6A86, SC_ERROR_INCORRECT_PARAMETERS,"Incorrect parameters P1-P2" },
 	{ 0x6A87, SC_ERROR_INCORRECT_PARAMETERS,"Lc inconsistent with P1-P2" },
 	{ 0x6A88, SC_ERROR_DATA_OBJECT_NOT_FOUND,"Referenced data not found" },
-	{ 0x6A89, SC_ERROR_FILE_ALREADY_EXISTS,  "File already exists"},
-	{ 0x6A8A, SC_ERROR_FILE_ALREADY_EXISTS,  "DF name already exists"},
+	{ 0x6A89, SC_ERROR_FILE_ALREADY_EXISTS,	"File already exists"},
+	{ 0x6A8A, SC_ERROR_FILE_ALREADY_EXISTS,	"DF name already exists"},
 
 	{ 0x6B00, SC_ERROR_INCORRECT_PARAMETERS,"Wrong parameter(s) P1-P2" },
 	{ 0x6D00, SC_ERROR_INS_NOT_SUPPORTED,	"Instruction code not supported or invalid" },
 	{ 0x6E00, SC_ERROR_CLASS_NOT_SUPPORTED,	"Class not supported" },
 	{ 0x6F00, SC_ERROR_CARD_CMD_FAILED,	"No precise diagnosis" },
-
-
-
 };
 
 
@@ -116,7 +120,7 @@ iso7816_check_sw(struct sc_card *card, unsigned int sw1, unsigned int sw2)
 	if (sw1 == 0x90)
 		return SC_SUCCESS;
         if (sw1 == 0x63U && (sw2 & ~0x0fU) == 0xc0U ) {
-             sc_log(card->ctx, "Verification failed (remaining tries: %d)", (sw2 & 0x0f));
+             sc_log(card->ctx, "PIN not verified (remaining tries: %d)", (sw2 & 0x0f));
              return SC_ERROR_PIN_CODE_INCORRECT;
         }
 	for (i = 0; i < err_count; i++)   {
@@ -334,115 +338,127 @@ iso7816_process_fci(struct sc_card *card, struct sc_file *file,
 		const unsigned char *buf, size_t buflen)
 {
 	struct sc_context *ctx = card->ctx;
-	size_t taglen, len = buflen;
-	int i;
-	const unsigned char *tag = NULL, *p = buf;
+	const unsigned char *p, *end;
+	unsigned int cla = 0, tag = 0;
+	size_t length;
+	int size;
 
-	sc_log(ctx, "processing FCI bytes");
-	tag = sc_asn1_find_tag(ctx, p, len, 0x83, &taglen);
-	if (tag != NULL && taglen == 2) {
-		file->id = (tag[0] << 8) | tag[1];
-		sc_log(ctx, "  file identifier: 0x%02X%02X", tag[0], tag[1]);
-	}
+	for (p = buf, length = buflen, end = buf + buflen;
+			p < end;
+			p += length, length = end - p) {
 
-	/* determine the file size */
-	/* try the tag 0x80 then the tag 0x81 */
-	file->size = 0;
-	for (i = 0x80; i <= 0x81; i++) {
-		int size = 0;
-		len = buflen;
-		tag = sc_asn1_find_tag(ctx, p, len, i, &taglen);
-		if (tag == NULL)
-			continue;
-		if (taglen == 0)
-			continue;
-		if (sc_asn1_decode_integer(tag, taglen, &size) < 0)
-			continue;
-		if (size <0)
-			continue;
-
-		file->size = size;
-		sc_log(ctx, "  bytes in file: %"SC_FORMAT_LEN_SIZE_T"u",
-		       file->size);
-		break;
-	}
-
-	tag = sc_asn1_find_tag(ctx, p, len, 0x82, &taglen);
-	if (tag != NULL) {
-		if (taglen > 0) {
-			unsigned char byte = tag[0];
-			const char *type;
-
-			file->shareable = byte & 0x40 ? 1 : 0;
-			sc_log(ctx, "  shareable: %s", (byte & 0x40) ? "yes" : "no");
-			file->ef_structure = byte & 0x07;
-			switch ((byte >> 3) & 7) {
-			case 0:
-				type = "working EF";
-				file->type = SC_FILE_TYPE_WORKING_EF;
+		if (SC_SUCCESS != sc_asn1_read_tag(&p, length, &cla, &tag, &length)
+				|| p == NULL) {
+			break;
+		}
+		switch (cla | tag) {
+			case 0x81:
+				if (file->size != 0) {
+					/* don't overwrite existing file size excluding structural information */
+					break;
+				}
+				/* fall through */
+			case 0x80:
+				/* determine the file size */
+				if (sc_asn1_decode_integer(p, length, &size) == 0 && size >= 0) {
+					file->size = size;
+					sc_log(ctx, "  bytes in file: %"SC_FORMAT_LEN_SIZE_T"u",
+							file->size);
+				}
 				break;
-			case 1:
-				type = "internal EF";
-				file->type = SC_FILE_TYPE_INTERNAL_EF;
+
+			case 0x82:
+				if (length > 0) {
+					unsigned char byte = p[0];
+					const char *type;
+
+					file->shareable = byte & 0x40 ? 1 : 0;
+					sc_log(ctx, "  shareable: %s", (byte & 0x40) ? "yes" : "no");
+					file->ef_structure = byte & 0x07;
+					switch ((byte >> 3) & 7) {
+						case 0:
+							type = "working EF";
+							file->type = SC_FILE_TYPE_WORKING_EF;
+							break;
+						case 1:
+							type = "internal EF";
+							file->type = SC_FILE_TYPE_INTERNAL_EF;
+							break;
+						case 7:
+							type = "DF";
+							file->type = SC_FILE_TYPE_DF;
+							break;
+						default:
+							type = "unknown";
+							break;
+					}
+					sc_log(ctx, "  type: %s", type);
+					sc_log(ctx, "  EF structure: %d", byte & 0x07);
+					sc_log(ctx, "  tag 0x82: 0x%02x", byte);
+					if (SC_SUCCESS != sc_file_set_type_attr(file, &byte, 1))
+						sc_log(ctx, "Warning: Could not set file attributes");
+				}
 				break;
-			case 7:
-				type = "DF";
-				file->type = SC_FILE_TYPE_DF;
+
+			case 0x83:
+				if (length == 2) {
+					file->id = (p[0] << 8) | p[1];
+					sc_log(ctx, "  file identifier: 0x%02X%02X", p[0], p[1]);
+				}
 				break;
-			default:
-				type = "unknown";
+
+			case 0x84:
+				if (length > 0 && length <= 16) {
+					memcpy(file->name, p, length);
+					file->namelen = length;
+
+					sc_debug_hex(ctx, SC_LOG_DEBUG_NORMAL, "  File name:", file->name, file->namelen);
+					if (!file->type)
+						file->type = SC_FILE_TYPE_DF;
+				}
 				break;
-			}
-			sc_log(ctx, "  type: %s", type);
-			sc_log(ctx, "  EF structure: %d", byte & 0x07);
-			sc_log(ctx, "  tag 0x82: 0x%02x", byte);
-			if (SC_SUCCESS != sc_file_set_type_attr(file, &byte, 1))
-				sc_log(ctx, "Warning: Could not set file attributes");
+
+			case 0x85:
+			case 0xA5:
+				if (SC_SUCCESS != sc_file_set_prop_attr(file, p, length)) {
+					sc_log(ctx, "Warning: Could not set proprietary file properties");
+				}
+				break;
+
+			case 0x86:
+				if (SC_SUCCESS != sc_file_set_sec_attr(file, p, length)) {
+					sc_log(ctx, "Warning: Could not set file security properties");
+				}
+				break;
+
+			case 0x88:
+				if (length == 1) {
+					file->sid = *p;
+					sc_log(ctx, "  short file identifier: 0x%02X", *p);
+				}
+				break;
+
+			case 0x8A:
+				if (length == 1) {
+					if (p[0] == 0x01)
+						file->status = SC_FILE_STATUS_CREATION;
+					else if (p[0] == 0x07 || p[0] == 0x05)
+						file->status = SC_FILE_STATUS_ACTIVATED;
+					else if (p[0] == 0x06 || p[0] == 0x04)
+						file->status = SC_FILE_STATUS_INVALIDATED;
+				}
+				break;
+
+			case 0x62:
+			case 0x64:
+			case 0x6F:
+				/* allow nested FCP/FMD/FCI templates */
+				iso7816_process_fci(card, file, p, length);
 		}
 	}
 
-	tag = sc_asn1_find_tag(ctx, p, len, 0x84, &taglen);
-	if (tag != NULL && taglen > 0 && taglen <= 16) {
-		char tbuf[128];
-
-		memcpy(file->name, tag, taglen);
-		file->namelen = taglen;
-
-		sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL, file->name, file->namelen, tbuf, sizeof(tbuf));
-		sc_log(ctx, "  File name: %s", tbuf);
-		if (!file->type)
-			file->type = SC_FILE_TYPE_DF;
-	}
-
-	tag = sc_asn1_find_tag(ctx, p, len, 0x85, &taglen);
-	if (tag != NULL && taglen)
-		sc_file_set_prop_attr(file, tag, taglen);
-	else
-		file->prop_attr_len = 0;
-
-	tag = sc_asn1_find_tag(ctx, p, len, 0xA5, &taglen);
-	if (tag != NULL && taglen)
-		sc_file_set_prop_attr(file, tag, taglen);
-
-	tag = sc_asn1_find_tag(ctx, p, len, 0x86, &taglen);
-	if (tag != NULL && taglen)
-		sc_file_set_sec_attr(file, tag, taglen);
-
-	tag = sc_asn1_find_tag(ctx, p, len, 0x88, &taglen);
-	if (tag != NULL && taglen == 1)
-		file->sid = *tag;
-
-	tag = sc_asn1_find_tag(ctx, p, len, 0x8A, &taglen);
-	if (tag != NULL && taglen==1) {
-		if (tag[0] == 0x01)
-			file->status = SC_FILE_STATUS_CREATION;
-		else if (tag[0] == 0x07 || tag[0] == 0x05)
-			file->status = SC_FILE_STATUS_ACTIVATED;
-		else if (tag[0] == 0x06 || tag[0] == 0x04)
-			file->status = SC_FILE_STATUS_INVALIDATED;
-	}
-
 	file->magic = SC_FILE_MAGIC;
+
 	return SC_SUCCESS;
 }
 
@@ -608,28 +624,23 @@ iso7816_get_challenge(struct sc_card *card, u8 *rnd, size_t len)
 {
 	int r;
 	struct sc_apdu apdu;
-	u8 buf[10];
 
-	if (!rnd && len)
-		return SC_ERROR_INVALID_ARGUMENTS;
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_2, 0x84, 0x00, 0x00);
+	apdu.le = len;
+	apdu.resp = rnd;
+	apdu.resplen = len;
 
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0x84, 0x00, 0x00);
-	apdu.le = 8;
-	apdu.resp = buf;
-	apdu.resplen = 8;	/* include SW's */
+	r = sc_transmit_apdu(card, &apdu);
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
-	while (len > 0) {
-		size_t n = len > 8 ? 8 : len;
+	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	LOG_TEST_RET(card->ctx, r, "GET CHALLENGE failed");
 
-		r = sc_transmit_apdu(card, &apdu);
-		LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
-		if (apdu.resplen != 8)
-			return sc_check_sw(card, apdu.sw1, apdu.sw2);
-		memcpy(rnd, apdu.resp, n);
-		len -= n;
-		rnd += n;
+	if (len < apdu.resplen) {
+		return (int) len;
 	}
-	return 0;
+   
+	return (int) apdu.resplen;
 }
 
 
@@ -828,19 +839,27 @@ iso7816_set_security_env(struct sc_card *card,
 		*p++ = env->algorithm_ref & 0xFF;
 	}
 	if (env->flags & SC_SEC_ENV_FILE_REF_PRESENT) {
+		if (env->file_ref.len > 0xFF)
+			return SC_ERROR_INVALID_ARGUMENTS;
+		if (sizeof(sbuf) - (p - sbuf) < env->file_ref.len + 2)
+			return SC_ERROR_OFFSET_TOO_LARGE;
+
 		*p++ = 0x81;
-		*p++ = env->file_ref.len;
-		assert(sizeof(sbuf) - (p - sbuf) >= env->file_ref.len);
+		*p++ = (u8) env->file_ref.len;
 		memcpy(p, env->file_ref.value, env->file_ref.len);
 		p += env->file_ref.len;
 	}
 	if (env->flags & SC_SEC_ENV_KEY_REF_PRESENT) {
-		if (env->flags & SC_SEC_ENV_KEY_REF_ASYMMETRIC)
+		if (sizeof(sbuf) - (p - sbuf) < env->key_ref_len + 2)
+			return SC_ERROR_OFFSET_TOO_LARGE;
+
+		if (env->flags & SC_SEC_ENV_KEY_REF_SYMMETRIC)
 			*p++ = 0x83;
 		else
 			*p++ = 0x84;
-		*p++ = env->key_ref_len;
-		assert(sizeof(sbuf) - (p - sbuf) >= env->key_ref_len);
+		if (env->key_ref_len > 0xFF)
+			return SC_ERROR_INVALID_ARGUMENTS;
+		*p++ = env->key_ref_len & 0xFF;
 		memcpy(p, env->key_ref, env->key_ref_len);
 		p += env->key_ref_len;
 	}
@@ -999,6 +1018,9 @@ iso7816_build_pin_apdu(struct sc_card *card, struct sc_apdu *apdu,
 
 	switch (data->pin_type) {
 	case SC_AC_CHV:
+		/* fall through */
+	case SC_AC_SESSION:
+	case SC_AC_CONTEXT_SPECIFIC:
 		break;
 	default:
 		return SC_ERROR_INVALID_ARGUMENTS;
@@ -1282,13 +1304,13 @@ int iso7816_read_binary_sfid(sc_card_t *card, unsigned char sfid,
 	}
 	*ef_len = 0;
 
-	if (read > 0xff+1)
-		sc_format_apdu(card, &apdu, SC_APDU_CASE_2_EXT,
-				ISO_READ_BINARY, ISO_P1_FLAG_SFID|sfid, 0);
-	else
-		sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT,
-				ISO_READ_BINARY, ISO_P1_FLAG_SFID|sfid, 0);
-
+#if MAX_SM_APDU_RESP_SIZE > (0xff+1)
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_2_EXT,
+			ISO_READ_BINARY, ISO_P1_FLAG_SFID|sfid, 0);
+#else
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT,
+			ISO_READ_BINARY, ISO_P1_FLAG_SFID|sfid, 0);
+#endif
 	p = realloc(*ef, read);
 	if (!p) {
 		r = SC_ERROR_OUT_OF_MEMORY;
@@ -1300,9 +1322,13 @@ int iso7816_read_binary_sfid(sc_card_t *card, unsigned char sfid,
 	apdu.le = read;
 
 	r = sc_transmit_apdu(card, &apdu);
+	if (r < 0)
+		goto err;
+	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	if (r < 0 && r != SC_ERROR_FILE_END_REACHED)
+		goto err;
 	/* emulate the behaviour of sc_read_binary */
-	if (r >= 0)
-		r = apdu.resplen;
+	r = apdu.resplen;
 
 	while(1) {
 		if (r >= 0 && ((size_t) r) != read) {
@@ -1397,5 +1423,21 @@ int iso7816_write_binary_sfid(sc_card_t *card, unsigned char sfid,
 	r = SC_SUCCESS;
 
 err:
+	return r;
+}
+
+int iso7816_logout(sc_card_t *card, unsigned char pin_reference)
+{
+	int r;
+	sc_apdu_t apdu;
+
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_1, 0x20, 0xFF, pin_reference);
+
+	r = sc_transmit_apdu(card, &apdu);
+	if (r < 0)
+		return r;
+
+	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+
 	return r;
 }

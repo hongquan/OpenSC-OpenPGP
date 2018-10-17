@@ -1,18 +1,20 @@
-MAINTAINERCLEANFILES = $(srcdir)/Makefile.in
-DISTCLEANFILES = opensc.conf
+CV_CERTS = DESRCACC100001
 
-EXTRA_DIST = Makefile.mak
+MAINTAINERCLEANFILES = $(srcdir)/Makefile.in
+DISTCLEANFILES = opensc.conf.example
+
+EXTRA_DIST = $(CV_CERTS) Makefile.mak
 
 SUFFIXES = .in
 
-dist_noinst_DATA = opensc.conf.in
-nodist_noinst_DATA = opensc.conf
+dist_noinst_DATA = opensc.conf opensc.conf.example.in
+nodist_noinst_DATA = opensc.conf.example
 
 # Make sure we build this every time
 # as there is no dependency for this.
 # Can be removed if MSVC is not requried.
 force:
-opensc.conf: opensc.conf.in force
+opensc.conf.example: opensc.conf.example.in force
 
 .in:
 	@sed \
@@ -28,13 +30,25 @@ opensc.conf: opensc.conf.in force
 		-e 's|@PROFILE_DIR_DEFAULT[@]|$(PROFILE_DIR_DEFAULT)|g' \
 		< $< > $@
 
-install-exec-hook: opensc.conf
+install-exec-hook: opensc.conf.example
 	$(MKDIR_P) "$(DESTDIR)$(sysconfdir)"
 	if [ -f "$(DESTDIR)$(sysconfdir)/opensc.conf" ]; then \
-		$(INSTALL_DATA) opensc.conf "$(DESTDIR)$(sysconfdir)/opensc.conf.new"; \
+		$(INSTALL_DATA) $(srcdir)/opensc.conf "$(DESTDIR)$(sysconfdir)/opensc.conf.new"; \
 	else \
-		$(INSTALL_DATA) opensc.conf "$(DESTDIR)$(sysconfdir)/opensc.conf"; \
+		$(INSTALL_DATA) $(srcdir)/opensc.conf "$(DESTDIR)$(sysconfdir)/opensc.conf"; \
 	fi
+	$(MKDIR_P) "$(DESTDIR)$(docdir)"
+	$(INSTALL_DATA) opensc.conf.example "$(DESTDIR)$(docdir)/opensc.conf";
 
-uninstall-hook: opensc.conf
+uninstall-hook: opensc.conf.example
 	rm -f "$(DESTDIR)$(sysconfdir)/opensc.conf.new" "$(DESTDIR)$(sysconfdir)/opensc.conf"
+	rm -f "$(DESTDIR)$(docdir)/opensc.conf"
+
+if ENABLE_OPENPACE
+install-data-local:
+	$(MKDIR_P) "$(DESTDIR)$(CVCDIR)"
+	for cert in $(CV_CERTS);   do $(INSTALL_DATA) $(srcdir)/$${cert} "$(DESTDIR)$(CVCDIR)";  done
+
+uninstall-local:
+	for cert in $(CV_CERTS);   do rm -f "$(DESTDIR)$(CVCDIR)/$${cert}";  done
+endif

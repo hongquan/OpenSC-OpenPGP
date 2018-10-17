@@ -2,7 +2,7 @@
  * piv-tool.c: Tool for accessing smart cards with libopensc
  *
  * Copyright (C) 2001  Juha Yrjölä <juha.yrjola@iki.fi>
- * Copyright (C) 2005,2010 Douglas E. Engert <deengert@anl.gov>
+ * Copyright (C) 2005,2010 Douglas E. Engert <deengert@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -32,10 +32,18 @@
 #include <sys/stat.h>
 
 /* Module only built if OPENSSL is enabled */
+#include <openssl/opensslv.h>
+#include "libopensc/sc-ossl-compat.h"
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L
 #include <openssl/opensslconf.h>
+#include <openssl/crypto.h>
+#endif
+#include <openssl/conf.h>
+
 #include <openssl/rsa.h>
-#if OPENSSL_VERSION_NUMBER >= 0x00908000L && !defined(OPENSSL_NO_EC)
+#if !defined(OPENSSL_NO_EC) && !defined(OPENSSL_NO_ECDSA)
 #include <openssl/ec.h>
+#include <openssl/ecdsa.h>
 #endif
 #include <openssl/evp.h>
 #include <openssl/x509.h>
@@ -45,7 +53,6 @@
 #include <openssl/err.h>
 #include <openssl/obj_mac.h>
 
-#include "libopensc/sc-ossl-compat.h"
 #include "libopensc/opensc.h"
 #include "libopensc/cardctl.h"
 #include "libopensc/asn1.h"
@@ -185,7 +192,7 @@ static int load_cert(const char * cert_id, const char * cert_file,
 				cert_file, strerror(errno));
         goto err;
     }
-	if (compress) { /* file is gziped already */
+	if (compress) { /* file is gzipped already */
 		struct stat stat_buf;
 
 		if (0 != stat(cert_file, &stat_buf)) {
@@ -283,7 +290,7 @@ static int gen_key(const char * key_info)
 		keydata = {0, 0, 0, 0, NULL, 0, NULL, 0, NULL, 0};
 	unsigned long expl;
 	u8 expc[4];
-#if OPENSSL_VERSION_NUMBER >= 0x00908000L && !defined(OPENSSL_NO_EC)
+#if !defined(OPENSSL_NO_EC)
 	int nid = -1;
 #endif
 	sc_hex_to_bin(key_info, buf, &buflen);
@@ -307,7 +314,7 @@ static int gen_key(const char * key_info)
 		case 0x05: keydata.key_bits = 3072; break;
 		case 0x06: keydata.key_bits = 1024; break;
 		case 0x07: keydata.key_bits = 2048; break;
-#if OPENSSL_VERSION_NUMBER >= 0x00908000L && !defined(OPENSSL_NO_EC)
+#if !defined(OPENSSL_NO_EC)
 		case 0x11: keydata.key_bits = 0;
 			nid = NID_X9_62_prime256v1; /* We only support one curve per algid */
 			break;
@@ -329,7 +336,7 @@ static int gen_key(const char * key_info)
 		return r;
 	}
 
-		evpkey = EVP_PKEY_new();
+	evpkey = EVP_PKEY_new();
 
 	if (keydata.key_bits > 0) { /* RSA key */
 		RSA * newkey = NULL;
@@ -359,7 +366,7 @@ static int gen_key(const char * key_info)
 		EVP_PKEY_assign_RSA(evpkey, newkey);
 
 	} else { /* EC key */
-#if OPENSSL_VERSION_NUMBER >= 0x00908000L && !defined(OPENSSL_NO_EC)
+#if !defined(OPENSSL_NO_EC)
 		int i;
 		BIGNUM *x;
 		BIGNUM *y;
@@ -378,7 +385,15 @@ static int gen_key(const char * key_info)
 		r = EC_POINT_set_affine_coordinates_GFp(ecgroup, ecpoint, x, y, NULL);
 		eckey = EC_KEY_new();
 		r = EC_KEY_set_group(eckey, ecgroup);
+		if (r == 0) {
+			fprintf(stderr, "EC_KEY_set_group failed\n");
+			return -1;
+		}
 		r = EC_KEY_set_public_key(eckey, ecpoint);
+		if (r == 0) {
+			fprintf(stderr, "EC_KEY_set_public_key failed\n");
+			return -1;
+		}
 
 		if (verbose)
 			EC_KEY_print_fp(stdout, eckey, 0);
@@ -450,7 +465,7 @@ static void print_serial(sc_card_t *in_card)
 		util_hex_dump_asc(stdout, serial.value, serial.len, -1);
 }
 
-int main(int argc, char * const argv[])
+int main(int argc, char *argv[])
 {
 	int err = 0, r, c, long_optind = 0;
 	int do_send_apdu = 0;
@@ -470,6 +485,7 @@ int main(int argc, char * const argv[])
 	const char *key_info = NULL;
 	const char *admin_info = NULL;
 	sc_context_param_t ctx_param;
+	char **old_apdus = NULL;
 
 	setbuf(stderr, NULL);
 	setbuf(stdout, NULL);
@@ -486,9 +502,11 @@ int main(int argc, char * const argv[])
 			action_count++;
 			break;
 		case 's':
+			old_apdus = opt_apdus;
 			opt_apdus = (char **) realloc(opt_apdus,
 					(opt_apdu_count + 1) * sizeof(char *));
 			if (!opt_apdus) {
+				free(old_apdus);
 				err = 1;
 				goto end;
 			}
@@ -548,10 +566,22 @@ int main(int argc, char * const argv[])
 	if (action_count == 0)
 		util_print_usage_and_die(app_name, options, option_help, NULL);
 
+
+//#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
+//	OPENSSL_config(NULL);
+//#endif
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+	OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS
+		| OPENSSL_INIT_ADD_ALL_CIPHERS
+		| OPENSSL_INIT_ADD_ALL_DIGESTS,
+		NULL);
+#else
+	/* OpenSSL magic */
 	OPENSSL_malloc_init();
 	ERR_load_crypto_strings();
 	OpenSSL_add_all_algorithms();
 
+#endif
 
 	if (out_file) {
 		bp = BIO_new(BIO_s_file());

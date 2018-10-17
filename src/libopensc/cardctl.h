@@ -155,7 +155,7 @@ enum {
  	SC_CARDCTL_RUTOKEN_GENERATE_KEY_DO,
  	SC_CARDCTL_RUTOKEN_DELETE_DO,
  	SC_CARDCTL_RUTOKEN_GET_INFO,
- 	/* NON STANDART  */
+ 	/* NON STANDARD  */
  	SC_CARDCTL_RUTOKEN_GET_DO_INFO,
  	SC_CARDCTL_RUTOKEN_GOST_ENCIPHER, 
  	SC_CARDCTL_RUTOKEN_GOST_DECIPHER,
@@ -220,6 +220,7 @@ enum {
 	SC_CARDCTL_CAC_INIT_GET_CERT_OBJECTS,
 	SC_CARDCTL_CAC_GET_NEXT_CERT_OBJECT,
 	SC_CARDCTL_CAC_FINAL_GET_CERT_OBJECTS,
+	SC_CARDCTL_CAC_GET_ACA_PATH,
 
         /*
 	 * AuthentIC v3
@@ -490,7 +491,9 @@ enum SC_CARDCTL_OBERTHUR_KEY_TYPE {
 	SC_CARDCTL_OBERTHUR_KEY_RSA_SFM,
 	SC_CARDCTL_OBERTHUR_KEY_RSA_CRT,
 	SC_CARDCTL_OBERTHUR_KEY_DSA_PUBLIC,
-	SC_CARDCTL_OBERTHUR_KEY_DSA_PRIVATE
+	SC_CARDCTL_OBERTHUR_KEY_DSA_PRIVATE,
+	SC_CARDCTL_OBERTHUR_KEY_EC_CRT,
+	SC_CARDCTL_OBERTHUR_KEY_EC_PUBLIC
 };
 
 struct sc_cardctl_oberthur_genkey_info {
@@ -878,7 +881,9 @@ typedef struct sc_rtecp_genkey_data {
  */
 	enum SC_CARDCTL_MYEID_KEY_TYPE {
 		SC_CARDCTL_MYEID_KEY_RSA = 0x11,
-		SC_CARDCTL_MYEID_KEY_EC  = 0x22
+		SC_CARDCTL_MYEID_KEY_DES = 0x19,
+		SC_CARDCTL_MYEID_KEY_EC  = 0x22,
+		SC_CARDCTL_MYEID_KEY_AES = 0x29
 	};
 
 	struct sc_cardctl_myeid_data_obj {
@@ -907,8 +912,8 @@ typedef struct sc_rtecp_genkey_data {
 		unsigned int    invq_len;  
 		unsigned char  *invq;
 		/* new for MyEID > 3.6.0 */
-		unsigned char  *d;                  /* EC private key */
-		unsigned int    d_len;              /* EC */ 
+		unsigned char  *d;                  /* EC private key / Symmetric key */
+		unsigned int    d_len;              /* EC / Symmetric */
 		unsigned char  *ecpublic_point;     /* EC public key */
 		unsigned int    ecpublic_point_len; /* EC */
     };
@@ -937,30 +942,51 @@ typedef struct sc_cardctl_piv_genkey_info_st {
 #define SC_OPENPGP_KEY_ENCR		2
 #define SC_OPENPGP_KEY_AUTH		3
 
-#define SC_OPENPGP_KEYFORMAT_STD	0    /* See 4.3.3.6 Algorithm Attributes */
-#define SC_OPENPGP_KEYFORMAT_STDN	1    /* OpenPGP card spec v2 */
-#define SC_OPENPGP_KEYFORMAT_CRT	2
-#define SC_OPENPGP_KEYFORMAT_CRTN	3
+#define	SC_OPENPGP_KEYALGO_RSA		0x01
+
+#define SC_OPENPGP_KEYFORMAT_RSA_STD	0    /* See 4.3.3.6 Algorithm Attributes */
+#define SC_OPENPGP_KEYFORMAT_RSA_STDN	1    /* OpenPGP card spec v2 */
+#define SC_OPENPGP_KEYFORMAT_RSA_CRT	2
+#define SC_OPENPGP_KEYFORMAT_RSA_CRTN	3
 
 typedef struct sc_cardctl_openpgp_keygen_info {
-	u8 keytype;		      /* SC_OPENPGP_KEY_ */
-	u8 *modulus;          /* New-generated pubkey info responded from the card */
-	size_t modulus_len;   /* Length of modulus in bit */
-	u8 *exponent;
-	size_t exponent_len;
+	u8 key_id;		/* SC_OPENPGP_KEY_... */
+	u8 algorithm;		/* SC_OPENPGP_KEYALGO_... */
+	union {			/* anonymous union */
+		struct {
+			u8 *modulus;		/* New-generated pubkey info responded from the card */
+			size_t modulus_len;	/* Length of modulus in bit */
+			u8 *exponent;
+			size_t exponent_len;
+			u8 keyformat;	/* SC_OPENPGP_KEYFORMAT_RSA_... */
+		} rsa;
+		struct {
+			u8 dummy;	/* placeholder */
+			// TODO: replace placeholder with real attributes
+		} ec;
+	};
 } sc_cardctl_openpgp_keygen_info_t;
 
 typedef struct sc_cardctl_openpgp_keystore_info {
-	u8 keytype;
-	u8 keyformat;
-	u8 *e;
-	size_t e_len;
-	u8 *p;
-	size_t p_len;
-	u8 *q;
-	size_t q_len;
-	u8 *n;
-	size_t n_len;
+	u8 key_id;		/* SC_OPENPGP_KEY_... */
+	u8 algorithm;		/* SC_OPENPGP_KEYALGO_... */
+	union {			/* anonymous union */
+		struct {
+			u8 keyformat;	/* SC_OPENPGP_KEYFORMAT_RSA_... */
+			u8 *e;
+			size_t e_len;
+			u8 *p;
+			size_t p_len;
+			u8 *q;
+			size_t q_len;
+			u8 *n;
+			size_t n_len;
+		} rsa;
+		struct {
+			u8 dummy;	/* placeholder */
+			// TODO: replace placeholder with real attributes
+		} ec;
+	};
 	time_t creationtime;
 } sc_cardctl_openpgp_keystore_info_t;
 
@@ -1018,7 +1044,7 @@ typedef struct sc_cardctl_isoApplet_ec_parameters {
 
 typedef struct sc_cardctl_isoApplet_genkey {
 	u8 algorithm_ref;			/* Algorithm reference sent to card */
-	unsigned int priv_key_ref;	/* Private key refernce sent to card */
+	unsigned int priv_key_ref;	/* Private key reference sent to card */
 	union {
 		struct
 		{
@@ -1035,7 +1061,7 @@ typedef struct sc_cardctl_isoApplet_genkey {
 
 typedef struct sc_cardctl_isoApplet_import_key {
 	u8 algorithm_ref;			/* Algorithm reference sent to card */
-	unsigned int priv_key_ref;	/* Private key refernce sent to card */
+	unsigned int priv_key_ref;	/* Private key reference sent to card */
 	union {
 		struct
 		{
@@ -1079,7 +1105,7 @@ typedef struct sc_cardctl_coolkey_attribute {
 typedef struct sc_cardctl_coolkey_find_object {
 	int type; /* in parameter */
 	unsigned long find_id; /* in parameter */
-	sc_cardctl_coolkey_attribute_t *coolkey_template; /* in paramter */
+	sc_cardctl_coolkey_attribute_t *coolkey_template; /* in parameter */
 	int template_count;                       /* in parameter */
 	sc_cardctl_coolkey_object_t *obj; /* out parameter */
 } sc_cardctl_coolkey_find_object_t;

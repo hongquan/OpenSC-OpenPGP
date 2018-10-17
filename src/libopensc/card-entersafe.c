@@ -30,7 +30,7 @@
 #include "asn1.h"
 #include "cardctl.h"
 
-static struct sc_atr_table entersafe_atrs[] = {
+static const struct sc_atr_table entersafe_atrs[] = {
 	{ 
 		 "3b:0f:00:65:46:53:05:19:05:71:df:00:00:00:00:00:00", 
 		 "ff:ff:ff:ff:ff:ff:ff:00:ff:ff:ff:00:00:00:00:00:00", 
@@ -503,7 +503,7 @@ static int entersafe_select_fid(sc_card_t *card,
 	path.len=2;
 
 	r = iso_ops->select_file(card,&path,&file);
-	if (r)
+	if (r < 0)
 		sc_file_free(file);
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
 
@@ -514,7 +514,7 @@ static int entersafe_select_fid(sc_card_t *card,
 		 card->cache.current_path.value[1] = 0x00;
 		 if (id_hi == 0x3f && id_lo == 0x00){
 			  card->cache.current_path.len = 2;
-		 }else{
+		 } else {
 			  card->cache.current_path.len = 4;
 			  card->cache.current_path.value[2] = id_hi;
 			  card->cache.current_path.value[3] = id_lo;
@@ -619,7 +619,7 @@ static int entersafe_select_path(sc_card_t *card,
 	 {
 		  if ( pathlen - bMatch == 2 )
 		  {
-			   /* we are in the rigth directory */
+			   /* we are in the right directory */
 			   return entersafe_select_fid(card, path[bMatch], path[bMatch+1], file_out);
 		  }
 		  else if ( pathlen - bMatch > 2 )
@@ -894,9 +894,9 @@ static int entersafe_internal_set_security_env(sc_card_t *card,
 }
 
 /**
- * We don't really set the security envirment,but cache it.It will be set when 
+ * We don't really set the security environment,but cache it.It will be set when
  * security operation is performed later.Because we may transport partial of
- * the sign/decipher data within the security envirment apdu.
+ * the sign/decipher data within the security environment apdu.
  */
 static int entersafe_set_security_env(sc_card_t *card,
 									  const sc_security_env_t *env,
@@ -1061,8 +1061,7 @@ static int entersafe_erase_card(sc_card_t *card)
 	
 	r = entersafe_transmit_apdu(card, &apdu,0,0,0,0);
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
-	/* invalidate cache */
-	card->cache.valid = 0;
+	sc_invalidate_cache(card);
 
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0xEE, 0x00, 0x00);
 	apdu.cla=0x84;
@@ -1409,13 +1408,15 @@ static int entersafe_gen_key(sc_card_t *card, sc_entersafe_gen_key_data *data)
 
 	data->modulus = malloc(len);
 	if (!data->modulus)
-		 SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE,SC_ERROR_OUT_OF_MEMORY);
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_OUT_OF_MEMORY);
 
 	p=rbuf;
-	assert(*p=='E');
+	if (*p!='E')
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_DATA);
 	p+=2+p[1];
 	/* N */
-	assert(*p=='N');
+	if (*p!='N')
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_DATA);
 	++p;
 	if(*p++>0x80)
 	{

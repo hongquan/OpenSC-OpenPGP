@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2012 Frank Morgner <frankmorgner@gmail.com>
+ * Copyright (C) 2010-2018 Frank Morgner <frankmorgner@gmail.com>
  *
  * This file is part of OpenSC.
  *
@@ -30,6 +30,7 @@
 #include <libopensc/log.h>
 #include <libopensc/opensc.h>
 #include <libopensc/sm.h>
+#include <libopensc/card-npa.h>
 #include <sm/sm-eac.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -80,6 +81,21 @@ static int getline(char **lineptr, size_t *n, FILE *stream)
 	return strlen(p);
 }
 #endif
+
+/* we don't want to export this from libopensc so we implement it here, again */
+#include <openssl/asn1t.h>
+
+#define ASN1_APP_IMP_OPT(stname, field, type, tag) ASN1_EX_TYPE(ASN1_TFLG_IMPTAG|ASN1_TFLG_APPLICATION|ASN1_TFLG_OPTIONAL, tag, stname, field, type)
+#define ASN1_APP_IMP(stname, field, type, tag) ASN1_EX_TYPE(ASN1_TFLG_IMPTAG|ASN1_TFLG_APPLICATION, tag, stname, field, type)
+
+/* 0x67
+ * Auxiliary authenticated data */
+ASN1_ITEM_TEMPLATE(ASN1_AUXILIARY_DATA) = 
+	ASN1_EX_TEMPLATE_TYPE(
+			ASN1_TFLG_SEQUENCE_OF|ASN1_TFLG_IMPTAG|ASN1_TFLG_APPLICATION,
+			7, AuxiliaryAuthenticatedData, CVC_DISCRETIONARY_DATA_TEMPLATE)
+ASN1_ITEM_TEMPLATE_END(ASN1_AUXILIARY_DATA)
+IMPLEMENT_ASN1_FUNCTIONS(ASN1_AUXILIARY_DATA)
 
 /** 
  * @brief Print binary data to a file stream
@@ -157,7 +173,7 @@ static void read_dg(sc_card_t *card, unsigned char sfid, const char *dg_str,
 				sfid, dg_str, sc_strerror(r));
 	else {
 		char buf[0x200];
-		sc_hex_dump(NULL, 0, *dg, *dg_len, buf, sizeof buf);
+		sc_hex_dump(*dg, *dg_len, buf, sizeof buf);
 		fprintf(stdout, "Read %s", buf);
 	}
 }
@@ -304,7 +320,7 @@ static int add_to_ASN1_AUXILIARY_DATA(
 	if (data && data_len) {
 		template->discretionary_data3 = ASN1_OCTET_STRING_new();
 		if (!template->discretionary_data3
-				|| !M_ASN1_OCTET_STRING_set(
+				|| !ASN1_OCTET_STRING_set(
 					template->discretionary_data3, data, data_len)) {
 			r = SC_ERROR_INTERNAL;
 			goto err;
@@ -344,7 +360,7 @@ main (int argc, char **argv)
 
 	sc_context_t *ctx = NULL;
 	sc_card_t *card = NULL;
-	sc_reader_t *reader;
+	sc_reader_t *reader = NULL;
 
 	int r, tr_version = EAC_TR_VERSION_2_02;
 	struct establish_pace_channel_input pace_input;
@@ -375,12 +391,13 @@ main (int argc, char **argv)
 		pin = getenv("PIN");
 		puk = getenv("PUK");
 		newpin = getenv("NEWPIN");
+	} else {
+		can = cmdline.can_arg;
+		mrz = cmdline.mrz_arg;
+		pin = cmdline.pin_arg;
+		puk = cmdline.puk_arg;
+		newpin = cmdline.new_pin_arg;
 	}
-	can = cmdline.can_arg;
-	mrz = cmdline.mrz_arg;
-	pin = cmdline.pin_arg;
-	puk = cmdline.puk_arg;
-	newpin = cmdline.new_pin_arg;
 	if (cmdline.chat_given) {
 		pace_input.chat = chat;
 		pace_input.chat_length = sizeof chat;
@@ -403,11 +420,11 @@ main (int argc, char **argv)
 	if (cmdline.tr_03110v201_flag)
 		tr_version = EAC_TR_VERSION_2_01;
 	if (cmdline.disable_all_checks_flag)
-		npa_default_flags |= NPA_FLAG_DISABLE_CHECK_ALL;
+		eac_default_flags |= EAC_FLAG_DISABLE_CHECK_ALL;
 	if (cmdline.disable_ta_checks_flag)
-		npa_default_flags |= NPA_FLAG_DISABLE_CHECK_TA;
+		eac_default_flags |= EAC_FLAG_DISABLE_CHECK_TA;
 	if (cmdline.disable_ca_checks_flag)
-		npa_default_flags |= NPA_FLAG_DISABLE_CHECK_CA;
+		eac_default_flags |= EAC_FLAG_DISABLE_CHECK_CA;
 
 
 	r = initialize(cmdline.reader_arg, cmdline.verbose_given, &ctx, &reader);
@@ -426,7 +443,7 @@ main (int argc, char **argv)
 	if (cmdline.cvc_dir_given)
 		EAC_set_cvc_default_dir(cmdline.cvc_dir_arg);
 	if (cmdline.x509_dir_given)
-		EAC_set_x509_default_dir(cmdline.cvc_dir_arg);
+		EAC_set_x509_default_dir(cmdline.x509_dir_arg);
 
 	if (cmdline.break_flag) {
 		/* The biggest number sprintf could write with "%llu is 18446744073709551615 */
@@ -441,12 +458,12 @@ main (int argc, char **argv)
 			if (pin) {
 				if (sscanf(pin, "%llu", &secret) != 1) {
 					fprintf(stderr, "%s is not an unsigned long long.\n",
-							npa_secret_name(pace_input.pin_id));
+							eac_secret_name(pace_input.pin_id));
 					exit(2);
 				}
 				if (strlen(pin) > pace_input.pin_length) {
 					fprintf(stderr, "%s too big, only %u digits allowed.\n",
-							npa_secret_name(pace_input.pin_id),
+							eac_secret_name(pace_input.pin_id),
 							(unsigned int) pace_input.pin_length);
 					exit(2);
 				}
@@ -458,12 +475,12 @@ main (int argc, char **argv)
 			if (can) {
 				if (sscanf(can, "%llu", &secret) != 1) {
 					fprintf(stderr, "%s is not an unsigned long long.\n",
-							npa_secret_name(pace_input.pin_id));
+							eac_secret_name(pace_input.pin_id));
 					exit(2);
 				}
 				if (strlen(can) > pace_input.pin_length) {
 					fprintf(stderr, "%s too big, only %u digits allowed.\n",
-							npa_secret_name(pace_input.pin_id),
+							eac_secret_name(pace_input.pin_id),
 							(unsigned int) pace_input.pin_length);
 					exit(2);
 				}
@@ -471,16 +488,16 @@ main (int argc, char **argv)
 		} else if (cmdline.puk_given) {
 			pace_input.pin_id = PACE_PUK;
 			pace_input.pin_length = 10;
-			maxsecret = 9999999999LLU;
+			maxsecret = 9999999999;
 			if (puk) {
 				if (sscanf(puk, "%llu", &secret) != 1) {
 					fprintf(stderr, "%s is not an unsigned long long.\n",
-							npa_secret_name(pace_input.pin_id));
+							eac_secret_name(pace_input.pin_id));
 					exit(2);
 				}
 				if (strlen(puk) > pace_input.pin_length) {
 					fprintf(stderr, "%s too big, only %u digits allowed.\n",
-							npa_secret_name(pace_input.pin_id),
+							eac_secret_name(pace_input.pin_id),
 							(unsigned int) pace_input.pin_length);
 					exit(2);
 				}
@@ -499,7 +516,7 @@ main (int argc, char **argv)
 			gettimeofday(&tv, NULL);
 			printf("%u,%06u: Trying %s=%s\n",
 					(unsigned int) tv.tv_sec, (unsigned int) tv.tv_usec,
-					npa_secret_name(pace_input.pin_id), pace_input.pin);
+					eac_secret_name(pace_input.pin_id), pace_input.pin);
 
 			r = perform_pace(card, pace_input, &pace_output, tr_version);
 
@@ -510,12 +527,12 @@ main (int argc, char **argv)
 		if (0 > r) {
 			printf("%u,%06u: Tried breaking %s without success.\n",
 					(unsigned int) tv.tv_sec, (unsigned int) tv.tv_usec,
-					npa_secret_name(pace_input.pin_id));
+					eac_secret_name(pace_input.pin_id));
 			goto err;
 		} else {
 			printf("%u,%06u: Tried breaking %s with success (=%s).\n",
 					(unsigned int) tv.tv_sec, (unsigned int) tv.tv_usec,
-					npa_secret_name(pace_input.pin_id),
+					eac_secret_name(pace_input.pin_id),
 					pace_input.pin);
 		}
 	}
@@ -734,7 +751,7 @@ main (int argc, char **argv)
 		if (r < 0)
 			goto err;
 		printf("Established PACE channel with %s.\n",
-				npa_secret_name(pace_input.pin_id));
+				eac_secret_name(pace_input.pin_id));
 
 nopace:
 		if (cmdline.cv_certificate_given || cmdline.private_key_given) {

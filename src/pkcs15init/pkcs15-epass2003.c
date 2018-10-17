@@ -51,7 +51,7 @@ static int epass2003_pkcs15_init_card(struct sc_profile *profile,
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 	sc_do_log(card->ctx, SC_LOG_DEBUG_VERBOSE_TOOL,NULL,0,NULL,
-			"ePass2003 doesn't surpport SO-PIN and SO-PUK. You can unblock key with PUK. \n");
+			"ePass2003 doesn't support SO-PIN and SO-PUK. You can unblock key with PUK. \n");
 	{			/* MF */
 		struct sc_file *mf_file;
 		struct sc_file *skey_file;
@@ -122,6 +122,8 @@ static int epass2003_pkcs15_create_dir(struct sc_profile *profile,
 			    "Get SKey info failed");
 		ret = sc_create_file(card, skey_file);
 		sc_file_free(skey_file);
+		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, ret,
+			    "Create SKey info failed");
 
 		ret = sc_profile_get_file(profile, "MAXPIN", &ef_file);
 		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, ret,
@@ -250,6 +252,8 @@ static int epass2003_pkcs15_create_pin(struct sc_profile *profile,
 		data.key_data.es_secret.key_len = pin_len;
 
 		r = sc_card_ctl(card, SC_CARDCTL_ENTERSAFE_WRITE_KEY, &data);
+		if (r < 0)
+			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, r);
 		if (pin_obj) {
 			/* Cache new PIN value. */
 			sc_pkcs15_pincache_add(p15card, pin_obj, pin, pin_len);
@@ -312,6 +316,16 @@ cosm_new_file(struct sc_profile *profile, struct sc_card *card,
 		 num);
 	while (1) {
 		switch (type) {
+		case SC_PKCS15_TYPE_PRKEY_EC:
+			desc = "RSA private key";
+			_template = "private-key";
+			structure = SC_CARDCTL_OBERTHUR_KEY_EC_CRT;
+			break;
+		case SC_PKCS15_TYPE_PUBKEY_EC:
+			desc = "RSA public key";
+			_template = "public-key";
+			structure = SC_CARDCTL_OBERTHUR_KEY_EC_PUBLIC;
+			break;
 		case SC_PKCS15_TYPE_PRKEY_RSA:
 			desc = "RSA private key";
 			_template = "private-key";
@@ -434,7 +448,7 @@ static int epass2003_pkcs15_store_key(struct sc_profile *profile,
 		 sc_print_path(&(file->path)));
 	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "private key_info path: %s",
 		 sc_print_path(&(key_info->path)));
-	r = sc_delete_file(p15card->card, &file->path);
+	sc_delete_file(p15card->card, &file->path);
 	/* create */
 	r = sc_pkcs15init_create_file(profile, p15card, file);
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r,
@@ -497,11 +511,14 @@ static int epass2003_pkcs15_generate_key(struct sc_profile *profile,
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 
-	if (obj->type != SC_PKCS15_TYPE_PRKEY_RSA)
+	if (obj->type != SC_PKCS15_TYPE_PRKEY_RSA && obj->type != SC_PKCS15_TYPE_PRKEY_EC)
 		return SC_ERROR_NOT_SUPPORTED;
 
+	if(obj->type == SC_PKCS15_TYPE_PRKEY_EC && keybits == 0)
+		keybits = 256; 	//EC key length is 256 ...
+
 	/* allocate key object */
-	r = cosm_new_file(profile, card, SC_PKCS15_TYPE_PRKEY_RSA, idx, &file);
+	r = cosm_new_file(profile, card, obj->type, idx, &file); //replace SC_PKCS15_TYPE_PRKEY_RSA with obj->type
 	SC_TEST_GOTO_ERR(card->ctx, SC_LOG_DEBUG_NORMAL, r,
 		    "create key: failed to allocate new key object");
 	file->size = keybits;
@@ -515,7 +532,7 @@ static int epass2003_pkcs15_generate_key(struct sc_profile *profile,
 	SC_TEST_GOTO_ERR(card->ctx, SC_LOG_DEBUG_NORMAL, r,
 		    "generate key: pkcs15init_authenticate(SC_AC_OP_DELETE) failed");
 
-	r = sc_delete_file(p15card->card, &file->path);
+	sc_delete_file(p15card->card, &file->path);
 	/* create */
 	r = sc_pkcs15init_create_file(profile, p15card, file);
 	SC_TEST_GOTO_ERR(card->ctx, SC_LOG_DEBUG_NORMAL, r,
@@ -525,11 +542,18 @@ static int epass2003_pkcs15_generate_key(struct sc_profile *profile,
 		 "index %"SC_FORMAT_LEN_SIZE_T"u; keybits %"SC_FORMAT_LEN_SIZE_T"u\n",
 		 idx, keybits);
 	if (keybits < 1024 || keybits > 2048 || (keybits % 0x20)) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE_TOOL,
-			 "Unsupported key size %"SC_FORMAT_LEN_SIZE_T"u\n",
-			 keybits);
-		r = SC_ERROR_INVALID_ARGUMENTS;
-		goto err;
+		if(obj->type == SC_PKCS15_TYPE_PRKEY_EC && keybits == 256)
+		{
+			sc_log(card->ctx, "current Alg is EC,Only support 256 ..\n");
+		}
+		else
+		{
+			sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE_TOOL,
+				 "Unsupported key size %"SC_FORMAT_LEN_SIZE_T"u\n",
+				 keybits);
+			r = SC_ERROR_INVALID_ARGUMENTS;
+			goto err;
+		}
 	}
 
 	path = key_info->path;
@@ -549,12 +573,23 @@ static int epass2003_pkcs15_generate_key(struct sc_profile *profile,
 	SC_TEST_GOTO_ERR(card->ctx, SC_LOG_DEBUG_NORMAL, r,
 		    "generate key: pkcs15init_authenticate(SC_AC_OP_CREATE) failed");
 
-	if ((r = cosm_new_file(profile, card, SC_PKCS15_TYPE_PUBKEY_RSA, idx,
-			       &pukf)) < 0) {
+	if (obj->type != SC_PKCS15_TYPE_PRKEY_RSA )
+	{
+	
+		r = cosm_new_file(profile, card, SC_PKCS15_TYPE_PUBKEY_EC, idx, &pukf);
+	}
+	else
+	{
+		
+		r = cosm_new_file(profile, card, SC_PKCS15_TYPE_PUBKEY_RSA, idx, &pukf);
+	}
+
+	if (r < 0) {
 		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
 			 "generate key: create temporary pukf failed\n");
 		goto err;
 	}
+
 	pukf->size = keybits;
 	pukf->id = pukf->path.value[pukf->path.len - 2] * 0x100
 	    + pukf->path.value[pukf->path.len - 1];

@@ -38,6 +38,7 @@
 #define ALGO_RSA_PKCS1_SHA1		0x31		/* RSA signature with SHA-1 hash and PKCS#1 V1.5 padding */
 #define ALGO_RSA_PKCS1_SHA256	0x33		/* RSA signature with SHA-256 hash and PKCS#1 V1.5 padding */
 
+#define ALGO_RSA_PSS			0x40		/* RSA signature with external hash and PKCS#1 PSS padding*/
 #define ALGO_RSA_PSS_SHA1		0x41		/* RSA signature with SHA-1 hash and PKCS#1 PSS padding */
 #define ALGO_RSA_PSS_SHA256		0x43		/* RSA signature with SHA-256 hash and PKCS#1 PSS padding */
 
@@ -56,10 +57,13 @@
 /* Information the driver maintains between calls */
 typedef struct sc_hsm_private_data {
 	const sc_security_env_t *env;
+	sc_file_t *dffcp;
 	u8 algorithm;
 	int noExtLength;
 	char *serialno;
 	u8 sopin[8];
+	u8 *EF_C_DevAut;
+	size_t EF_C_DevAut_len;
 } sc_hsm_private_data_t;
 
 
@@ -86,7 +90,7 @@ struct sc_cvc {
 
 	int modulusSize;					// Size of RSA modulus in bits
 
-	char chr[17];						// Certificate holder reference
+	char chr[21];						// Certificate holder reference
 
 	u8 *signature;						// Certificate signature or request self-signed signature
 	size_t signatureLen;

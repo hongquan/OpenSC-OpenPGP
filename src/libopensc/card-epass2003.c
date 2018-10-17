@@ -46,7 +46,7 @@
 #include "asn1.h"
 #include "cardctl.h"
 
-static struct sc_atr_table epass2003_atrs[] = {
+static const struct sc_atr_table epass2003_atrs[] = {
 	/* This is a FIPS certified card using SCP01 security messaging. */
 	{"3B:9F:95:81:31:FE:9F:00:66:46:53:05:10:00:11:71:df:00:00:00:6a:82:5e",
 	 "FF:FF:FF:FF:FF:00:FF:FF:FF:FF:FF:FF:00:00:00:ff:00:ff:ff:00:00:00:00",
@@ -98,6 +98,8 @@ typedef struct epass2003_exdata_st {
 	unsigned char sk_enc[16];	/* encrypt session key */
 	unsigned char sk_mac[16];	/* mac session key */
 	unsigned char icv_mac[16];	/* instruction counter vector(for sm) */
+	unsigned char currAlg;		/* current Alg */
+	unsigned int  ecAlgFlags; 	/* Ec Alg mechanism type*/
 } epass2003_exdata;
 
 #define REVERSE_ORDER4(x)	(			  \
@@ -170,6 +172,7 @@ static const struct sc_card_error epass2003_errors[] = {
 static int epass2003_transmit_apdu(struct sc_card *card, struct sc_apdu *apdu);
 static int epass2003_select_file(struct sc_card *card, const sc_path_t * in_path, sc_file_t ** file_out);
 int epass2003_refresh(struct sc_card *card);
+static int hash_data(const unsigned char *data, size_t datalen, unsigned char *hash, unsigned int mechanismType);
 
 static int
 epass2003_check_sw(struct sc_card *card, unsigned int sw1, unsigned int sw2)
@@ -401,6 +404,12 @@ static int
 sha1_digest(const unsigned char *input, size_t length, unsigned char *output)
 {
 	return openssl_dig(EVP_sha1(), input, length, output);
+}
+
+static int
+sha256_digest(const unsigned char *input, size_t length, unsigned char *output)
+{
+	return openssl_dig(EVP_sha256(), input, length, output);
 }
 
 
@@ -731,11 +740,11 @@ construct_mac_tlv(struct sc_card *card, unsigned char *apdu_buf, size_t data_tlv
 		memcpy(mac_tlv + 2, &mac[mac_len - 16], 8);
 	}
 	else {
-		unsigned char iv[8] = { 0 };
+		unsigned char iv[EVP_MAX_IV_LENGTH] = { 0 };
 		unsigned char tmp[8] = { 0 };
 		des_encrypt_cbc(exdata->sk_mac, 8, icv, apdu_buf, mac_len, mac);
 		des_decrypt_cbc(&exdata->sk_mac[8], 8, iv, &mac[mac_len - 8], 8, tmp);
-		memset(iv, 0x00, 8);
+		memset(iv, 0x00, sizeof iv);
 		des_encrypt_cbc(exdata->sk_mac, 8, iv, tmp, 8, mac_tlv + 2);
 	}
 
@@ -894,9 +903,9 @@ epass2003_sm_wrap_apdu(struct sc_card *card, struct sc_apdu *plain, struct sc_ap
  * SW12(TLV)=0x99|0x02|SW1+SW2
  * MAC(TLV)=0x8e|0x08|MAC */
 static int
-decrypt_response(struct sc_card *card, unsigned char *in, unsigned char *out, size_t * out_len)
+decrypt_response(struct sc_card *card, unsigned char *in, size_t inlen, unsigned char *out, size_t * out_len)
 {
-	size_t in_len;
+	size_t cipher_len;
 	size_t i;
 	unsigned char iv[16] = { 0 };
 	unsigned char plaintext[4096] = { 0 };
@@ -913,37 +922,40 @@ decrypt_response(struct sc_card *card, unsigned char *in, unsigned char *out, si
 
 	/* parse cipher length */
 	if (0x01 == in[2] && 0x82 != in[1]) {
-		in_len = in[1];
+		cipher_len = in[1];
 		i = 3;
 	}
 	else if (0x01 == in[3] && 0x81 == in[1]) {
-		in_len = in[2];
+		cipher_len = in[2];
 		i = 4;
 	}
 	else if (0x01 == in[4] && 0x82 == in[1]) {
-		in_len = in[2] * 0x100;
-		in_len += in[3];
+		cipher_len = in[2] * 0x100;
+		cipher_len += in[3];
 		i = 5;
 	}
 	else {
 		return -1;
 	}
 
-	/* decrypt */
-	if (KEY_TYPE_AES == exdata->smtype)
-		aes128_decrypt_cbc(exdata->sk_enc, 16, iv, &in[i], in_len - 1, plaintext);
-	else
-		des3_decrypt_cbc(exdata->sk_enc, 16, iv, &in[i], in_len - 1, plaintext);
-
-	/* unpadding */
-	while (0x80 != plaintext[in_len - 2] && (in_len - 2 > 0))
-		in_len--;
-
-	if (2 == in_len)
+	if (cipher_len < 2 || i+cipher_len > inlen || cipher_len > sizeof plaintext)
 		return -1;
 
-	memcpy(out, plaintext, in_len - 2);
-	*out_len = in_len - 2;
+	/* decrypt */
+	if (KEY_TYPE_AES == exdata->smtype)
+		aes128_decrypt_cbc(exdata->sk_enc, 16, iv, &in[i], cipher_len - 1, plaintext);
+	else
+		des3_decrypt_cbc(exdata->sk_enc, 16, iv, &in[i], cipher_len - 1, plaintext);
+
+	/* unpadding */
+	while (0x80 != plaintext[cipher_len - 2] && (cipher_len - 2 > 0))
+		cipher_len--;
+
+	if (2 == cipher_len || *out_len < cipher_len - 2)
+		return -1;
+
+	memcpy(out, plaintext, cipher_len - 2);
+	*out_len = cipher_len - 2;
 	return 0;
 }
 
@@ -965,7 +977,8 @@ epass2003_sm_unwrap_apdu(struct sc_card *card, struct sc_apdu *sm, struct sc_apd
 	r = sc_check_sw(card, sm->sw1, sm->sw2);
 	if (r == SC_SUCCESS) {
 		if (exdata->sm) {
-			if (0 != decrypt_response(card, sm->resp, plain->resp, &len))
+			len = plain->resplen;
+			if (0 != decrypt_response(card, sm->resp, sm->resplen, plain->resp, &len))
 				return SC_ERROR_CARD_CMD_FAILED;
 		}
 		else {
@@ -1140,6 +1153,7 @@ static int
 epass2003_init(struct sc_card *card)
 {
 	unsigned int flags;
+	unsigned int ext_flags;
 	unsigned char data[SC_MAX_APDU_BUFFER_SIZE] = { 0 };
 	size_t datalen = SC_MAX_APDU_BUFFER_SIZE;
 	epass2003_exdata *exdata = NULL;
@@ -1158,7 +1172,7 @@ epass2003_init(struct sc_card *card)
 
 	/* decide FIPS/Non-FIPS mode */
 	if (SC_SUCCESS != get_data(card, 0x86, data, datalen))
-		return SC_ERROR_CARD_CMD_FAILED;
+		return SC_ERROR_INVALID_CARD;
 
 	if (0x01 == data[2])
 		exdata->smtype = KEY_TYPE_AES;
@@ -1191,6 +1205,11 @@ epass2003_init(struct sc_card *card)
 	_sc_card_add_rsa_alg(card, 768, flags, 0);
 	_sc_card_add_rsa_alg(card, 1024, flags, 0);
 	_sc_card_add_rsa_alg(card, 2048, flags, 0);
+
+	//set EC Alg Flags
+	flags = SC_ALGORITHM_ONBOARD_KEY_GEN|SC_ALGORITHM_ECDSA_HASH_SHA1|SC_ALGORITHM_ECDSA_HASH_SHA256|SC_ALGORITHM_ECDSA_HASH_NONE|SC_ALGORITHM_ECDSA_RAW;
+	ext_flags = 0;
+	_sc_card_add_ec_alg(card, 256, flags, ext_flags, NULL);
 
 	card->caps = SC_CARD_CAP_RNG | SC_CARD_CAP_APDU_EXT;
 
@@ -1288,7 +1307,7 @@ epass2003_select_fid_(struct sc_card *card, sc_path_t * in_path, sc_file_t ** fi
 	}
 
 	if (path[0] == 0x29) {	/* TODO:0x29 accords with FID prefix in profile  */
-		/* Not allowed to select prvate key file, so fake fci. */
+		/* Not allowed to select private key file, so fake fci. */
 		/* 62 16 82 02 11 00 83 02 29 00 85 02 08 00 86 08 FF 90 90 90 FF FF FF FF */
 		apdu.resplen = 0x18;
 		memcpy(apdu.resp,
@@ -1465,7 +1484,7 @@ epass2003_select_path(struct sc_card *card, const u8 pathbuf[16], const size_t l
 
 	if (card->cache.valid && bMatch > 2) {
 		if (pathlen - bMatch == 2) {
-			/* we are in the rigth directory */
+			/* we are in the right directory */
 			return epass2003_select_fid(card, path[bMatch], path[bMatch + 1], file_out);
 		}
 		else if (pathlen - bMatch > 2) {
@@ -1561,19 +1580,15 @@ epass2003_set_security_env(struct sc_card *card, const sc_security_env_t * env, 
 	u8 *p;
 	unsigned short fid = 0;
 	int r, locked = 0;
+	epass2003_exdata *exdata = NULL;
+
+	if (!card->drv_data)
+		return SC_ERROR_INVALID_ARGUMENTS;
+
+	exdata = (epass2003_exdata *)card->drv_data;
 
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x22, 0x41, 0);
-	switch (env->operation) {
-	case SC_SEC_OPERATION_DECIPHER:
-		apdu.p2 = 0xB8;
-		break;
-	case SC_SEC_OPERATION_SIGN:
-		apdu.p2 = 0xB8;
-		break;
-	default:
-		return SC_ERROR_INVALID_ARGUMENTS;
-	}
-
+    
 	p = sbuf;
 	*p++ = 0x80;		/* algorithm reference */
 	*p++ = 0x01;
@@ -1590,6 +1605,38 @@ epass2003_set_security_env(struct sc_card *card, const sc_security_env_t * env, 
 	apdu.lc = r;
 	apdu.datalen = r;
 	apdu.data = sbuf;
+
+	if (env->algorithm == SC_ALGORITHM_EC)
+	{
+		apdu.p2 = 0xB6;
+		exdata->currAlg = SC_ALGORITHM_EC;
+		if(env->algorithm_flags & SC_ALGORITHM_ECDSA_HASH_SHA1)
+		{
+			sbuf[2] = 0x91;
+			exdata->ecAlgFlags = SC_ALGORITHM_ECDSA_HASH_SHA1;
+		}
+		else if (env->algorithm_flags & SC_ALGORITHM_ECDSA_HASH_SHA256)
+		{
+			sbuf[2] = 0x92;
+			exdata->ecAlgFlags = SC_ALGORITHM_ECDSA_HASH_SHA256;
+		}
+		else
+		{
+			sc_log(card->ctx, "%0x Alg Not Support! ", env->algorithm_flags);
+			goto err;
+		}
+	}
+	else if(env->algorithm == SC_ALGORITHM_RSA)
+	{
+		exdata->currAlg = SC_ALGORITHM_RSA; 
+		apdu.p2 = 0xB8;
+		sc_log(card->ctx, "setenv RSA Algorithm alg_flags = %0x\n",env->algorithm_flags);
+	}
+	else
+	{
+		sc_log(card->ctx, "%0x Alg Not Support! ", env->algorithm);
+	}
+
 	if (se_num > 0) {
 		r = sc_lock(card);
 		LOG_TEST_RET(card->ctx, r, "sc_lock() failed");
@@ -1640,16 +1687,76 @@ static int epass2003_decipher(struct sc_card *card, const u8 * data, size_t data
 	struct sc_apdu apdu;
 	u8 rbuf[SC_MAX_APDU_BUFFER_SIZE] = { 0 };
 	u8 sbuf[SC_MAX_APDU_BUFFER_SIZE] = { 0 };
+	epass2003_exdata *exdata = NULL;
+	
+	LOG_FUNC_CALLED(card->ctx);
+	
+	if (!card->drv_data)
+		return SC_ERROR_INVALID_ARGUMENTS;
+	
+	exdata = (epass2003_exdata *)card->drv_data;
 
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_4_EXT, 0x2A, 0x80, 0x86);
-	apdu.resp = rbuf;
-	apdu.resplen = sizeof(rbuf);
-	apdu.le = 256;
+	if(exdata->currAlg == SC_ALGORITHM_EC)
+	{
+		if(exdata->ecAlgFlags & SC_ALGORITHM_ECDSA_HASH_SHA1)
+		{
+			r = hash_data(data, datalen, sbuf, SC_ALGORITHM_ECDSA_HASH_SHA1);
+			LOG_TEST_RET(card->ctx, r, "hash_data failed"); 
+			sc_format_apdu(card, &apdu, SC_APDU_CASE_3,0x2A, 0x9E, 0x9A);
+			apdu.data = sbuf;
+			apdu.lc = 0x14;
+			apdu.datalen = 0x14;
+		}
+		else if (exdata->ecAlgFlags & SC_ALGORITHM_ECDSA_HASH_SHA256)
+		{
+			r = hash_data(data, datalen, sbuf, SC_ALGORITHM_ECDSA_HASH_SHA256);
+			LOG_TEST_RET(card->ctx, r, "hash_data failed");
+			sc_format_apdu(card, &apdu, SC_APDU_CASE_3,0x2A, 0x9E, 0x9A);
+			apdu.data = sbuf;
+			apdu.lc = 0x20;
+			apdu.datalen = 0x20;
+		}
+		else
+		{
+			return SC_ERROR_NOT_SUPPORTED;
+		}
+		apdu.resp = rbuf;
+		apdu.resplen = sizeof(rbuf);
+		apdu.le = 0;
 
-	memcpy(sbuf, data, datalen);
-	apdu.data = sbuf;
-	apdu.lc = datalen;
-	apdu.datalen = datalen;
+		r = sc_transmit_apdu_t(card, &apdu);
+		LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
+		if (apdu.sw1 == 0x90 && apdu.sw2 == 0x00) {
+			size_t len = apdu.resplen > outlen ? outlen : apdu.resplen;
+			memcpy(out, apdu.resp, len);
+			LOG_FUNC_RETURN(card->ctx, len);
+		}
+		LOG_FUNC_RETURN(card->ctx, sc_check_sw(card, apdu.sw1, apdu.sw2));
+	}
+	else if(exdata->currAlg == SC_ALGORITHM_RSA)
+	{
+		sc_format_apdu(card, &apdu, SC_APDU_CASE_4_EXT, 0x2A, 0x80, 0x86);
+		apdu.resp = rbuf;
+		apdu.resplen = sizeof(rbuf);
+		apdu.le = 0;
+
+		memcpy(sbuf, data, datalen);
+		apdu.data = sbuf;
+		apdu.lc = datalen;
+		apdu.datalen = datalen;
+	}
+	else
+	{
+		sc_format_apdu(card, &apdu, SC_APDU_CASE_4_EXT, 0x2A, 0x80, 0x86);
+		apdu.resp = rbuf;
+		apdu.resplen = sizeof(rbuf);
+		apdu.le = 256;
+
+		memcpy(sbuf, data, datalen);
+		apdu.data = sbuf;
+		apdu.lc = datalen;
+		apdu.datalen = datalen;
+	}
 
 	r = sc_transmit_apdu_t(card, &apdu);
 	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
@@ -1739,11 +1846,6 @@ epass2003_process_fci(struct sc_card *card, sc_file_t * file, const u8 * buf, si
 				case 0x04:
 					file->ef_structure = SC_FILE_EF_LINEAR_FIXED;
 					break;
-				case 0x03:
-				case 0x05:
-				case 0x06:
-				case 0x07:
-					break;
 				default:
 					break;
 				}
@@ -1776,12 +1878,10 @@ epass2003_process_fci(struct sc_card *card, sc_file_t * file, const u8 * buf, si
 
 	tag = sc_asn1_find_tag(ctx, p, len, 0x84, &taglen);
 	if (tag != NULL && taglen > 0 && taglen <= 16) {
-		char tbuf[128];
 		memcpy(file->name, tag, taglen);
 		file->namelen = taglen;
 
-		sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL, file->name, file->namelen, tbuf, sizeof(tbuf));
-		sc_log(ctx, "File name: %s", tbuf);
+		sc_log_hex(ctx, "File name", file->name, file->namelen);
 		if (!file->type)
 			file->type = SC_FILE_TYPE_DF;
 	}
@@ -1862,11 +1962,13 @@ epass2003_construct_fci(struct sc_card *card, const sc_file_t * file,
 
 	}
 	else if (file->type == SC_FILE_TYPE_INTERNAL_EF) {
-		if (file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_RSA_CRT) {
+		if (file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_RSA_CRT ||
+			file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_EC_CRT) {
 			buf[0] = 0x11;
 			buf[1] = 0x00;
 		}
-		else if (file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_RSA_PUBLIC) {
+		else if (file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_RSA_PUBLIC ||
+				file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_EC_PUBLIC) {
 			buf[0] = 0x12;
 			buf[1] = 0x00;
 		}
@@ -1903,7 +2005,9 @@ epass2003_construct_fci(struct sc_card *card, const sc_file_t * file,
 	}
 	else if (file->type == SC_FILE_TYPE_INTERNAL_EF) {
 		if (file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_RSA_CRT ||
-		    file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_RSA_PUBLIC) {
+		    file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_RSA_PUBLIC||
+		    file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_EC_CRT||
+		    file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_EC_PUBLIC) {
 			buf[0] = (file->size >> 8) & 0xFF;
 			buf[1] = file->size & 0xFF;
 			sc_asn1_put_tag(0x85, buf, 2, p, *outlen - (p - out), &p);
@@ -1942,13 +2046,14 @@ epass2003_construct_fci(struct sc_card *card, const sc_file_t * file,
 			ops[3] = SC_AC_OP_DELETE;
 		}
 		else if (file->type == SC_FILE_TYPE_INTERNAL_EF) {
-			if (file->ef_structure ==
-			    SC_CARDCTL_OBERTHUR_KEY_RSA_CRT) {
+			if (file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_RSA_CRT ||
+				file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_EC_CRT) {
 				ops[1] = SC_AC_OP_UPDATE;
 				ops[2] = SC_AC_OP_CRYPTO;
 				ops[3] = SC_AC_OP_DELETE;
 			}
-			else if (file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_RSA_PUBLIC) {
+			else if (file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_RSA_PUBLIC||
+					file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_EC_PUBLIC) {
 				ops[0] = SC_AC_OP_READ;
 				ops[1] = SC_AC_OP_UPDATE;
 				ops[2] = SC_AC_OP_CRYPTO;
@@ -1973,13 +2078,22 @@ epass2003_construct_fci(struct sc_card *card, const sc_file_t * file,
 			buf[ii] = rv;
 		}
 		sc_asn1_put_tag(0x86, buf, sizeof(ops), p, *outlen - (p - out), &p);
+		if(file->size == 256)	
+		{
+			out[4]= 0x13;
+		}
 
 	}
 
 	/* VT ??? */
-	if (file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_RSA_PUBLIC) {
+	if (file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_RSA_PUBLIC||
+		file->ef_structure == SC_CARDCTL_OBERTHUR_KEY_EC_PUBLIC) {
 		unsigned char data[2] = {0x00, 0x66};
 		sc_asn1_put_tag(0x87, data, sizeof(data), p, *outlen - (p - out), &p);
+		if(file->size == 256)	
+		{
+			out[4]= 0x14;
+		}
 	}
 
 	out[1] = p - out - 2;
@@ -2129,19 +2243,36 @@ internal_write_rsa_key(struct sc_card *card, unsigned short fid, struct sc_pkcs1
 
 
 static int
-hash_data(unsigned char *data, size_t datalen, unsigned char *hash)
+hash_data(const unsigned char *data, size_t datalen, unsigned char *hash, unsigned int mechanismType)
 {
-	unsigned char data_hash[24] = { 0 };
-	size_t len = 0;
 
 	if ((NULL == data) || (NULL == hash))
 		return SC_ERROR_INVALID_ARGUMENTS;
 
-	sha1_digest(data, datalen, data_hash);
+	if(mechanismType & SC_ALGORITHM_ECDSA_HASH_SHA1)
+	{
+		unsigned char data_hash[24] = { 0 };
+		size_t len = 0;
 
-	len = REVERSE_ORDER4(datalen);
-	memcpy(&data_hash[20], &len, 4);
-	memcpy(hash, data_hash, 24);
+		sha1_digest(data, datalen, data_hash);
+		len = REVERSE_ORDER4(datalen);
+		memcpy(&data_hash[20], &len, 4);
+		memcpy(hash, data_hash, 24);
+	}
+	else if(mechanismType & SC_ALGORITHM_ECDSA_HASH_SHA256)
+	{
+		unsigned char data_hash[36] = { 0 };
+		size_t len = 0;
+
+		sha256_digest(data, datalen, data_hash);
+		len = REVERSE_ORDER4(datalen);
+		memcpy(&data_hash[32], &len, 4);
+		memcpy(hash, data_hash, 36);
+	}
+	else
+	{
+		return SC_ERROR_NOT_SUPPORTED;
+	}
 
 	return SC_SUCCESS;
 }
@@ -2214,7 +2345,7 @@ internal_install_pin(struct sc_card *card, sc_epass2003_wkey_data * pin)
 	int r;
 	unsigned char hash[HASH_LEN] = { 0 };
 
-	r = hash_data(pin->key_data.es_secret.key_val, pin->key_data.es_secret.key_len, hash);
+	r = hash_data(pin->key_data.es_secret.key_val, pin->key_data.es_secret.key_len, hash, SC_ALGORITHM_ECDSA_HASH_SHA1);
 	LOG_TEST_RET(card->ctx, r, "hash data failed");
 
 	r = install_secret_key(card, 0x04, pin->key_data.es_secret.kid,
@@ -2265,7 +2396,14 @@ epass2003_gen_key(struct sc_card *card, sc_epass2003_gen_key_data * data)
 
 	LOG_FUNC_CALLED(card->ctx);
 
-	sbuf[0] = 0x01;
+	if(len == 256)
+	{
+		sbuf[0] = 0x02;
+	}
+	else
+	{
+		sbuf[0] = 0x01;
+	}
 	sbuf[1] = (u8) ((len >> 8) & 0xff);
 	sbuf[2] = (u8) (len & 0xff);
 	sbuf[3] = (u8) ((data->prkey_id >> 8) & 0xFF);
@@ -2285,6 +2423,10 @@ epass2003_gen_key(struct sc_card *card, sc_epass2003_gen_key_data * data)
 
 	/* read public key */
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0xb4, 0x02, 0x00);
+	if(len == 256)
+	{
+		apdu.p1 = 0x00;
+	}
 	apdu.cla = 0x80;
 	apdu.lc = apdu.datalen = 2;
 	apdu.data = &sbuf[5];
@@ -2316,7 +2458,7 @@ epass2003_erase_card(struct sc_card *card)
 	int r;
 
 	LOG_FUNC_CALLED(card->ctx);
-	card->cache.valid = 0;
+	sc_invalidate_cache(card);
 
 	r = sc_delete_file(card, sc_get_mf_path());
 	LOG_TEST_RET(card->ctx, r, "delete MF failed");
@@ -2349,6 +2491,7 @@ epass2003_card_ctl(struct sc_card *card, unsigned long cmd, void *ptr)
 {
 	LOG_FUNC_CALLED(card->ctx);
 
+	sc_log(card->ctx, "cmd is %0lx", cmd);
 	switch (cmd) {
 	case SC_CARDCTL_ENTERSAFE_WRITE_KEY:
 		return epass2003_write_key(card, (sc_epass2003_wkey_data *) ptr);
@@ -2429,34 +2572,26 @@ get_external_key_retries(struct sc_card *card, unsigned char kid, unsigned char 
 	return r;
 }
 
-	static int 
-epass2003_get_challenge(sc_card_t *card, u8 *rnd, size_t count)
+static int 
+epass2003_get_challenge(sc_card_t *card, u8 *rnd, size_t len)
 {
-	sc_apdu_t apdu;
 	u8 rbuf[16];
-	size_t n;
-	int ret = SC_SUCCESS; /* if count == 0 */
+	size_t out_len;
+	int r;
 
-	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0x84, 0x00, 0x00);
-	apdu.le = sizeof(rbuf);
-	apdu.resp = rbuf;
-	apdu.resplen = sizeof(rbuf);
+	LOG_FUNC_CALLED(card->ctx);
 
-	while (count > 0)
-	{
-		ret = sc_transmit_apdu(card, &apdu);
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, ret, "APDU transmit failed");
-		ret = sc_check_sw(card, apdu.sw1, apdu.sw2);
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, ret, "Get challenge failed");
-		if (apdu.resplen != sizeof(rbuf))
-			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_UNKNOWN);
-		n = count < sizeof(rbuf) ? count : sizeof(rbuf);
-		memcpy(rnd, rbuf, n);
-		count -= n;
-		rnd += n;
+	r = iso_ops->get_challenge(card, rbuf, sizeof rbuf);
+	LOG_TEST_RET(card->ctx, r, "GET CHALLENGE cmd failed");
+
+	if (len < (size_t) r) {
+		out_len = len;
+	} else {
+		out_len = (size_t) r;
 	}
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, ret);
+	memcpy(rnd, rbuf, out_len);
+
+	LOG_FUNC_RETURN(card->ctx, (int) out_len);
 }
 
 
@@ -2474,7 +2609,7 @@ external_key_auth(struct sc_card *card, unsigned char kid,
 	r = sc_get_challenge(card, random, 8);
 	LOG_TEST_RET(card->ctx, r, "get challenge external_key_auth failed");
 
-	r = hash_data(data, datalen, hash);
+	r = hash_data(data, datalen, hash, SC_ALGORITHM_ECDSA_HASH_SHA1);
 	LOG_TEST_RET(card->ctx, r, "hash data failed");
 
 	des3_encrypt_cbc(hash, HASH_LEN, iv, random, 8, tmp_data);
@@ -2493,7 +2628,7 @@ external_key_auth(struct sc_card *card, unsigned char kid,
 
 static int
 update_secret_key(struct sc_card *card, unsigned char ktype, unsigned char kid,
-		unsigned char *data, unsigned long datalen)
+		const unsigned char *data, unsigned long datalen)
 {
 	int r;
 	struct sc_apdu apdu;
@@ -2501,7 +2636,7 @@ update_secret_key(struct sc_card *card, unsigned char ktype, unsigned char kid,
 	unsigned char tmp_data[256] = { 0 };
 	unsigned char maxtries = 0;
 
-	r = hash_data(data, datalen, hash);
+	r = hash_data(data, datalen, hash, SC_ALGORITHM_ECDSA_HASH_SHA1);
 	LOG_TEST_RET(card->ctx, r, "hash data failed");
 
 	r = get_external_key_maxtries(card, &maxtries);
@@ -2552,13 +2687,17 @@ epass2003_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 
 			data->pin1.max_tries = maxtries;
 		}
-
-		return r;
+//remove below code, because the old implement only return PIN retries, now modify the code and return PIN status
+//		return r;
 	}
-	/* verify */
-	if (data->cmd == SC_PIN_CMD_UNBLOCK) {
+	else if (data->cmd == SC_PIN_CMD_UNBLOCK) { /* verify */
 		r = external_key_auth(card, (kid + 1), (unsigned char *)data->pin1.data,
 				data->pin1.len);
+		LOG_TEST_RET(card->ctx, r, "verify pin failed");
+	}
+	else if (data->cmd == SC_PIN_CMD_CHANGE || data->cmd == SC_PIN_CMD_UNBLOCK) { /* change */
+		r = update_secret_key(card, 0x04, kid, data->pin2.data,
+				(unsigned long)data->pin2.len);
 		LOG_TEST_RET(card->ctx, r, "verify pin failed");
 	}
 	else {
@@ -2571,13 +2710,11 @@ epass2003_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	}
 	LOG_TEST_RET(card->ctx, r, "verify pin failed");
 
-
-	if (data->cmd == SC_PIN_CMD_CHANGE || data->cmd == SC_PIN_CMD_UNBLOCK) {
-		/* change */
-		r = update_secret_key(card, 0x04, kid, (unsigned char *)data->pin2.data,
-				(unsigned long)data->pin2.len);
-		LOG_TEST_RET(card->ctx, r, "verify pin failed");
+	if (r == SC_SUCCESS)
+	{
+		data->pin1.logged_in = SC_PIN_STATE_LOGGED_IN;
 	}
+
 	return r;
 }
 

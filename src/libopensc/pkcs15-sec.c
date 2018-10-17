@@ -2,7 +2,7 @@
  * pkcs15-sec.c: PKCS#15 cryptography functions
  *
  * Copyright (C) 2001, 2002  Juha Yrjölä <juha.yrjola@iki.fi>
- * Copyrigth (C) 2007        Nils Larsch <nils@larsch.net>
+ * Copyright (C) 2007        Nils Larsch <nils@larsch.net>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -49,7 +49,7 @@ static int select_key_file(struct sc_pkcs15_card *p15card,
 	/* TODO: Why file_app may be NULL -- at least 3F00 has to be present?
 	 * Check validity of the following assumption. */
 	/* For pkcs15-emulated cards, the file_app may be NULL,
-	 * in that case we allways assume an absolute path */
+	 * in that case we always assume an absolute path */
 	if (!prkey->path.len && prkey->path.aid.len) {
 		/* Private key is a SDO allocated in application DF */
 		path = prkey->path;
@@ -329,7 +329,7 @@ int sc_pkcs15_compute_signature(struct sc_pkcs15_card *p15card,
 
 	switch (obj->type) {
 		case SC_PKCS15_TYPE_PRKEY_RSA:
-			modlen = prkey->modulus_length / 8;
+			modlen = (prkey->modulus_length + 7) / 8;
 			break;
 		case SC_PKCS15_TYPE_PRKEY_GOSTR3410:
 			modlen = (prkey->modulus_length + 7) / 8 * 2;
@@ -377,7 +377,8 @@ int sc_pkcs15_compute_signature(struct sc_pkcs15_card *p15card,
 		if (modlen > tmplen)
 			LOG_TEST_RET(ctx, SC_ERROR_NOT_ALLOWED, "Buffer too small, needs recompile!");
 
-		r = sc_pkcs1_encode(ctx, flags, in, inlen, buf, &tmplen, modlen);
+		/* XXX Assuming RSA key here */
+		r = sc_pkcs1_encode(ctx, flags, in, inlen, buf, &tmplen, prkey->modulus_length);
 
 		/* no padding needed - already done */
 		flags &= ~SC_ALGORITHM_RSA_PADS;
@@ -391,10 +392,15 @@ int sc_pkcs15_compute_signature(struct sc_pkcs15_card *p15card,
 	}
 
 
-	/* If the card doesn't support the requested algorithm, see if we
-	 * can strip the input so a more restrictive algo can be used */
+	/* If the card doesn't support the requested algorithm, we normally add the
+	 * padding here in software and ask the card to do a raw signature.  There's
+	 * one exception to that, where we might be able to get the signature to
+	 * succeed by stripping padding if the card only offers higher-level
+	 * signature operations.  The only thing we can strip is the DigestInfo
+	 * block from PKCS1 padding. */
 	if ((flags == (SC_ALGORITHM_RSA_PAD_PKCS1 | SC_ALGORITHM_RSA_HASH_NONE)) &&
-			!(alg_info->flags & (SC_ALGORITHM_RSA_RAW | SC_ALGORITHM_RSA_HASH_NONE))) {
+	    !(alg_info->flags & SC_ALGORITHM_RSA_RAW) &&
+	    !(alg_info->flags & (SC_ALGORITHM_RSA_PAD_PKCS1 | SC_ALGORITHM_RSA_HASH_NONE))) {
 		unsigned int algo;
 		size_t tmplen = sizeof(buf);
 
@@ -422,13 +428,14 @@ int sc_pkcs15_compute_signature(struct sc_pkcs15_card *p15card,
 	if (pad_flags != 0) {
 		size_t tmplen = sizeof(buf);
 
-		r = sc_pkcs1_encode(ctx, pad_flags, tmp, inlen, tmp, &tmplen, modlen);
+		/* XXX Assuming RSA key here */
+		r = sc_pkcs1_encode(ctx, pad_flags, tmp, inlen, tmp, &tmplen,
+		    prkey->modulus_length);
 		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, r, "Unable to add padding");
-
 		inlen = tmplen;
 	}
 	else if ( senv.algorithm == SC_ALGORITHM_RSA &&
-			(flags & SC_ALGORITHM_RSA_PADS) == SC_ALGORITHM_RSA_PAD_NONE) {
+	          (flags & SC_ALGORITHM_RSA_PADS) == SC_ALGORITHM_RSA_PAD_NONE) {
 		/* Add zero-padding if input is shorter than the modulus */
 		if (inlen < modlen) {
 			if (modlen > sizeof(buf))
@@ -452,6 +459,15 @@ int sc_pkcs15_compute_signature(struct sc_pkcs15_card *p15card,
 	r = use_key(p15card, obj, &senv, sc_compute_signature, tmp, inlen,
 			out, outlen);
 	LOG_TEST_RET(ctx, r, "use_key() failed");
+
+	/* Some cards may return RSA signature as integer without leading zero bytes */
+	/* Already know outlen >= modlen and r >= 0 */
+	if (obj->type == SC_PKCS15_TYPE_PRKEY_RSA && (unsigned)r < modlen) {
+		memmove(out + modlen - r, out, r);
+		memset(out, 0, modlen - r);
+		r = modlen;
+	}
+
 	sc_mem_clear(buf, sizeof(buf));
 
 	LOG_FUNC_RETURN(ctx, r);

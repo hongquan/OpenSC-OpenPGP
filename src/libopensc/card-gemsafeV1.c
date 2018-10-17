@@ -44,7 +44,7 @@ static struct sc_card_driver gemsafe_drv = {
 };
 
 /* Known ATRs */
-static struct sc_atr_table gemsafe_atrs[] = {
+static const struct sc_atr_table gemsafe_atrs[] = {
 	/* standard version */
     {"3B:7B:94:00:00:80:65:B0:83:01:01:74:83:00:90:00", NULL, NULL, SC_CARD_TYPE_GEMSAFEV1_GENERIC, 0, NULL},
     {"3B:6B:00:00:80:65:B0:83:01:01:74:83:00:90:00", NULL, NULL, SC_CARD_TYPE_GEMSAFEV1_GENERIC, 0, NULL},
@@ -180,9 +180,9 @@ static int gemsafe_init(struct sc_card *card)
 		memcpy(exdata->aid, gemsafe_pteid_aid, sizeof(gemsafe_pteid_aid));
 		exdata->aid_len = sizeof(gemsafe_pteid_aid);
 	} else if (card->type == SC_CARD_TYPE_GEMSAFEV1_SEEID) {
-                memcpy(exdata->aid, gemsafe_seeid_aid, sizeof(gemsafe_seeid_aid));
-                exdata->aid_len = sizeof(gemsafe_seeid_aid);
-        }
+		memcpy(exdata->aid, gemsafe_seeid_aid, sizeof(gemsafe_seeid_aid));
+		exdata->aid_len = sizeof(gemsafe_seeid_aid);
+	}
 
 	/* increase lock_count here to prevent sc_unlock to select
 	 * applet twice in gp_select_applet */
@@ -192,7 +192,7 @@ static int gemsafe_init(struct sc_card *card)
 	if (r < 0) {
 		free(exdata);
 		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "applet selection failed\n");
-		return SC_ERROR_INTERNAL;
+		return SC_ERROR_INVALID_CARD;
 	}
 	card->lock_count--;
 
@@ -232,7 +232,7 @@ static int gemsafe_init(struct sc_card *card)
 	card->caps |= SC_CARD_CAP_ISO7816_PIN_INFO;
 	card->drv_data = exdata;
 
-	return 0;
+	return SC_SUCCESS;
 }
 
 static int gemsafe_finish(sc_card_t *card)
@@ -566,6 +566,20 @@ static int gemsafe_get_challenge(sc_card_t *card, u8 *rnd, size_t len)
 	return r;
 }
 
+static int gemsafe_card_reader_lock_obtained(sc_card_t *card, int was_reset)
+{
+	int r = SC_SUCCESS;
+	gemsafe_exdata *exdata = (gemsafe_exdata *)card->drv_data;
+
+	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	if (was_reset > 0 && exdata) {
+		r = gp_select_applet(card, exdata->aid, exdata->aid_len);
+	}
+
+	LOG_FUNC_RETURN(card->ctx, r);
+}
+
 static struct sc_card_driver *sc_get_driver(void)
 {
 	struct sc_card_driver *iso_drv = sc_get_iso7816_driver();
@@ -585,6 +599,7 @@ static struct sc_card_driver *sc_get_driver(void)
 	gemsafe_ops.get_challenge 		 = gemsafe_get_challenge;
 	gemsafe_ops.process_fci	= gemsafe_process_fci;
 	gemsafe_ops.pin_cmd		 = iso_ops->pin_cmd;
+	gemsafe_ops.card_reader_lock_obtained = gemsafe_card_reader_lock_obtained;
 
 	return &gemsafe_drv;
 }

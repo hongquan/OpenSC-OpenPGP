@@ -58,6 +58,7 @@
 #include "compression.h"
 #endif
 #include "iso7816.h"
+#include "gp.h"
 #include "../pkcs11/pkcs11.h"
 
 
@@ -88,7 +89,7 @@
 #define COOLKEY_INS_COMPUTE_CRYPT              0x36
 #define COOLKEY_INS_COMPUTE_ECC_KEY_AGREEMENT  0x37
 #define COOLKEY_INS_COMPUTE_ECC_SIGNATURE      0x38
-#define COOLKEY_INS_GET_RANDOM                 0x73
+#define COOLKEY_INS_GET_RANDOM                 0x72
 #define COOLKEY_INS_READ_OBJECT                0x56
 #define COOLKEY_INS_WRITE_OBJECT               0x54
 #define COOLKEY_INS_LOGOUT                     0x61
@@ -160,7 +161,7 @@ typedef struct global_platform_cplc_data {
 	u8 ic_personalization_id[4];
 } global_platform_cplc_data_t;
 
-/* format of the coolkey_cuid, either contructed from cplc data or read from the combined object */
+/* format of the coolkey_cuid, either constructed from cplc data or read from the combined object */
 typedef struct coolkey_cuid {
 	u8 ic_fabricator[2];
 	u8 ic_type[2];
@@ -214,7 +215,7 @@ typedef struct coolkey_decompressed_header {
 	u8 object_offset[2];
 	u8 object_count[2];
 	u8 token_name_length;
-	u8 token_name[255];      /* arbitary size up to token_name_length */
+	u8 token_name[255];      /* arbitrary size up to token_name_length */
 } coolkey_decompressed_header_t;
 
 /*
@@ -293,11 +294,11 @@ struct coolkey_fixed_attributes_values {
 	uint32_t  cka_always_sensitive:1;
 	uint32_t  cka_extractable:1;
 	uint32_t  cka_never_extractable:1;
-	uint32_t  reseved:8;
+	uint32_t  reserved:8;
 };
 
  *  cka_class is used to determine which booleans are valid. Any attributes in the full attribute list
- *  takes precidence over the fixed attributes. That is if there is a CKA_ID in the full attribute list,
+ *  takes precedence over the fixed attributes. That is if there is a CKA_ID in the full attribute list,
  *  The cka_id in the fixed_attributes is ignored. When determining which boolean attribute is valid, the
  *  cka_class in the fixed attributes are used, even if it is overridden by the  full attribute list.
  * valid cka_class values and their corresponding valid bools are as follows:
@@ -658,7 +659,7 @@ coolkey_get_fixed_boolean_bit(CK_ATTRIBUTE_TYPE type)
 	return 0; /* return no bits */
 }
 /* This table lets us return a pointer to the CKA_ID value without allocating data or
- * creating a changable static that could cause thread issues */
+ * creating a changeable static that could cause thread issues */
 static const u8 coolkey_static_cka_id[16] = {
 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 };
@@ -860,21 +861,21 @@ struct coolkey_error_codes_st {
 };
 
 static const struct coolkey_error_codes_st coolkey_error_codes[]= {
-	{SC_ERROR_UNKNOWN,                       "Reservered 0x9c00" },
+	{SC_ERROR_UNKNOWN,                       "Reserved 0x9c00" },
 	{SC_ERROR_NOT_ENOUGH_MEMORY,             "No memory left on card" },
 	{SC_ERROR_PIN_CODE_INCORRECT,            "Authentication failed" },
 	{SC_ERROR_NOT_ALLOWED,                   "Operation not allowed" },
-	{SC_ERROR_UNKNOWN,                       "Reservered 0x9c04" },
+	{SC_ERROR_UNKNOWN,                       "Reserved 0x9c04" },
 	{SC_ERROR_NO_CARD_SUPPORT,               "Unsupported feature" },
 	{SC_ERROR_SECURITY_STATUS_NOT_SATISFIED, "Not authorized" },
 	{SC_ERROR_DATA_OBJECT_NOT_FOUND,         "Object not found" },
 	{SC_ERROR_FILE_ALREADY_EXISTS,           "Object exists" },
 	{SC_ERROR_NO_CARD_SUPPORT,               "Incorrect Algorithm" },
-	{SC_ERROR_UNKNOWN,                       "Reservered 0x9c0a" },
+	{SC_ERROR_UNKNOWN,                       "Reserved 0x9c0a" },
 	{SC_ERROR_SM_INVALID_CHECKSUM,           "Signature invalid" },
 	{SC_ERROR_AUTH_METHOD_BLOCKED,           "Identity blocked" },
-	{SC_ERROR_UNKNOWN,                       "Reservered 0x9c0d" },
-	{SC_ERROR_UNKNOWN,                       "Reservered 0x9c0e" },
+	{SC_ERROR_UNKNOWN,                       "Reserved 0x9c0d" },
+	{SC_ERROR_UNKNOWN,                       "Reserved 0x9c0e" },
 	{SC_ERROR_INCORRECT_PARAMETERS,          "Invalid parameter" },
 	{SC_ERROR_INCORRECT_PARAMETERS,          "Incorrect P1" },
 	{SC_ERROR_INCORRECT_PARAMETERS,          "Incorrect P2" },
@@ -914,7 +915,7 @@ static int coolkey_check_sw(sc_card_t *card, unsigned int sw1, unsigned int sw2)
  * an internal 4096 byte buffer is used, and a copy is returned to the
  * caller. that need to be freed by the caller.
  *
- * modelled after a similiar function in card-piv.c. The coolkey version
+ * modelled after a similar function in card-piv.c. The coolkey version
  * adds the coolkey nonce to user authenticated operations.
  */
 
@@ -1128,13 +1129,13 @@ static int coolkey_read_object(sc_card_t *card, unsigned long object_id, size_t 
 	do {
 		ulong2bebytes(&params.offset[0], offset);
 		params.length = MIN(left, COOLKEY_MAX_CHUNK_SIZE);
-		len = left+2;
+		len = left;
 		r = coolkey_apdu_io(card, COOLKEY_CLASS, COOLKEY_INS_READ_OBJECT, 0, 0,
 			(u8 *)&params, sizeof(params), &out_ptr, &len, nonce, nonce_size);
 		if (r < 0) {
 			goto fail;
 		}
-		/* santity check to make sure we don't overflow left */
+		/* sanity check to make sure we don't overflow left */
 		if ((left < len) || (len == 0)) {
 			r = SC_ERROR_INTERNAL;
 			goto fail;
@@ -1195,7 +1196,7 @@ static int coolkey_read_binary(sc_card_t *card, unsigned int idx,
 {
 	coolkey_private_data_t * priv = COOLKEY_DATA(card);
 	int r = 0, len;
-	u8 *data = NULL;;
+	u8 *data = NULL;
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 	if (idx > priv->obj->length) {
@@ -1466,7 +1467,7 @@ coolkey_find_attribute(sc_card_t *card, sc_cardctl_coolkey_attribute_t *attribut
 	for (i=0; i < attribute_count; i++) {
 		size_t record_len = coolkey_get_attribute_record_len(attr, object_record_type, buf_len);
 		/* make sure we have the complete record */
-		if (buf_len < record_len) {
+		if (buf_len < record_len || record_len < 4) {
 				return SC_ERROR_CORRUPTED_DATA;
 		}
 		/* does the attribute match the one we are looking for */
@@ -1609,40 +1610,17 @@ static int coolkey_card_ctl(sc_card_t *card, unsigned long cmd, void *ptr)
 
 static int coolkey_get_challenge(sc_card_t *card, u8 *rnd, size_t len)
 {
-	size_t rbuflen = 0;
-	int r;
+	LOG_FUNC_CALLED(card->ctx);
 
-	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+	if (len > COOLKEY_MAX_CHUNK_SIZE)
+		len = COOLKEY_MAX_CHUNK_SIZE;
 
-	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-		 "challenge len=%"SC_FORMAT_LEN_SIZE_T"u", len);
+	LOG_TEST_RET(card->ctx,
+			coolkey_apdu_io(card, COOLKEY_CLASS, COOLKEY_INS_GET_RANDOM, 0, 0,
+				NULL, 0, &rnd, &len,  NULL, 0),
+			"Could not get challenge");
 
-	r = sc_lock(card);
-	if (r != SC_SUCCESS)
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
-
-	for(; len >= COOLKEY_MAX_CHUNK_SIZE; len -= COOLKEY_MAX_CHUNK_SIZE,
-										rnd += COOLKEY_MAX_CHUNK_SIZE) {
-		rbuflen = COOLKEY_MAX_CHUNK_SIZE;
-		r = coolkey_apdu_io(card, COOLKEY_CLASS, COOLKEY_INS_GET_RANDOM,
-			0, 0, NULL, 0, &rnd, &rbuflen,  NULL, 0);
-		if (r != COOLKEY_MAX_CHUNK_SIZE) {
-			len = 0;
-			break;
-		}
-	}
-	if (len) {
-		r = coolkey_apdu_io(card, COOLKEY_CLASS, COOLKEY_INS_GET_RANDOM,
-			0, 0, NULL, 0, &rnd, &len, NULL, 0);
-	}
-	sc_unlock(card);
-
-	if (r > 0) {
-		r= SC_SUCCESS;
-	}
-
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
-
+	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, (int) len);
 }
 
 static int coolkey_set_security_env(sc_card_t *card, const sc_security_env_t *env, int se_num)
@@ -1903,7 +1881,7 @@ static unsigned short coolkey_get_key_id(unsigned long object_id) {
 }
 
 /*
- * COOLKEY cards don't select objects in the applet, objects are selected by a paramter
+ * COOLKEY cards don't select objects in the applet, objects are selected by a parameter
  * to the APDU. We create paths for the object in which the path value is the object_id
  * and the path type is SC_PATH_SELECT_FILE_ID (so we could cache at the PKCS #15 level if
  * we wanted to.
@@ -1951,7 +1929,7 @@ static int coolkey_select_file(sc_card_t *card, const sc_path_t *in_path, sc_fil
 		*file_out = file;
 	}
 
-    return SC_SUCCESS;
+	return SC_SUCCESS;
 }
 
 static int coolkey_finish(sc_card_t *card)
@@ -2144,12 +2122,6 @@ static int coolkey_initialize(sc_card_t *card)
 	if (card->drv_data) {
 		return SC_SUCCESS;
 	}
-
-	/* Select a coolkey read the coolkey objects out */
-	r = coolkey_select_applet(card);
-	if (r < 0) {
-		return r;
-	}
 	sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE,"Coolkey Applet found");
 
 	priv = coolkey_new_private_data();
@@ -2161,6 +2133,13 @@ static int coolkey_initialize(sc_card_t *card)
 	if (r < 0) {
 		goto cleanup;
 	}
+
+	/* Select a coolkey read the coolkey objects out */
+	r = coolkey_select_applet(card);
+	if (r < 0) {
+		goto cleanup;
+	}
+
 	priv->protocol_version_major = life_cycle.protocol_version_major;
 	priv->protocol_version_minor = life_cycle.protocol_version_minor;
 	priv->pin_count = life_cycle.pin_count;
@@ -2211,6 +2190,14 @@ static int coolkey_initialize(sc_card_t *card)
 	/* if we didn't pull the cuid from the combined object, then grab it now */
 	if (!combined_processed) {
 		global_platform_cplc_data_t cplc_data;
+		/* select the card manager, because a card with applet only will have
+		   already selected the coolkey applet */
+
+		r = gp_select_card_manager(card);
+		if (r < 0) {
+			goto cleanup;
+		}
+
 		r = coolkey_get_cplc_data(card, &cplc_data);
 		if (r < 0) {
 			goto cleanup;
@@ -2238,13 +2225,32 @@ cleanup:
 static int coolkey_match_card(sc_card_t *card)
 {
 	int r;
+
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 	/* Since we send an APDU, the card's logout function may be called...
 	 * however it may be in dirty memory */
 	card->ops->logout = NULL;
 
 	r = coolkey_select_applet(card);
-	return (r >= SC_SUCCESS);
+	if (r == SC_SUCCESS) {
+		sc_apdu_t apdu;
+
+		/* The GET STATUS INS with P1 = 1 returns invalid instruction (0x6D00)
+		 * on Coolkey applet (reserved for GetMemory function),
+		 * while incorrect P1 (0x9C10) on Muscle applets
+		 */
+		sc_format_apdu(card, &apdu, SC_APDU_CASE_1, COOLKEY_INS_GET_STATUS, 0x01, 0x00);
+		apdu.cla = COOLKEY_CLASS;
+		apdu.le = 0x00;
+		apdu.resplen = 0;
+		apdu.resp = NULL;
+		r = sc_transmit_apdu(card, &apdu);
+		if (r == SC_SUCCESS && apdu.sw1 == 0x6d && apdu.sw2 == 0x00) {
+			return 1;
+		}
+		return 0;
+	}
+	return 0;
 }
 
 
@@ -2259,7 +2265,7 @@ static int coolkey_init(sc_card_t *card)
 
 	r = coolkey_initialize(card);
 	if (r < 0) {
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INVALID_CARD);
 	}
 
 	card->type = SC_CARD_TYPE_COOLKEY_GENERIC;
@@ -2267,7 +2273,7 @@ static int coolkey_init(sc_card_t *card)
 	/* set Token Major/minor version */
 	flags = SC_ALGORITHM_RSA_RAW;
 
-	_sc_card_add_rsa_alg(card, 1024, flags, 0); /* manditory */
+	_sc_card_add_rsa_alg(card, 1024, flags, 0); /* mandatory */
 	_sc_card_add_rsa_alg(card, 2048, flags, 0); /* optional */
 	_sc_card_add_rsa_alg(card, 3072, flags, 0); /* optional */
 
@@ -2286,6 +2292,7 @@ static int coolkey_init(sc_card_t *card)
 
 	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_SUCCESS);
 }
+
 
 static int
 coolkey_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data, int *tries_left)
@@ -2342,6 +2349,7 @@ coolkey_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data, int *tries_left)
 	return r;
 }
 
+
 static int
 coolkey_logout(sc_card_t *card)
 {
@@ -2356,6 +2364,20 @@ coolkey_logout(sc_card_t *card)
 	memset(priv->nonce, 0, sizeof(priv->nonce));
 	priv->nonce_valid = 0;
 	return SC_SUCCESS;
+}
+
+
+static int coolkey_card_reader_lock_obtained(sc_card_t *card, int was_reset)
+{
+	int r = SC_SUCCESS;
+
+	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	if (was_reset > 0) {
+		r = coolkey_select_applet(card);
+	}
+
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 static struct sc_card_operations coolkey_ops;
@@ -2388,6 +2410,7 @@ static struct sc_card_driver * sc_get_driver(void)
 	coolkey_ops.check_sw = coolkey_check_sw;
 	coolkey_ops.pin_cmd = coolkey_pin_cmd;
 	coolkey_ops.logout = coolkey_logout;
+	coolkey_ops.card_reader_lock_obtained = coolkey_card_reader_lock_obtained;
 
 	return &coolkey_drv;
 }

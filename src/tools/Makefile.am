@@ -1,6 +1,13 @@
 include $(top_srcdir)/win32/ltrc.inc
 
+if ENABLE_ZLIB
+VDFORMAT=XML
+else
+VDFORMAT=GZIP
+endif
+
 do_subst = $(SED) \
+	   -e 's,[@]bindir[@],$(bindir),g' \
 	   -e 's,[@]CVCDIR[@],$(CVCDIR),g' \
 	   -e 's,[@]PACKAGE[@],$(PACKAGE),g' \
 	   -e 's,[@]PACKAGE_BUGREPORT[@],$(PACKAGE_BUGREPORT),g' \
@@ -9,43 +16,37 @@ do_subst = $(SED) \
 	   -e 's,[@]PACKAGE_URL[@],$(PACKAGE_URL),g' \
 	   -e 's,[@]PACKAGE_SUMMARY[@],$(PACKAGE_SUMMARY),g' \
 	   -e 's,[@]PACKAGE_VERSION[@],"$(PACKAGE_VERSION)",g' \
+	   -e 's,[@]VDFORMAT[@],$(VDFORMAT),g' \
 	   -e 's,[@]X509DIR[@],$(X509DIR),g'
 
+EGK_TOOL_BUILT_SOURCES = egk-tool-cmdline.h egk-tool-cmdline.c
 NPA_TOOL_BUILT_SOURCES = npa-tool-cmdline.h npa-tool-cmdline.c
+OPENSC_NOTIFY_BUILT_SOURCES = opensc-notify-cmdline.h opensc-notify-cmdline.c
+OPENSC_ASN1_BUILT_SOURCES = opensc-asn1-cmdline.h opensc-asn1-cmdline.c
 
-MAINTAINERCLEANFILES = $(srcdir)/Makefile.in $(srcdir)/versioninfo-tools.rc
-EXTRA_DIST = Makefile.mak versioninfo-tools.rc.in npa-tool.ggo.in
+MAINTAINERCLEANFILES = $(srcdir)/Makefile.in $(srcdir)/versioninfo-tools.rc $(srcdir)/versioninfo-opensc-notify.rc
+EXTRA_DIST = Makefile.mak versioninfo-tools.rc.in versioninfo-opensc-notify.rc.in npa-tool.ggo.in opensc-notify.ggo.in egk-tool.ggo.in opensc-asn1.ggo.in org.opensc.notify.desktop.in exe.manifest
 
 noinst_HEADERS = util.h fread_to_eof.h
 noinst_PROGRAMS = sceac-example
-bin_PROGRAMS = opensc-tool opensc-explorer pkcs15-tool pkcs15-crypt \
-	pkcs11-tool cardos-tool eidenv openpgp-tool iasecc-tool
+bin_PROGRAMS = opensc-tool opensc-explorer opensc-notify \
+	pkcs15-tool pkcs15-crypt pkcs11-tool \
+	cardos-tool eidenv openpgp-tool iasecc-tool egk-tool opensc-asn1
 if ENABLE_OPENSSL
 bin_PROGRAMS += cryptoflex-tool pkcs15-init netkey-tool piv-tool \
 	westcos-tool sc-hsm-tool dnie-tool gids-tool npa-tool
 endif
 
-if ENABLE_MAN
-dist_man1_MANS = npa-tool.1
-endif
-if ENABLE_NPATOOL
-bin_PROGRAMS += npa-tool
-
-if ENABLE_MAN
-dist_man1_MANS = $(abs_builddir)/npa-tool.1
-endif
-endif
-
 # compile with $(PTHREAD_CFLAGS) to allow debugging with gdb
 AM_CFLAGS = $(OPTIONAL_OPENSSL_CFLAGS) $(OPTIONAL_READLINE_CFLAGS) $(PTHREAD_CFLAGS)
-AM_CPPFLAGS = -I$(top_srcdir)/src
+AM_CPPFLAGS = -I$(top_srcdir)/src -D'DEFAULT_PKCS11_PROVIDER="$(DEFAULT_PKCS11_PROVIDER)"'
 LIBS = \
 	$(top_builddir)/src/libopensc/libopensc.la \
 	$(top_builddir)/src/common/libscdl.la \
 	$(top_builddir)/src/common/libcompat.la
 
 sceac_example_SOURCES = sceac-example.c
-sceac_example_LDADD = $(top_builddir)/src/sm/libsmeac.la $(top_builddir)/src/libopensc/libopensc.la $(OPENPACE_LIBS)
+sceac_example_LDADD = $(top_builddir)/src/libopensc/libopensc.la $(OPENPACE_LIBS)
 sceac_example_CFLAGS = -I$(top_srcdir)/src $(OPENPACE_CFLAGS)
 
 opensc_tool_SOURCES = opensc-tool.c util.c
@@ -85,7 +86,6 @@ gids_tool_LDADD = $(OPTIONAL_OPENSSL_LIBS)
 
 npa_tool_SOURCES = npa-tool.c fread_to_eof.c $(NPA_TOOL_BUILT_SOURCES)
 npa_tool_LDADD = $(top_builddir)/src/libopensc/libopensc.la \
-				 $(top_builddir)/src/sm/libsmeac.la \
 				 $(OPENPACE_LIBS)
 npa_tool_CFLAGS = -I$(top_srcdir)/src $(OPENPACE_CFLAGS) $(OPENSSL_CFLAGS)
 
@@ -99,14 +99,56 @@ $(NPA_TOOL_BUILT_SOURCES):
 $(abs_builddir)/npa-tool.ggo: npa-tool.ggo.in 
 	$(do_subst) < $(abs_srcdir)/npa-tool.ggo.in > $@
 
-# We only want npa-tool.1 to be generated when it has explicitly been removed.
-npa-tool.1:
-	$(MAKE) npa-tool$(EXEEXT)
-	$(HELP2MAN) \
-		--output=$@ \
-		--no-info \
-		--source='$(PACKAGE_STRING)' \
-		$(builddir)/npa-tool$(EXEEXT)
+opensc_notify_SOURCES = opensc-notify.c $(OPENSC_NOTIFY_BUILT_SOURCES)
+opensc_notify_LDADD = $(top_builddir)/src/libopensc/libopensc.la $(OPTIONAL_NOTIFY_LIBS)
+opensc_notify_CFLAGS = -I$(top_srcdir)/src $(OPTIONAL_NOTIFY_CFLAGS)
+opensc_notify_CFLAGS += -Wno-unused-but-set-variable
+if HAVE_UNKNOWN_WARNING_OPTION
+opensc_notify_CFLAGS += -Wno-unknown-warning-option
+endif
+
+opensc-notify.c: $(abs_builddir)/opensc-notify.ggo $(OPENSC_NOTIFY_BUILT_SOURCES)
+
+# We only want *cmdline* to be generated when they have explicitly been removed.
+$(OPENSC_NOTIFY_BUILT_SOURCES):
+	$(MAKE) $(abs_builddir)/opensc-notify.ggo
+	$(GENGETOPT) --include-getopt --file-name=opensc-notify-cmdline --output-dir=$(builddir) < $(abs_builddir)/opensc-notify.ggo
+
+$(abs_builddir)/opensc-notify.ggo: opensc-notify.ggo.in 
+	$(do_subst) < $(abs_srcdir)/opensc-notify.ggo.in > $@
+
+egk_tool_SOURCES = egk-tool.c $(EGK_TOOL_BUILT_SOURCES)
+egk_tool_LDADD = $(top_builddir)/src/libopensc/libopensc.la $(OPTIONAL_ZLIB_LIBS)
+egk_tool_CFLAGS = -I$(top_srcdir)/src $(OPTIONAL_ZLIB_CFLAGS)
+egk_tool_CFLAGS += -Wno-unused-but-set-variable
+if HAVE_UNKNOWN_WARNING_OPTION
+egk_tool_CFLAGS += -Wno-unknown-warning-option
+endif
+
+egk-tool.c: $(abs_builddir)/egk-tool.ggo $(EGK_TOOL_BUILT_SOURCES)
+
+# We only want *cmdline* to be generated when they have explicitly been removed.
+$(EGK_TOOL_BUILT_SOURCES):
+	$(MAKE) $(abs_builddir)/egk-tool.ggo
+	$(GENGETOPT) --include-getopt --file-name=egk-tool-cmdline --output-dir=$(builddir) < $(abs_builddir)/egk-tool.ggo
+
+$(abs_builddir)/egk-tool.ggo: egk-tool.ggo.in 
+	$(do_subst) < $(abs_srcdir)/egk-tool.ggo.in > $@
+
+opensc_asn1_SOURCES = opensc-asn1.c fread_to_eof.c $(OPENSC_ASN1_BUILT_SOURCES)
+opensc_asn1_LDADD = $(top_builddir)/src/libopensc/libopensc.la $(OPTIONAL_ZLIB_LIBS)
+opensc_asn1_CFLAGS = -I$(top_srcdir)/src $(OPTIONAL_ZLIB_CFLAGS)
+opensc_asn1_CFLAGS += -Wno-unused-but-set-variable -Wno-unknown-warning-option
+
+opensc-asn1.c: $(abs_builddir)/opensc-asn1.ggo $(OPENSC_ASN1_BUILT_SOURCES)
+
+# We only want *cmdline* to be generated when they have explicitly been removed.
+$(OPENSC_ASN1_BUILT_SOURCES):
+	$(MAKE) $(abs_builddir)/opensc-asn1.ggo
+	$(GENGETOPT) --include-getopt --file-name=opensc-asn1-cmdline --output-dir=$(builddir) < $(abs_builddir)/opensc-asn1.ggo --unamed-opts
+
+$(abs_builddir)/opensc-asn1.ggo: opensc-asn1.ggo.in 
+	$(do_subst) < $(abs_srcdir)/opensc-asn1.ggo.in > $@
 
 if WIN32
 opensc_tool_SOURCES += versioninfo-tools.rc
@@ -125,7 +167,14 @@ openpgp_tool_SOURCES += versioninfo-tools.rc
 iasecc_tool_SOURCES += versioninfo-tools.rc
 sc_hsm_tool_SOURCES += versioninfo-tools.rc
 gids_tool_SOURCES += versioninfo-tools.rc
+opensc_notify_SOURCES += versioninfo-opensc-notify.rc
 endif
 
+applicationsdir = $(datadir)/applications
+applications_DATA = org.opensc.notify.desktop
+
+org.opensc.notify.desktop: org.opensc.notify.desktop.in
+	$(do_subst) < $(abs_srcdir)/org.opensc.notify.desktop.in > $@
+
 clean-local:
-	rm -f $(abs_builddir)/npa-tool.ggo
+	rm -f $(abs_builddir)/npa-tool.ggo $(abs_builddir)/opensc-notify.ggo $(abs_builddir)/opensc-asn1.ggo $(abs_builddir)/egk-tool.ggo org.opensc.notify.desktop

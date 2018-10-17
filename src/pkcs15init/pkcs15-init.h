@@ -28,6 +28,7 @@ extern "C" {
 #include "libopensc/pkcs15.h"
 
 #define DEFAULT_PRIVATE_KEY_LABEL "Private Key"
+#define DEFAULT_SECRET_KEY_LABEL  "Secret Key"
 
 #define SC_PKCS15INIT_X509_DIGITAL_SIGNATURE     0x0080UL
 #define SC_PKCS15INIT_X509_NON_REPUDIATION       0x0040UL
@@ -271,9 +272,10 @@ struct sc_pkcs15init_skeyargs {
 	unsigned long           usage;
 	unsigned int		flags;
 	unsigned int		access_flags;
+	unsigned long		algorithm; /* User requested algorithm */
 	unsigned long		value_len; /* User requested length */
 
-	struct sc_pkcs15_der	data_value; /* Wrong name: is not DER encoded */
+	struct sc_pkcs15_skey	key;
 };
 
 struct sc_pkcs15init_certargs {
@@ -288,6 +290,7 @@ struct sc_pkcs15init_certargs {
 
 #define P15_ATTR_TYPE_LABEL	0
 #define P15_ATTR_TYPE_ID	1
+#define P15_ATTR_TYPE_VALUE	2
 
 
 extern struct	sc_pkcs15_object *sc_pkcs15init_new_object(int, const char *,
@@ -316,6 +319,10 @@ extern int	sc_pkcs15init_generate_key(struct sc_pkcs15_card *,
 				struct sc_pkcs15init_keygen_args *,
 				unsigned int keybits,
 				struct sc_pkcs15_object **);
+extern int	sc_pkcs15init_generate_secret_key(struct sc_pkcs15_card *,
+				struct sc_profile *,
+				struct sc_pkcs15init_skeyargs *,
+				struct sc_pkcs15_object **);
 extern int	sc_pkcs15init_store_private_key(struct sc_pkcs15_card *,
 				struct sc_profile *,
 				struct sc_pkcs15init_prkeyargs *,
@@ -328,6 +335,10 @@ extern int	sc_pkcs15init_store_split_key(struct sc_pkcs15_card *,
 extern int	sc_pkcs15init_store_public_key(struct sc_pkcs15_card *,
 				struct sc_profile *,
 				struct sc_pkcs15init_pubkeyargs *,
+				struct sc_pkcs15_object **);
+extern int	sc_pkcs15init_store_secret_key(struct sc_pkcs15_card *,
+				struct sc_profile *,
+				struct sc_pkcs15init_skeyargs *,
 				struct sc_pkcs15_object **);
 extern int	sc_pkcs15init_store_certificate(struct sc_pkcs15_card *,
 				struct sc_profile *,
@@ -357,7 +368,7 @@ extern int	sc_pkcs15init_delete_object(struct sc_pkcs15_card *,
 				struct sc_profile *,
 				struct sc_pkcs15_object *);
 /* Replace an existing cert with a new one, which is assumed to be
- * compatible with the correcsponding private key (e.g. the old and
+ * compatible with the corresponding private key (e.g. the old and
  * new cert should have the same public key).
  */
 extern int	sc_pkcs15init_update_certificate(struct sc_pkcs15_card *,

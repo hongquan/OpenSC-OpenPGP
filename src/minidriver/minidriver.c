@@ -32,9 +32,13 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include <windows.h>
+#include <Commctrl.h>
+#include <timeapi.h>
+#include "cardmod.h"
 
 #include "common/compat_strlcpy.h"
 #include "libopensc/asn1.h"
@@ -44,6 +48,9 @@
 #include "libopensc/log.h"
 #include "libopensc/internal.h"
 #include "libopensc/aux-data.h"
+#include "ui/notify.h"
+#include "ui/strings.h"
+#include "ui/wchar_from_char_str.h"
 #include "pkcs15init/pkcs15-init.h"
 
 #ifdef ENABLE_OPENSSL
@@ -71,11 +78,14 @@ HINSTANCE g_inst;
 #define MD_MAX_KEY_CONTAINERS 12
 #define MD_CARDID_SIZE 16
 
-#define MD_UTC_TIME_LENGTH_MAX	16
-#define MD_CARDCF_LENGTH	(sizeof(CARD_CACHE_FILE_FORMAT))
+#define MD_ROLE_USER_SIGN (ROLE_ADMIN + 1)
+/*
+ * must be higher than MD_ROLE_USER_SIGN and
+ * less than or equal MAX_PINS
+ */
+#define MD_MAX_PINS MAX_PINS
 
-#define MD_DATA_APPLICAITON_NAME "CSP"
-#define MD_DATA_DEFAULT_CONT_LABEL "Default Key Container"
+#define MD_CARDCF_LENGTH	(sizeof(CARD_CACHE_FILE_FORMAT))
 
 #define MD_KEY_USAGE_KEYEXCHANGE		\
 	SC_PKCS15INIT_X509_KEY_ENCIPHERMENT	| \
@@ -111,10 +121,9 @@ HINSTANCE g_inst;
 #endif
 
  /* defined twice: in versioninfo-minidriver.rc.in and in minidriver.c */
-#define IDD_PINPAD      101
-#define IDI_LOGO        102
-#define IDC_PINPAD_TEXT 1001
-#define IDC_PINPAD_ICON 1000
+#define IDI_SMARTCARD   102
+
+#define SUBKEY_ENABLE_CANCEL "Software\\OpenSC Project\\OpenSC\\md_pinpad_dlg_enable_cancel"
 
 /* magic to determine previous pinpad authentication */
 #define MAGIC_SESSION_PIN "opensc-minidriver"
@@ -172,7 +181,9 @@ struct md_guid_conversion md_static_conversions[MD_MAX_CONVERSIONS] = {0};
 
 typedef struct _VENDOR_SPECIFIC
 {
-	struct sc_pkcs15_object *obj_user_pin, *obj_sopin;
+	BOOL initialized;
+
+	struct sc_pkcs15_object *pin_objs[MD_MAX_PINS];
 
 	struct sc_context *ctx;
 	struct sc_reader *reader;
@@ -194,60 +205,17 @@ typedef struct _VENDOR_SPECIFIC
 	/* these will be used to store intermediate dh agreements results */
 	struct md_dh_agreement* dh_agreements;
 	BYTE allocatedAgreements;
-}VENDOR_SPECIFIC;
 
-/*
- * Windows (ex. Vista) may access the card from more than one thread.
- * The following data type and static data is an attempt to resolve
- * some of the encountered multi-thread issues of OpenSC
- * on the minidriver side.
- *
- * TODO: resolve multi-thread issues on the OpenSC side
- */
-#define MD_STATIC_FLAG_READ_ONLY			1
-#define MD_STATIC_FLAG_SUPPORTS_X509_ENROLLMENT		2
-#define MD_STATIC_FLAG_CONTEXT_DELETED			4
-#define MD_STATIC_FLAG_GUID_AS_ID			8
-#define MD_STATIC_FLAG_GUID_AS_LABEL			16
-#define MD_STATIC_FLAG_CREATE_CONTAINER_KEY_IMPORT	32
-#define MD_STATIC_FLAG_CREATE_CONTAINER_KEY_GEN		64
-#define MD_STATIC_FLAG_IGNORE_PIN_LENGTH		128
-
-#define MD_STATIC_PROCESS_ATTACHED		0xA11AC4EDL
-struct md_opensc_static_data {
-	unsigned flags, flags_checked;
-	unsigned long attach_check;
-};
-static struct md_opensc_static_data md_static_data;
-
-
-#define C_ASN1_MD_CONTAINER_ATTRS_SIZE 7
-static const struct sc_asn1_entry c_asn1_md_container_attrs[C_ASN1_MD_CONTAINER_ATTRS_SIZE] = {
-	{ "index", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, 0, NULL, NULL },
-	{ "id", SC_ASN1_PKCS15_ID, SC_ASN1_TAG_OCTET_STRING, SC_ASN1_EMPTY_ALLOWED, NULL, NULL },
-	{ "guid", SC_ASN1_UTF8STRING, SC_ASN1_TAG_UTF8STRING, SC_ASN1_EMPTY_ALLOWED, NULL, NULL },
-	{ "flags", SC_ASN1_BIT_FIELD, SC_ASN1_TAG_BIT_STRING, 0, NULL, NULL },
-	{ "sizeKeyExchange", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, 0, NULL, NULL },
-	{ "sizeSign", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, 0, NULL, NULL },
-	{ NULL, 0, 0, 0, NULL, NULL }
-};
-
-#define C_ASN1_MD_CONTAINER_SIZE 2
-static const struct sc_asn1_entry c_asn1_md_container[C_ASN1_MD_CONTAINER_SIZE] = {
-	{ "mdContainer", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, 0, NULL, NULL },
-	{ NULL, 0, 0, 0, NULL, NULL }
-};
+	CRITICAL_SECTION hScard_lock;
+} VENDOR_SPECIFIC;
 
 static DWORD md_translate_OpenSC_to_Windows_error(int OpenSCerror,
 						  DWORD dwDefaulCode);
-static int associate_card(PCARD_DATA pCardData);
-static int disassociate_card(PCARD_DATA pCardData);
+static DWORD associate_card(PCARD_DATA pCardData);
+static void disassociate_card(PCARD_DATA pCardData);
 static DWORD md_pkcs15_delete_object(PCARD_DATA pCardData, struct sc_pkcs15_object *obj);
 static DWORD md_fs_init(PCARD_DATA pCardData);
-
-#if defined(_MSC_VER) && _MSC_VER < 1900
-#define snprintf _snprintf
-#endif
+static void md_fs_finalize(PCARD_DATA pCardData);
 
 #if defined(__GNUC__)
 static void logprintf(PCARD_DATA pCardData, int level, const char* format, ...)
@@ -258,11 +226,11 @@ static void logprintf(PCARD_DATA pCardData, int level, _Printf_format_string_ co
 {
 	va_list arg;
 	VENDOR_SPECIFIC *vs;
-/* Use a simplied log to get all messages including messages
+/* Use a simplified log to get all messages including messages
  * before opensc is loaded. The file must be modifiable by all
  * users as we maybe called under lsa or user. Note data from
  * multiple process and threads may get intermingled.
- * flush to get last message before ann crash
+ * flush to get last message before any crash
  * close so as the file is not left open during any wait.
  */
 	DWORD md_debug = 0;
@@ -330,21 +298,113 @@ static void loghex(PCARD_DATA pCardData, int level, PBYTE data, size_t len)
 		logprintf(pCardData, level, " %04X  %s\n", a, line);
 }
 
-/*
- * check if the card has been removed, or the
- * caller has changed the handles.
- * if so, then free up all previous card info
- * and reestablish
- */
-static int
-check_reader_status(PCARD_DATA pCardData)
+static DWORD reinit_card(PCARD_DATA pCardData)
 {
-	int r = SCARD_S_SUCCESS;
+	VENDOR_SPECIFIC *vs;
+	DWORD r;
+
+	if (!pCardData)
+		return SCARD_E_INVALID_PARAMETER;
+
+	vs = (VENDOR_SPECIFIC *)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
+	logprintf(pCardData, 2, "trying to reinit card\n");
+
+	if (vs->initialized) {
+		disassociate_card(pCardData);
+		md_fs_finalize(pCardData);
+	}
+
+	r = associate_card(pCardData);
+	if (r != SCARD_S_SUCCESS)
+		return r;
+
+	r = md_fs_init(pCardData);
+	if (r != SCARD_S_SUCCESS) {
+		logprintf(pCardData, 1,
+			  "reinit_card md_fs_init failed, r = 0x%lX\n",
+			  (unsigned long)r);
+		disassociate_card(pCardData);
+		return r;
+	}
+
+	return SCARD_S_SUCCESS;
+}
+
+static BOOL lock(PCARD_DATA pCardData)
+{
+	if (pCardData) {
+		VENDOR_SPECIFIC *vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+		if (vs) {
+			EnterCriticalSection(&vs->hScard_lock);
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+static void unlock(PCARD_DATA pCardData)
+{
+	if (pCardData) {
+		VENDOR_SPECIFIC *vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+		if (vs) {
+			LeaveCriticalSection(&vs->hScard_lock);
+		}
+	}
+}
+
+static DWORD reinit_card_for(PCARD_DATA pCardData, const char *name)
+{
+	DWORD r;
+
+	r = reinit_card(pCardData);
+	if (r != SCARD_S_SUCCESS)
+		logprintf(pCardData, 1,
+			  "%s was called, but unable to initialize card, r = %u\n",
+			  name, (unsigned int)r);
+
+	return r;
+}
+
+static DWORD check_card_status(PCARD_DATA pCardData, const char *name)
+{
+	VENDOR_SPECIFIC *vs;
+
+	if (!pCardData)
+		return SCARD_E_INVALID_PARAMETER;
+
+	vs = (VENDOR_SPECIFIC *)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
+	if (vs->initialized)
+		return SCARD_S_SUCCESS;
+
+	return reinit_card_for(pCardData, name);
+}
+
+/*
+ * check if the card is OK, has been removed, or the
+ * caller has changed the handles.
+ * if so, then try to reinit card
+ */
+static DWORD
+check_card_reader_status(PCARD_DATA pCardData, const char *name)
+{
 	VENDOR_SPECIFIC *vs = NULL;
+	DWORD dwRet;
+	int r;
 
 	logprintf(pCardData, 4, "check_reader_status\n");
 	if(!pCardData)
 		return SCARD_E_INVALID_PARAMETER;
+
+	dwRet = check_card_status(pCardData, name);
+	if (dwRet != SCARD_S_SUCCESS)
+		return dwRet;
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
 	if(!vs)
@@ -358,34 +418,36 @@ check_reader_status(PCARD_DATA pCardData)
 		logprintf(pCardData, 1, "HANDLES CHANGED from 0x%08X 0x%08X\n",
 			  (unsigned int)vs->hSCardCtx,
 			  (unsigned int)vs->hScard);
-
-		/* Basically a mini AcquireContext */
-		r = disassociate_card(pCardData);
-		logprintf(pCardData, 1, "disassociate_card r = 0x%08X\n", r);
-		r = associate_card(pCardData); /* need to check return codes */
-		if (r != SCARD_S_SUCCESS) 
-			return r;
-		logprintf(pCardData, 1, "associate_card r = 0x%08X\n", r);
-		/* Rebuild 'soft' fs - in case changed */
-		r = md_fs_init(pCardData);
-		logprintf(pCardData, 1, "md_fs_init r = 0x%08X\n", r);
-	}
-	else if (vs->reader) {
-		/* This should always work, as BaseCSP should be checking for removal too */
-		r = sc_detect_card_presence(vs->reader);
-		logprintf(pCardData, 2,
-			  "check_reader_status r=%d flags 0x%08X\n", r,
-			  (unsigned int)vs->reader->flags);
+		return reinit_card_for(pCardData, name);
 	}
 
-	return r;
+	/* This should always work, as BaseCSP should be checking for removal too */
+	r = sc_detect_card_presence(vs->reader);
+	logprintf(pCardData, 2,
+		  "check_reader_status r=%d flags 0x%08X\n", r,
+		  (unsigned int)vs->reader->flags);
+	if (r < 0)
+		return md_translate_OpenSC_to_Windows_error(r,
+							    SCARD_F_INTERNAL_ERROR);
+
+	if (!(r & SC_READER_CARD_PRESENT)) {
+		/*
+		 * if there is really no card present it may not make sense to
+		 * try initializing the card but since it won't hurt let's try
+		 * it anyway for completeness
+		 */
+		logprintf(pCardData, 1, "no card present? trying to reinit\n");
+		return reinit_card_for(pCardData, name);
+	}
+
+	return SCARD_S_SUCCESS;
 }
 
 static DWORD
 md_get_pin_by_role(PCARD_DATA pCardData, PIN_ID role, struct sc_pkcs15_object **ret_obj)
 {
 	VENDOR_SPECIFIC *vs;
-	int rv = SC_SUCCESS;
+	int rv;
 
 	if (!pCardData)
 		return SCARD_E_INVALID_PARAMETER;
@@ -394,46 +456,174 @@ md_get_pin_by_role(PCARD_DATA pCardData, PIN_ID role, struct sc_pkcs15_object **
 	if (!ret_obj)
 		return SCARD_E_INVALID_PARAMETER;
 
-	*ret_obj = NULL;
-
-	if (role == ROLE_USER)   {
-		if (!vs->obj_user_pin)   {
-			/* Get 'global' User PIN; if no, get the 'local' one */
-			rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_PIN_GLOBAL,
-					SC_PKCS15_PIN_TYPE_FLAGS_MASK, NULL, &vs->obj_user_pin);
-			if (rv)
-				rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_PIN_LOCAL,
-						SC_PKCS15_PIN_TYPE_FLAGS_MASK, NULL, &vs->obj_user_pin);
-		}
-
-		*ret_obj = vs->obj_user_pin;
+	/* please keep me in sync with _get_auth_object_by_name() in pkcs11/framework-pkcs15.c */
+	if (role == ROLE_USER) {
+		/* Get 'global' User PIN; if no, get the 'local' one */
+		rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_PIN_GLOBAL,
+						 SC_PKCS15_PIN_TYPE_FLAGS_MASK, NULL, ret_obj);
+		if (rv)
+			rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_PIN_LOCAL,
+							 SC_PKCS15_PIN_TYPE_FLAGS_MASK, NULL, ret_obj);
 	}
-	else if (role == ROLE_ADMIN)  {
-		/* Get SO PIN; if no, get the 'global' PUK; if no get the 'local' one  */
-		if (!vs->obj_sopin)   {
-			rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_SOPIN,
-					SC_PKCS15_PIN_TYPE_FLAGS_SOPIN, NULL, &vs->obj_sopin);
-			if (rv)
-				rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_PUK_GLOBAL,
-						SC_PKCS15_PIN_TYPE_FLAGS_MASK, NULL, &vs->obj_sopin);
-			if (rv)
-				rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_PUK_LOCAL,
-						SC_PKCS15_PIN_TYPE_FLAGS_MASK, NULL, &vs->obj_sopin);
-		}
+	else if (role == MD_ROLE_USER_SIGN) {
+		int idx = 0;
 
-		*ret_obj = vs->obj_sopin;
+		/* Get the 'global' user PIN */
+		rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_PIN_GLOBAL,
+						 SC_PKCS15_PIN_TYPE_FLAGS_MASK, NULL, ret_obj);
+		if (!rv) {
+			/* Global (user) PIN exists, get the local one -- sign PIN */
+			rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_PIN_LOCAL,
+							 SC_PKCS15_PIN_TYPE_FLAGS_MASK, NULL, ret_obj);
+		}
+		else {
+			/* No global PIN, try to get first local one -- user PIN */
+			rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_PIN_LOCAL,
+							 SC_PKCS15_PIN_TYPE_FLAGS_MASK, &idx, ret_obj);
+			if (!rv) {
+				/* User PIN is local, try to get the second local -- sign PIN */
+				idx++;
+				rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_PIN_LOCAL,
+								 SC_PKCS15_PIN_TYPE_FLAGS_MASK, &idx, ret_obj);
+			}
+		}
+	}
+	else if (role == ROLE_ADMIN) {
+		/* Get SO PIN; if no, get the 'global' PUK; if no get the 'local' one  */
+		rv = sc_pkcs15_find_so_pin(vs->p15card, ret_obj);
+		if (rv)
+			rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_PUK_GLOBAL,
+							 SC_PKCS15_PIN_TYPE_FLAGS_MASK, NULL, ret_obj);
+		if (rv)
+			rv = sc_pkcs15_find_pin_by_flags(vs->p15card, SC_PKCS15_PIN_TYPE_FLAGS_PUK_LOCAL,
+							 SC_PKCS15_PIN_TYPE_FLAGS_MASK, NULL, ret_obj);
 	}
 	else   {
-		logprintf(pCardData, 2, "cannot get PIN object: unsupported role\n");
+		logprintf(pCardData, 2,
+			  "cannot get PIN object: unsupported role %u\n",
+			  (unsigned int)role);
 		return SCARD_E_UNSUPPORTED_FEATURE;
 	}
 
-	return (rv == SC_SUCCESS) ? SCARD_S_SUCCESS : SCARD_E_UNSUPPORTED_FEATURE;
+	if (rv)
+		return SCARD_E_UNSUPPORTED_FEATURE;
+
+	if (*ret_obj)
+		logprintf(pCardData, 7, "Returning PIN '%.*s' for role %u\n",
+			  (int) sizeof (*ret_obj)->label, (*ret_obj)->label,
+			  (unsigned int)role);
+
+	return SCARD_S_SUCCESS;
+}
+
+static const char *
+md_get_config_str(PCARD_DATA pCardData, enum ui_str id)
+{
+	VENDOR_SPECIFIC *vs;
+	const char *ret = NULL;
+
+	if (!pCardData)
+		return ret;
+
+	vs = (VENDOR_SPECIFIC*) pCardData->pvVendorSpecific;
+	if (vs->ctx && vs->reader) {
+		const char *preferred_language = NULL;
+		struct sc_atr atr;
+		atr.len = pCardData->cbAtr;
+		memcpy(atr.value, pCardData->pbAtr, atr.len);
+		if (vs->p15card && vs->p15card->tokeninfo
+				&& vs->p15card->tokeninfo->preferred_language) {
+			preferred_language = vs->p15card->tokeninfo->preferred_language;
+		}
+		ret = ui_get_str(vs->ctx, &atr, vs->p15card, id);
+	}
+
+	return ret;
+}
+
+
+static HICON
+md_get_config_icon(PCARD_DATA pCardData, char *flag_name, HICON ret_default)
+{
+	VENDOR_SPECIFIC *vs;
+	HICON ret = ret_default;
+
+	if (!pCardData)
+		return ret;
+
+	logprintf(pCardData, 2, "Get '%s' option\n", flag_name);
+
+	vs = (VENDOR_SPECIFIC*) pCardData->pvVendorSpecific;
+	if (vs->ctx && vs->reader)   {
+		struct sc_atr atr;
+		scconf_block *atrblock;
+		atr.len = pCardData->cbAtr;
+		memcpy(atr.value, pCardData->pbAtr, atr.len);
+		atrblock = _sc_match_atr_block(vs->ctx, NULL, &atr);
+		logprintf(pCardData, 2, "Match ATR:\n");
+		loghex(pCardData, 3, atr.value, atr.len);
+
+		if (atrblock) {
+			const char *filename = scconf_get_str(atrblock, flag_name, NULL);
+			if (filename) {
+				ret = (HICON) LoadImage(g_inst, filename, IMAGE_ICON, 0, 0,
+						LR_LOADFROMFILE|LR_DEFAULTSIZE|LR_SHARED);
+			}
+			if (!ret)
+				ret = ret_default;
+		}
+	}
+
+
+	return ret;
+}
+
+
+static HICON
+md_get_pinpad_dlg_icon(PCARD_DATA pCardData)
+{
+	return md_get_config_icon(pCardData, "md_pinpad_dlg_icon", NULL);
+}
+
+
+static int
+md_get_config_int(PCARD_DATA pCardData, char *flag_name, int ret_default)
+{
+	VENDOR_SPECIFIC *vs;
+	int ret = ret_default;
+
+	if (!pCardData)
+		return ret;
+
+	logprintf(pCardData, 2, "Get '%s' option\n", flag_name);
+
+	vs = (VENDOR_SPECIFIC*) pCardData->pvVendorSpecific;
+	if (vs->ctx && vs->reader)   {
+		struct sc_atr atr;
+		scconf_block *atrblock;
+		atr.len = pCardData->cbAtr;
+		memcpy(atr.value, pCardData->pbAtr, atr.len);
+		atrblock = _sc_match_atr_block(vs->ctx, NULL, &atr);
+		logprintf(pCardData, 2, "Match ATR:\n");
+		loghex(pCardData, 3, atr.value, atr.len);
+
+		if (atrblock)
+			ret = scconf_get_int(atrblock, flag_name, ret_default);
+	}
+
+	return ret;
+}
+
+
+static int
+md_get_pinpad_dlg_timeout(PCARD_DATA pCardData)
+{
+	return md_get_config_int(pCardData, "md_pinpad_dlg_timeout", 30);
 }
 
 
 static BOOL
-md_get_config_bool(PCARD_DATA pCardData, char *flag_name, unsigned flag, BOOL ret_default)
+md_get_config_bool(PCARD_DATA pCardData, char *flag_name, BOOL ret_default)
 {
 	VENDOR_SPECIFIC *vs;
 	BOOL ret = ret_default;
@@ -441,14 +631,10 @@ md_get_config_bool(PCARD_DATA pCardData, char *flag_name, unsigned flag, BOOL re
 	if (!pCardData)
 		return ret;
 
-	logprintf(pCardData, 2, "Get '%s' option\n", flag_name);
-	if (md_static_data.flags_checked & flag)   {
-		ret = (md_static_data.flags & flag) ? TRUE : FALSE;
-		logprintf(pCardData, 2, "Returns checked flag: %s\n", ret ? "TRUE" : "FALSE");
-		return ret;
-	}
-
 	vs = (VENDOR_SPECIFIC*) pCardData->pvVendorSpecific;
+	if (!vs)
+		return ret;
+
 	if (vs->ctx && vs->reader)   {
 		struct sc_atr atr;
 		scconf_block *atrblock;
@@ -462,16 +648,35 @@ md_get_config_bool(PCARD_DATA pCardData, char *flag_name, unsigned flag, BOOL re
 			ret = scconf_get_bool(atrblock, flag_name, ret_default) ? TRUE : FALSE;
 	}
 
-	md_static_data.flags_checked |= flag;
-	if (ret == TRUE)
-		md_static_data.flags |= flag;
-	else
-		md_static_data.flags &= ~flag;
-
-	logprintf(pCardData, 2, "Returns '%s' flag '%s', static flags/checked %X/%X\n",
-			flag_name, ret ? "TRUE" : "FALSE",
-			md_static_data.flags, md_static_data.flags_checked);
 	return ret;
+}
+
+
+/* 'cancellation' mode can be enabled from the OpenSC configuration file*/
+static BOOL
+md_is_pinpad_dlg_enable_cancel(PCARD_DATA pCardData)
+{
+	TCHAR path[MAX_PATH]={0};
+
+	logprintf(pCardData, 2, "Is cancelling the PIN pad dialog enabled?\n");
+
+	if (GetModuleFileName(NULL, path, ARRAYSIZE(path))) {
+		DWORD enable_cancel;
+		size_t sz = sizeof enable_cancel;
+
+		if (SC_SUCCESS == sc_ctx_win32_get_config_value(NULL, path,
+					SUBKEY_ENABLE_CANCEL,
+					(char *)(&enable_cancel), &sz)) {
+			switch (enable_cancel) {
+				case 0:
+					return FALSE;
+				case 1:
+					return TRUE;
+			}
+		}
+	}
+
+	return md_get_config_bool(pCardData, "md_pinpad_dlg_enable_cancel", FALSE);
 }
 
 
@@ -479,8 +684,22 @@ md_get_config_bool(PCARD_DATA pCardData, char *flag_name, unsigned flag, BOOL re
 static BOOL
 md_is_read_only(PCARD_DATA pCardData)
 {
+	BOOL ret = TRUE;
+
 	logprintf(pCardData, 2, "Is read-only?\n");
-	return md_get_config_bool(pCardData, "md_read_only", MD_STATIC_FLAG_READ_ONLY, TRUE);
+
+	if (pCardData && pCardData->pvVendorSpecific) {
+		VENDOR_SPECIFIC *vs = (VENDOR_SPECIFIC*) pCardData->pvVendorSpecific;
+		if (vs->p15card && vs->p15card->tokeninfo) {
+			if (vs->p15card->tokeninfo->flags & SC_PKCS15_TOKEN_READONLY) {
+				ret = TRUE;
+			} else {
+				ret = FALSE;
+			}
+		}
+	}
+
+	return md_get_config_bool(pCardData, "read_only", ret);
 }
 
 
@@ -490,7 +709,7 @@ md_is_supports_X509_enrollment(PCARD_DATA pCardData)
 {
 	BOOL defaultvalue = !md_is_read_only(pCardData);
 	logprintf(pCardData, 2, "Is supports X509 enrollment?\n");
-	return md_get_config_bool(pCardData, "md_supports_X509_enrollment", MD_STATIC_FLAG_SUPPORTS_X509_ENROLLMENT, defaultvalue);
+	return md_get_config_bool(pCardData, "md_supports_X509_enrollment", defaultvalue);
 }
 
 
@@ -499,7 +718,7 @@ static BOOL
 md_is_guid_as_id(PCARD_DATA pCardData)
 {
 	logprintf(pCardData, 2, "Is GUID has to be used as ID of crypto objects?\n");
-	return md_get_config_bool(pCardData, "md_guid_as_id", MD_STATIC_FLAG_GUID_AS_ID, FALSE);
+	return md_get_config_bool(pCardData, "md_guid_as_id", FALSE);
 }
 
 
@@ -508,7 +727,7 @@ static BOOL
 md_is_guid_as_label(PCARD_DATA pCardData)
 {
 	logprintf(pCardData, 2, "Is GUID has to be used as label of crypto objects?\n");
-	return md_get_config_bool(pCardData, "md_guid_as_label", MD_STATIC_FLAG_GUID_AS_LABEL, FALSE);
+	return md_get_config_bool(pCardData, "md_guid_as_label", FALSE);
 }
 
 
@@ -517,7 +736,7 @@ static BOOL
 md_is_supports_container_key_gen(PCARD_DATA pCardData)
 {
 	logprintf(pCardData, 2, "Is supports 'key generation' create_container mechanism?\n");
-	return md_get_config_bool(pCardData, "md_supports_container_key_gen", MD_STATIC_FLAG_CREATE_CONTAINER_KEY_GEN, TRUE);
+	return md_get_config_bool(pCardData, "md_supports_container_key_gen", TRUE);
 }
 
 
@@ -526,7 +745,7 @@ static BOOL
 md_is_supports_container_key_import(PCARD_DATA pCardData)
 {
 	logprintf(pCardData, 2, "Is supports 'key import' create container mechanism?\n");
-	return md_get_config_bool(pCardData, "md_supports_container_key_import", MD_STATIC_FLAG_CREATE_CONTAINER_KEY_IMPORT, TRUE);
+	return md_get_config_bool(pCardData, "md_supports_container_key_import", TRUE);
 }
 
 /* generate unique key label (GUID)*/
@@ -549,6 +768,9 @@ md_contguid_get_guid_from_card(PCARD_DATA pCardData, struct sc_pkcs15_object *pr
 	size_t guid_len = MAX_CONTAINER_NAME_LEN+1;
 
 	vs = (VENDOR_SPECIFIC*) pCardData->pvVendorSpecific;
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
 	rv = sc_pkcs15_get_object_guid(vs->p15card, prkey, 1, (unsigned char*) szGuid, &guid_len);
 	if (rv)   {
 		logprintf(pCardData, 2, "md_contguid_get_guid_from_card(): error %d\n", rv);
@@ -629,7 +851,7 @@ md_contguid_build_cont_guid_from_key(PCARD_DATA pCardData, struct sc_pkcs15_obje
 	DWORD dwret = SCARD_S_SUCCESS;
 
 	szGuid[0] = '\0';
-	/* priorize the use of the key id over the key label as a container name */
+	/* prioritize the use of the key id over the key label as a container name */
 	if (md_is_guid_as_id(pCardData) && prkey_info->id.len > 0 && prkey_info->id.len <= MAX_CONTAINER_NAME_LEN)  {
 		memcpy(szGuid, prkey_info->id.value, prkey_info->id.len);
 		szGuid[prkey_info->id.len] = 0;
@@ -651,6 +873,9 @@ md_cont_flags_from_key(PCARD_DATA pCardData, struct sc_pkcs15_object *key_obj, u
 	int rv;
 
 	vs = (VENDOR_SPECIFIC*) pCardData->pvVendorSpecific;
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
 	prkey_info = (struct sc_pkcs15_prkey_info *)key_obj->data;
 
 	*cont_flags = CONTAINER_MAP_VALID_CONTAINER;
@@ -678,6 +903,9 @@ md_fs_find_directory(PCARD_DATA pCardData, struct md_directory *parent, char *na
 		return SCARD_E_INVALID_PARAMETER;
 
 	vs = pCardData->pvVendorSpecific;
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
 	if (!parent)
 		parent = &vs->root;
 
@@ -857,6 +1085,8 @@ md_fs_delete_file(PCARD_DATA pCardData, char *parent, char *name)
 		return SCARD_E_INVALID_PARAMETER;
 
 	vs = pCardData->pvVendorSpecific;
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
 
 	dwret = md_fs_find_directory(pCardData, NULL, parent, &dir);
 	if (dwret != SCARD_S_SUCCESS)   {
@@ -917,7 +1147,7 @@ md_fs_delete_file(PCARD_DATA pCardData, char *parent, char *name)
 	return dwret;
 }
 
-static DWORD
+static void
 md_fs_finalize(PCARD_DATA pCardData)
 {
 	VENDOR_SPECIFIC *vs;
@@ -925,9 +1155,11 @@ md_fs_finalize(PCARD_DATA pCardData)
 	struct md_directory *dir = NULL, *dir_to_rm;
 
 	if (!pCardData)
-		return SCARD_E_INVALID_PARAMETER;
+		return;
 
 	vs = pCardData->pvVendorSpecific;
+	if (!vs)
+		return;
 
 	file = vs->root.files;
 	while (file != NULL) {
@@ -935,6 +1167,7 @@ md_fs_finalize(PCARD_DATA pCardData)
 		file = file->next;
 		md_fs_free_file(pCardData, file_to_rm);
 	}
+	vs->root.files = NULL;
 
 	dir = vs->root.subdirs;
 	while(dir)   {
@@ -948,7 +1181,7 @@ md_fs_finalize(PCARD_DATA pCardData)
 		dir = dir->next;
 		pCardData->pfnCspFree(dir_to_rm);
 	}
-	return 0;
+	vs->root.subdirs = NULL;
 }
 
 /*
@@ -966,6 +1199,8 @@ md_pkcs15_update_containers(PCARD_DATA pCardData, unsigned char *blob, size_t si
 		return SCARD_E_INVALID_PARAMETER;
 
 	vs = pCardData->pvVendorSpecific;
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
 
 	nn_records = (int) size/sizeof(CONTAINER_MAP_RECORD);
 	if (nn_records > MD_MAX_KEY_CONTAINERS)
@@ -1012,6 +1247,9 @@ md_pkcs15_delete_object(PCARD_DATA pCardData, struct sc_pkcs15_object *obj)
 	if (!pCardData)
 		return SCARD_E_INVALID_PARAMETER;
 	vs = pCardData->pvVendorSpecific;
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
 	card = vs->p15card->card;
 
 	if (!obj)
@@ -1092,6 +1330,9 @@ md_set_cardid(PCARD_DATA pCardData, struct md_file *file)
 		return SCARD_E_INVALID_PARAMETER;
 
 	vs = pCardData->pvVendorSpecific;
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
 	if (vs->p15card->tokeninfo && vs->p15card->tokeninfo->serial_number) {
 		unsigned char sn_bin[SC_MAX_SERIALNR];
 		unsigned char cardid_bin[MD_CARDID_SIZE];
@@ -1107,12 +1348,16 @@ md_set_cardid(PCARD_DATA pCardData, struct md_file *file)
 			memcpy(sn_bin, vs->p15card->tokeninfo->serial_number, sn_len);
 		}
 
-		for (offs=0; offs < MD_CARDID_SIZE; )   {
-			wr = MD_CARDID_SIZE - offs;
-			if (wr > sn_len)
-				wr = sn_len;
-			memcpy(cardid_bin + offs, sn_bin, wr);
-			offs += wr;
+		if (sn_len > 0) {
+			for (offs=0; offs < MD_CARDID_SIZE; )   {
+				wr = MD_CARDID_SIZE - offs;
+				if (wr > sn_len)
+					wr = sn_len;
+				memcpy(cardid_bin + offs, sn_bin, wr);
+				offs += wr;
+			}
+		} else {
+			memset(cardid_bin, 0, MD_CARDID_SIZE);
 		}
 
 		dwret = md_fs_set_content(pCardData, file, cardid_bin, MD_CARDID_SIZE);
@@ -1343,6 +1588,8 @@ md_fs_add_msroots(PCARD_DATA pCardData, struct md_file **head)
 		return SCARD_E_INVALID_PARAMETER;
 
 	vs = (VENDOR_SPECIFIC *) pCardData->pvVendorSpecific;
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
 
 	rv = sc_pkcs15_get_objects(vs->p15card, SC_PKCS15_TYPE_CERT_X509, prkey_objs, MD_MAX_KEY_CONTAINERS);
 	if (rv < 0)   {
@@ -1371,11 +1618,19 @@ md_fs_add_msroots(PCARD_DATA pCardData, struct md_file **head)
  *    2b. Change the index of internal p15_container according to the index from 'DATA' file.
  *	  Records from 'DATA' file are ignored is they do not have
  *		the corresponding PKCS#15 private key object.
- * 3. Initalize the content of the 'soft' 'cmapfile' from the inernal p15-containers.
+ * 3. Initialize the content of the 'soft' 'cmapfile' from the internal p15-containers.
  */
 static DWORD
 md_set_cmapfile(PCARD_DATA pCardData, struct md_file *file)
 {
+	typedef enum { SCF_NONE,
+		       SCF_NONDEFAULT_SIGN_PIN,
+		       SCF_NONDEFAULT_OTHER_PIN,
+		       SCF_NONDEFAULT_USER_PIN,
+		       SCF_DEFAULT_SIGN_PIN,
+		       SCF_DEFAULT_OTHER_PIN,
+		       SCF_DEFAULT_USER_PIN
+	} pin_mode_t;
 	VENDOR_SPECIFIC *vs;
 	PCONTAINER_MAP_RECORD p;
 	unsigned char *cmap_buf = NULL;
@@ -1384,12 +1639,35 @@ md_set_cmapfile(PCARD_DATA pCardData, struct md_file *file)
 	int ii, rv, conts_num, found_default = 0;
 	/* struct sc_pkcs15_data *data_object; */
 	struct sc_pkcs15_object *prkey_objs[MD_MAX_KEY_CONTAINERS];
+	pin_mode_t pin_mode = SCF_NONE;
+	int pin_cont_idx = -1;
 
 	if (!pCardData || !file)
 		return SCARD_E_INVALID_PARAMETER;
 
 	logprintf(pCardData, 2, "set 'cmapfile'\n");
 	vs = pCardData->pvVendorSpecific;
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
+	dwret = md_get_pin_by_role(pCardData, ROLE_USER, &vs->pin_objs[ROLE_USER]);
+	if (dwret != SCARD_S_SUCCESS)   {
+		logprintf(pCardData, 2, "Cannot get User PIN object");
+		return dwret;
+	}
+
+	dwret = md_get_pin_by_role(pCardData, MD_ROLE_USER_SIGN, &vs->pin_objs[MD_ROLE_USER_SIGN]);
+	if (dwret != SCARD_S_SUCCESS) {
+		logprintf(pCardData, 2, "Cannot get Sign PIN object -- ignored");
+		vs->pin_objs[MD_ROLE_USER_SIGN] = NULL;
+	}
+
+	dwret = md_get_pin_by_role(pCardData, ROLE_ADMIN, &vs->pin_objs[ROLE_ADMIN]);
+	if (dwret != SCARD_S_SUCCESS) {
+		logprintf(pCardData, 2, "Cannot get Admin PIN object -- ignored");
+		vs->pin_objs[ROLE_ADMIN] = NULL;
+	}
+
 	cmap_len = MD_MAX_KEY_CONTAINERS*sizeof(CONTAINER_MAP_RECORD);
 	cmap_buf = pCardData->pfnCspAlloc(cmap_len);
 	if(!cmap_buf)
@@ -1431,7 +1709,116 @@ md_set_cmapfile(PCARD_DATA pCardData, struct md_file *file)
 		dwret = md_cont_flags_from_key(pCardData, key_obj, &cont->flags);
 		if (dwret != SCARD_S_SUCCESS)
 			return dwret;
-		if (cont->flags & CONTAINER_MAP_DEFAULT_CONTAINER)
+
+		logprintf(pCardData, 7, "Container[%i] is '%.*s' guid=%.*s\n", ii,
+			  (int) sizeof key_obj->label, key_obj->label,
+			  (int) sizeof cont->guid, cont->guid);
+
+		if (cont->flags & CONTAINER_MAP_VALID_CONTAINER &&
+		    key_obj->auth_id.len > 0) {
+			struct sc_pkcs15_object *keypin_obj;
+			struct sc_pkcs15_auth_info *userpin_info =
+				(struct sc_pkcs15_auth_info *)vs->pin_objs[ROLE_USER]->data;
+			struct sc_pkcs15_auth_info *signpin_info =
+				vs->pin_objs[MD_ROLE_USER_SIGN] ?
+				(struct sc_pkcs15_auth_info *)vs->pin_objs[MD_ROLE_USER_SIGN]->data :
+				NULL;
+			struct sc_pkcs15_auth_info *adminpin_info =
+				vs->pin_objs[ROLE_ADMIN] ?
+				(struct sc_pkcs15_auth_info *)vs->pin_objs[ROLE_ADMIN]->data :
+				NULL;
+
+			if (sc_pkcs15_find_pin_by_auth_id(vs->p15card, &key_obj->auth_id, &keypin_obj))
+				logprintf(pCardData, 2,
+					  "Container[%i] has an unknown auth id, might not work properly\n",
+					  ii);
+			else {
+				size_t pinidx;
+				size_t pinidxempty = MD_MAX_PINS;
+				for (pinidx = 0; pinidx < MD_MAX_PINS; pinidx++) {
+					struct sc_pkcs15_auth_info *pin_info;
+
+					if (!vs->pin_objs[pinidx]) {
+						if (pinidxempty >= MD_MAX_PINS)
+							pinidxempty = pinidx;
+
+						continue;
+					}
+
+					pin_info =
+						(struct sc_pkcs15_auth_info *)vs->pin_objs[pinidx]->data;
+
+					if (sc_pkcs15_compare_id(&key_obj->auth_id,
+								 &pin_info->auth_id))
+						break;
+				}
+
+				if (pinidx >= MD_MAX_PINS) {
+					if (pinidxempty >= MD_MAX_PINS)
+						logprintf(pCardData, 2,
+							  "no free slot for container[%i] auth id, might not work properly\n",
+							  ii);
+					else
+						vs->pin_objs[pinidxempty] = keypin_obj;
+				}
+
+				if (sc_pkcs15_compare_id(&key_obj->auth_id, &userpin_info->auth_id)) {
+					pin_mode_t pin_mode_n =
+						cont->flags & CONTAINER_MAP_DEFAULT_CONTAINER ?
+						SCF_DEFAULT_USER_PIN : SCF_NONDEFAULT_USER_PIN;
+
+					logprintf(pCardData, 7,
+						  "Container[%i]%s is secured by User PIN\n",
+						  ii,
+						  cont->flags & CONTAINER_MAP_DEFAULT_CONTAINER ?
+						  " (default)" : "");
+
+					if (pin_mode < pin_mode_n) {
+						pin_mode = pin_mode_n;
+						pin_cont_idx = ii;
+					}
+				} else if (signpin_info != NULL &&
+					   sc_pkcs15_compare_id(&key_obj->auth_id, &signpin_info->auth_id)) {
+					pin_mode_t pin_mode_n =
+						cont->flags & CONTAINER_MAP_DEFAULT_CONTAINER ?
+						SCF_DEFAULT_SIGN_PIN : SCF_NONDEFAULT_SIGN_PIN;
+
+					logprintf(pCardData, 7,
+						  "Container[%i]%s is secured by Sign PIN\n",
+						  ii,
+						  cont->flags & CONTAINER_MAP_DEFAULT_CONTAINER ?
+						  " (default)" : "");
+
+					if (pin_mode < pin_mode_n) {
+						pin_mode = pin_mode_n;
+						pin_cont_idx = ii;
+					}
+				} else if (adminpin_info != NULL &&
+					   sc_pkcs15_compare_id(&key_obj->auth_id, &adminpin_info->auth_id)) {
+					logprintf(pCardData, 2,
+						  "Container[%i] is secured by Admin PIN, might not work properly\n",
+						  ii);
+				} else {
+					pin_mode_t pin_mode_n =
+						cont->flags & CONTAINER_MAP_DEFAULT_CONTAINER ?
+						SCF_DEFAULT_OTHER_PIN : SCF_NONDEFAULT_OTHER_PIN;
+
+					logprintf(pCardData, 7,
+						  "Container[%i]%s is secured by other PIN\n",
+						  ii,
+						  cont->flags & CONTAINER_MAP_DEFAULT_CONTAINER ?
+						  " (default)" : "");
+
+					if (pin_mode < pin_mode_n) {
+						pin_mode = pin_mode_n;
+						pin_cont_idx = ii;
+					}
+				}
+			}
+		}
+
+		if (cont->flags & CONTAINER_MAP_VALID_CONTAINER &&
+		    cont->flags & CONTAINER_MAP_DEFAULT_CONTAINER)
 			found_default = 1;
 
 		/* AT_KEYEXCHANGE is more general key usage,
@@ -1455,7 +1842,6 @@ md_set_cmapfile(PCARD_DATA pCardData, struct md_file *file)
 				cont->size_key_exchange = prkey_info->field_length;
 		}
 
-		logprintf(pCardData, 7, "Container[%i]'s guid=%.*s\n", ii, (int) sizeof cont->guid, cont->guid);
 		logprintf(pCardData, 7,
 			  "Container[%i]'s key-exchange:%"SC_FORMAT_LEN_SIZE_T"u, sign:%"SC_FORMAT_LEN_SIZE_T"u\n",
 			  ii, cont->size_key_exchange, cont->size_sign);
@@ -1463,7 +1849,7 @@ md_set_cmapfile(PCARD_DATA pCardData, struct md_file *file)
 		cont->id = prkey_info->id;
 		cont->prkey_obj = prkey_objs[ii];
 
-		/* Try to find the friend objects: certficate and public key */
+		/* Try to find the friend objects: certificate and public key */
 		if (!sc_pkcs15_find_cert_by_id(vs->p15card, &cont->id, &cont->cert_obj))
 			logprintf(pCardData, 2, "found certificate friend '%.*s'\n", (int) sizeof cont->cert_obj->label, cont->cert_obj->label);
 
@@ -1489,11 +1875,11 @@ md_set_cmapfile(PCARD_DATA pCardData, struct md_file *file)
 		for (ii=0;ii<num_dobjs;ii++)   {
 			struct sc_pkcs15_data_info *dinfo = (struct sc_pkcs15_data_info *)dobjs[ii]->data;
 
-			if (strcmp(dinfo->app_label, MD_DATA_APPLICAITON_NAME))
+			if (strcmp(dinfo->app_label, "CSP"))
 				continue;
 
 			logprintf(pCardData, 2, "Found 'DATA' object '%.*s'\n", (int) sizeof dobjs[ii]->label, dobjs[ii]->label);
-			if (!strncmp(dobjs[ii]->label, MD_DATA_DEFAULT_CONT_LABEL, sizeof dobjs[ii]->label))   {
+			if (!strncmp(dobjs[ii]->label, "Default Key Container", sizeof dobjs[ii]->label))   {
 				default_cont = dobjs[ii];
 				continue;
 			}
@@ -1513,6 +1899,108 @@ md_set_cmapfile(PCARD_DATA pCardData, struct md_file *file)
 			}
 		}
 #endif
+
+		/* if no default container was found promote the best one (PIN-wise) to default */
+		if (!found_default && (pin_mode == SCF_NONDEFAULT_SIGN_PIN ||
+				       pin_mode == SCF_NONDEFAULT_OTHER_PIN ||
+				       pin_mode == SCF_NONDEFAULT_USER_PIN)) {
+			struct md_pkcs15_container *cont =
+				&vs->p15_containers[pin_cont_idx];
+			cont->flags |= CONTAINER_MAP_DEFAULT_CONTAINER;
+
+			found_default = 1;
+
+			logprintf(pCardData, 7,
+				  "Container[%i] promoted to default\n",
+				  pin_cont_idx);
+
+			if (pin_mode == SCF_NONDEFAULT_SIGN_PIN)
+				pin_mode = SCF_DEFAULT_SIGN_PIN;
+			else if (pin_mode == SCF_NONDEFAULT_OTHER_PIN)
+				pin_mode = SCF_DEFAULT_OTHER_PIN;
+			else
+				pin_mode = SCF_DEFAULT_USER_PIN;
+		}
+
+		/* if all containers use non-user PINs we need to make the best container PIN the user (primary) one */
+		if (pin_mode == SCF_NONDEFAULT_SIGN_PIN ||
+		    pin_mode == SCF_DEFAULT_SIGN_PIN ||
+		    pin_mode == SCF_NONDEFAULT_OTHER_PIN ||
+		    pin_mode == SCF_DEFAULT_OTHER_PIN) {
+			struct sc_pkcs15_object *user_pin_old =
+				vs->pin_objs[ROLE_USER];
+			struct sc_pkcs15_object *user_pin_new =
+				NULL;
+
+			if (pin_mode == SCF_NONDEFAULT_SIGN_PIN ||
+			    pin_mode == SCF_DEFAULT_SIGN_PIN) {
+				user_pin_new = vs->pin_objs[MD_ROLE_USER_SIGN];
+				vs->pin_objs[MD_ROLE_USER_SIGN] = NULL;
+
+				logprintf(pCardData, 7,
+					  "Sign PIN%s promoted to user one\n",
+					  pin_mode == SCF_DEFAULT_SIGN_PIN ?
+					  " (from default container)" : "");
+			} else {
+				struct sc_pkcs15_object *key_obj =
+					vs->p15_containers[pin_cont_idx].prkey_obj;
+				struct sc_pkcs15_object *keypin_obj;
+
+				if (sc_pkcs15_find_pin_by_auth_id(vs->p15card, &key_obj->auth_id, &keypin_obj))
+					logprintf(pCardData, 2,
+					  "Cannot find container[%i] auth id again, might not work properly\n",
+						  pin_cont_idx);
+				else {
+					size_t pinidx;
+
+					logprintf(pCardData, 7,
+						  "Container[%i]%s PIN will be made the user one\n",
+						  pin_cont_idx,
+						  pin_mode == SCF_DEFAULT_OTHER_PIN ?
+						  " (default)" : "");
+
+					for (pinidx = 0; pinidx < MD_MAX_PINS; pinidx++) {
+						struct sc_pkcs15_auth_info *pin_info;
+
+						if (!vs->pin_objs[pinidx])
+							continue;
+
+						pin_info =
+							(struct sc_pkcs15_auth_info *)vs->pin_objs[pinidx]->data;
+
+						if (sc_pkcs15_compare_id(&key_obj->auth_id,
+									 &pin_info->auth_id)) {
+							vs->pin_objs[pinidx] = NULL;
+							break;
+						}
+					}
+
+					user_pin_new = keypin_obj;
+				}
+			}
+
+			if (user_pin_new) {
+				size_t pinidx;
+
+				vs->pin_objs[ROLE_USER] = user_pin_new;
+
+				for (pinidx = 0; pinidx < MD_MAX_PINS; pinidx++) {
+					if (vs->pin_objs[pinidx])
+						continue;
+
+					vs->pin_objs[pinidx] = user_pin_old;
+					break;
+				}
+
+				if (pinidx >= MD_MAX_PINS) {
+					logprintf(pCardData, 2,
+						  "no free slot for previous User PIN, replacing last one\n");
+
+					vs->pin_objs[MD_MAX_PINS - 1] = user_pin_old;
+				}
+			}
+		}
+
 		/* Initialize 'CMAPFILE' content from the P15 containers */
 		p = (PCONTAINER_MAP_RECORD)cmap_buf;
 		for (ii=0; ii<MD_MAX_KEY_CONTAINERS; ii++)   {
@@ -1589,32 +2077,32 @@ md_fs_init(PCARD_DATA pCardData)
 		return dwret;
 	dwret = md_set_cardid(pCardData, cardid);
 	if (dwret != SCARD_S_SUCCESS)
-		return dwret;
+		goto ret_cleanup;
 
 	dwret = md_fs_add_file(pCardData, &(vs->root.files), "cardcf", EveryoneReadUserWriteAc, NULL, 0, &cardcf);
 	if (dwret != SCARD_S_SUCCESS)
-		return dwret;
+		goto ret_cleanup;
 	dwret = md_set_cardcf(pCardData, cardcf);
 	if (dwret != SCARD_S_SUCCESS)
-		return dwret;
+		goto ret_cleanup;
 
 	dwret = md_fs_add_file(pCardData, &(vs->root.files), "cardapps", EveryoneReadAdminWriteAc, NULL, 0, &cardapps);
 	if (dwret != SCARD_S_SUCCESS)
-		return dwret;
+		goto ret_cleanup;
 	dwret = md_set_cardapps(pCardData, cardapps);
 	if (dwret != SCARD_S_SUCCESS)
-		return dwret;
+		goto ret_cleanup;
 
 	dwret = md_fs_add_directory(pCardData, &(vs->root.subdirs), "mscp", UserCreateDeleteDirAc, &mscp);
 	if (dwret != SCARD_S_SUCCESS)
-		return dwret;
+		goto ret_cleanup;
 
 	dwret = md_fs_add_file(pCardData, &(mscp->files), "cmapfile", EveryoneReadUserWriteAc, NULL, 0, &cmapfile);
 	if (dwret != SCARD_S_SUCCESS)
-		return dwret;
+		goto ret_cleanup;
 	dwret = md_set_cmapfile(pCardData, cmapfile);
 	if (dwret != SCARD_S_SUCCESS)
-		return dwret;
+		goto ret_cleanup;
 
 #ifdef OPENSSL_VERSION_NUMBER
 	logprintf(pCardData, 3,
@@ -1625,6 +2113,10 @@ md_fs_init(PCARD_DATA pCardData)
 		  "MD virtual file system initialized; Without OPENSSL\n");
 #endif
 	return SCARD_S_SUCCESS;
+
+ret_cleanup:
+	md_fs_finalize(pCardData);
+	return dwret;
 }
 
 /* Create SC context */
@@ -1684,6 +2176,8 @@ md_free_space(PCARD_DATA pCardData, PCARD_FREE_SPACE_INFO pCardFreeSpaceInfo)
 		return ERROR_REVISION_MISMATCH;
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
 
 	/* Count free containers */
 	for (idx=0, count=0; idx<MD_MAX_KEY_CONTAINERS; idx++)
@@ -1733,6 +2227,8 @@ md_check_key_compatibility(PCARD_DATA pCardData, DWORD flags, DWORD key_type,
 	}
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
 
 	if (flags & CARD_CREATE_CONTAINER_KEY_IMPORT)   {
 		if (key_algo == SC_ALGORITHM_RSA) {
@@ -1833,7 +2329,7 @@ md_check_key_compatibility(PCARD_DATA pCardData, DWORD flags, DWORD key_type,
 
 
 static DWORD
-md_pkcs15_generate_key(PCARD_DATA pCardData, DWORD idx, DWORD key_type, DWORD key_size)
+md_pkcs15_generate_key(PCARD_DATA pCardData, DWORD idx, DWORD key_type, DWORD key_size, PIN_ID PinId)
 {
 	VENDOR_SPECIFIC *vs;
 	struct sc_card *card = NULL;
@@ -1845,13 +2341,19 @@ md_pkcs15_generate_key(PCARD_DATA pCardData, DWORD idx, DWORD key_type, DWORD ke
 	struct sc_pkcs15init_pubkeyargs pub_args;
 	struct md_pkcs15_container *cont = NULL;
 	int rv;
-	DWORD dw, dwret = SCARD_F_INTERNAL_ERROR;
+	DWORD dwret = SCARD_F_INTERNAL_ERROR;
 	CHAR szGuid[MAX_CONTAINER_NAME_LEN +1] = "Default key label";
 
 	if (!pCardData)
 		return SCARD_E_INVALID_PARAMETER;
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
+	if (PinId >= MD_MAX_PINS || !vs->pin_objs[PinId])
+		return SCARD_E_INVALID_PARAMETER;
+
 	card = vs->p15card->card;
 
 	memset(&pub_args, 0, sizeof(pub_args));
@@ -1904,12 +2406,7 @@ md_pkcs15_generate_key(PCARD_DATA pCardData, DWORD idx, DWORD key_type, DWORD ke
 
 	keygen_args.prkey_args.access_flags = MD_KEY_ACCESS;
 
-	dw = md_get_pin_by_role(pCardData, ROLE_USER, &pin_obj);
-	if (dw != SCARD_S_SUCCESS)   {
-		logprintf(pCardData, 2, "MdGenerateKey(): cannot get User PIN object");
-		return dw;
-	}
-
+	pin_obj = vs->pin_objs[PinId];
 	auth_info = (struct sc_pkcs15_auth_info *) pin_obj->data;
 	keygen_args.prkey_args.auth_id = pub_args.auth_id = auth_info->auth_id;
 
@@ -1970,9 +2467,8 @@ done:
 	return dwret;
 }
 
-
 static DWORD
-md_pkcs15_store_key(PCARD_DATA pCardData, DWORD idx, DWORD key_type, BYTE *blob, DWORD blob_size)
+md_pkcs15_store_key(PCARD_DATA pCardData, DWORD idx, DWORD key_type, BYTE *blob, DWORD blob_size, PIN_ID PinId)
 {
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L
 	VENDOR_SPECIFIC *vs;
@@ -1986,13 +2482,19 @@ md_pkcs15_store_key(PCARD_DATA pCardData, DWORD idx, DWORD key_type, BYTE *blob,
 	BYTE *ptr = blob;
 	EVP_PKEY *pkey=NULL;
 	int rv;
-	DWORD dw, dwret = SCARD_F_INTERNAL_ERROR;
+	DWORD dwret = SCARD_F_INTERNAL_ERROR;
 	CHAR szGuid[MAX_CONTAINER_NAME_LEN +1] = "Default key label";
 
 	if (!pCardData)
 		return SCARD_E_INVALID_PARAMETER;
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
+	if (PinId >= MD_MAX_PINS || !vs->pin_objs[PinId])
+		return SCARD_E_INVALID_PARAMETER;
+
 	card = vs->p15card->card;
 
 	pkey = b2i_PrivateKey((const unsigned char **)&ptr, blob_size);
@@ -2032,12 +2534,7 @@ md_pkcs15_store_key(PCARD_DATA pCardData, DWORD idx, DWORD key_type, BYTE *blob,
 
 	prkey_args.access_flags = MD_KEY_ACCESS;
 
-	dw = md_get_pin_by_role(pCardData, ROLE_USER, &pin_obj);
-	if (dw != SCARD_S_SUCCESS)   {
-		logprintf(pCardData, 2, "MdStoreKey(): cannot get User PIN object");
-		return dw;
-	}
-
+	pin_obj = vs->pin_objs[PinId];
 	prkey_args.auth_id = ((struct sc_pkcs15_auth_info *) pin_obj->data)->auth_id;
 
 	rv = sc_lock(card);
@@ -2130,6 +2627,9 @@ md_pkcs15_store_certificate(PCARD_DATA pCardData, char *file_name, unsigned char
 
 	logprintf(pCardData, 1, "MdStoreCert(): store certificate '%s'\n", file_name);
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
 	card = vs->p15card->card;
 
 	memset(&args, 0, sizeof(args));
@@ -2199,6 +2699,9 @@ md_query_key_sizes(PCARD_DATA pCardData, DWORD dwKeySpec, CARD_KEY_SIZES *pKeySi
 	logprintf(pCardData, 1, "md_query_key_sizes: store dwKeySpec '%lu'\n",
 		  (unsigned long)dwKeySpec);
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
 	count = vs->p15card->card->algorithm_count;
 
 	pKeySizes->dwVersion = CARD_KEY_SIZES_CURRENT_VERSION;
@@ -2207,7 +2710,7 @@ md_query_key_sizes(PCARD_DATA pCardData, DWORD dwKeySpec, CARD_KEY_SIZES *pKeySi
 	pKeySizes->dwMaximumBitlen = 0;
 	pKeySizes->dwIncrementalBitlen = 0;
 
-	/* dwKeySpec=0 is a special value when the key size is queried without specifing the algorithm.
+	/* dwKeySpec=0 is a special value when the key size is queried without specifying the algorithm.
 	Used on old minidriver version. In this case, it is RSA */
 	if ((dwKeySpec == 0) || (dwKeySpec == AT_KEYEXCHANGE) || (dwKeySpec == AT_SIGNATURE)) {
 		for (i = 0; i < count; i++) {
@@ -2302,39 +2805,6 @@ md_query_key_sizes(PCARD_DATA pCardData, DWORD dwKeySpec, CARD_KEY_SIZES *pKeySi
 	return SCARD_S_SUCCESS;
 }
 
-static VOID CenterWindow(HWND hwndWindow, HWND hwndParent)
-{
-	RECT rectWindow, rectParent;
-	int nWidth,nHeight, nScreenWidth, nScreenHeight;
-	int nX, nY;
-	GetWindowRect(hwndWindow, &rectWindow);
-
-	nWidth = rectWindow.right - rectWindow.left;
-	nHeight = rectWindow.bottom - rectWindow.top;
-
-	nScreenWidth = GetSystemMetrics(SM_CXSCREEN);
-	nScreenHeight = GetSystemMetrics(SM_CYSCREEN);
-
-	// make the window relative to its parent
-	if (hwndParent != NULL) {
-		GetWindowRect(hwndParent, &rectParent);
-		nX = ((rectParent.right - rectParent.left) - nWidth) / 2 + rectParent.left;
-		nY = ((rectParent.bottom - rectParent.top) - nHeight) / 2 + rectParent.top;
-	}
-	else {
-		nX = (nScreenWidth - nWidth) /2;
-		nY = (nScreenHeight - nHeight) /2;
-	}
-	// make sure that the dialog box never moves outside of the screen
-	if (nX < 0) nX = 0;
-	if (nY < 0) nY = 0;
-	if (nX + nWidth > nScreenWidth) nX = nScreenWidth - nWidth;
-	if (nY + nHeight > nScreenHeight) nY = nScreenHeight - nHeight;
-
-	MoveWindow(hwndWindow, nX, nY, nWidth, nHeight, TRUE);
-}
-
-
 static DWORD WINAPI
 md_dialog_perform_pin_operation_thread(PVOID lpParameter)
 {
@@ -2346,73 +2816,141 @@ md_dialog_perform_pin_operation_thread(PVOID lpParameter)
 	const u8 *pin1 = (const u8 *) parameter[3];
 	size_t pin1len = parameter[4];
 	const u8 *pin2 = (const u8 *) parameter[5];
-	size_t pin2len = parameter[6];
+	size_t *pin2len = (size_t *) parameter[6];
 	int rv = 0;
 	switch (operation)
 	{
 	case SC_PIN_CMD_VERIFY:
 		rv = sc_pkcs15_verify_pin(p15card, pin_obj, pin1, pin1len);
 		break;
+	case SC_PIN_CMD_GET_SESSION_PIN:
+		rv = sc_pkcs15_verify_pin_with_session_pin(p15card, pin_obj, pin1, pin1len, pin2, pin2len);
+		break;
 	case SC_PIN_CMD_CHANGE:
-		rv = sc_pkcs15_change_pin(p15card, pin_obj, pin1, pin1len,pin2, pin2len);
+		rv = sc_pkcs15_change_pin(p15card, pin_obj, pin1, pin1len,pin2, pin2len ? *pin2len : 0);
 		break;
 	case SC_PIN_CMD_UNBLOCK:
-		rv = sc_pkcs15_unblock_pin(p15card, pin_obj, pin1, pin1len,pin2, pin2len);
+		rv = sc_pkcs15_unblock_pin(p15card, pin_obj, pin1, pin1len,pin2, pin2len ? *pin2len : 0);
 		break;
 	default:
 		rv = (DWORD) ERROR_INVALID_PARAMETER;
 		break;
 	}
-	if (parameter[9] != 0) {
-		EndDialog((HWND) parameter[9], rv);
+	if (parameter[10] != 0) {
+		EndDialog((HWND) parameter[10], rv);
 	}
 	return (DWORD) rv;
 }
 
-static INT_PTR CALLBACK md_dialog_proc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+static const char *md_get_ui_str(PCARD_DATA pCardData, enum ui_str id)
 {
-	UNREFERENCED_PARAMETER(wParam);
-	switch (message)
-	{
-	case WM_INITDIALOG:
-		{
-			HICON hIcon = NULL;
-			PCARD_DATA pCardData = (PCARD_DATA) (((LONG_PTR*)lParam)[7]);
-			VENDOR_SPECIFIC* vs = (VENDOR_SPECIFIC*) pCardData->pvVendorSpecific;
-			/* store parameter like pCardData for further use if needed */
-			SetWindowLongPtr(hWnd, GWLP_USERDATA, lParam);
-			/* change the text shown on the screen */
-			if (vs->wszPinContext )   {
-				SetWindowTextW(GetDlgItem(hWnd, IDC_PINPAD_TEXT), vs->wszPinContext );
-			}
-			CenterWindow(hWnd, vs->hwndParent);
-			/* load the information icon */
-			hIcon = (HICON) LoadImage(0, IDI_INFORMATION, IMAGE_ICON, 0, 0, LR_SHARED);
-			SendMessage(GetDlgItem(hWnd, IDC_PINPAD_ICON),STM_SETIMAGE,IMAGE_ICON, (LPARAM) hIcon);
-			/* change the icon */
-			hIcon = LoadIcon(g_inst, MAKEINTRESOURCE(IDI_LOGO));
-			if (hIcon)
+	const char *str = md_get_config_str(pCardData, id);
+
+	if (str && *str == '\0') {
+		/* if the user used an empty string, remove the field by setting it to NULL */
+		str = NULL;
+	}
+
+	return str;
+}
+
+static HRESULT CALLBACK md_dialog_proc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam, LONG_PTR dwRefData)
+{
+	LONG_PTR param;
+
+	UNREFERENCED_PARAMETER(lParam);
+	switch (message) {
+		case TDN_CREATED:
 			{
-				SendMessage(hWnd, WM_SETICON, ICON_SMALL, (LPARAM) hIcon);
-				SendMessage(hWnd, WM_SETICON, ICON_BIG, (LPARAM) hIcon);
+				PCARD_DATA pCardData = (PCARD_DATA)((LONG_PTR*)dwRefData)[7];
+				DWORD now = timeGetTime();
+
+				/* remove the icon from the window title */
+				SendMessage(hWnd, WM_SETICON, (LPARAM) ICON_BIG, (LONG_PTR) NULL);
+				SendMessage(hWnd, WM_SETICON, (LPARAM) ICON_SMALL, (LONG_PTR) NULL);
+
+				/* store parameter like pCardData for further use if needed */
+				((LONG_PTR*)dwRefData)[11] = (LONG_PTR) now;
+				SetWindowLongPtr(hWnd, GWLP_USERDATA, dwRefData);
+				((LONG_PTR*)dwRefData)[10] = (LONG_PTR) hWnd;
+
+				if (!md_is_pinpad_dlg_enable_cancel(pCardData)) {
+					int timeout = md_get_pinpad_dlg_timeout(pCardData);
+					if (timeout > 0) {
+						SendMessage(hWnd, TDM_SET_PROGRESS_BAR_RANGE, 0, MAKELPARAM(0, timeout*1000));
+					}
+
+					/* disable "Close" */
+					SendMessage(hWnd, TDM_ENABLE_BUTTON, IDCLOSE, 0);
+
+					/* launch the function in another thread context store the thread handle */
+					((LONG_PTR*)dwRefData)[9] = (LONG_PTR) CreateThread(NULL, 0, md_dialog_perform_pin_operation_thread, (LPVOID) dwRefData, 0, NULL);
+				} else {
+					int timeout = md_get_pinpad_dlg_timeout(pCardData);
+					if (timeout > 0) {
+						SendMessage(hWnd, TDM_SET_PROGRESS_BAR_RANGE, 0, 0);
+						SendMessage(hWnd, TDM_SET_PROGRESS_BAR_STATE, PBST_PAUSED, 0);
+					}
+				}
 			}
-			/* launch the function in another thread context store the thread handle */
-			((LONG_PTR*)lParam)[9] = (LONG_PTR) hWnd;
-			((LONG_PTR*)lParam)[8] = (LONG_PTR) CreateThread(NULL, 0, md_dialog_perform_pin_operation_thread, (PVOID) lParam, 0, NULL);
-		}
-		return TRUE;
-	case WM_DESTROY:
-		{
+			return S_OK;
+
+		case TDN_TIMER:
+			SendMessage(hWnd, TDM_SET_PROGRESS_BAR_POS, wParam, 0L);
+			return S_OK;
+
+		case TDN_BUTTON_CLICKED:
+			switch(LOWORD(wParam)) {
+				case IDCANCEL:
+					DestroyWindow(hWnd);
+					break;
+
+				case IDOK:
+					param = GetWindowLongPtr(hWnd, GWLP_USERDATA);
+					if (param) {
+						PCARD_DATA pCardData = (PCARD_DATA)((LONG_PTR*)param)[7];
+						VENDOR_SPECIFIC* vs = (VENDOR_SPECIFIC*) pCardData->pvVendorSpecific;
+
+						int timeout = md_get_pinpad_dlg_timeout(pCardData);
+						if (timeout > 0) {
+							DWORD start = (DWORD)((LONG_PTR*)dwRefData)[11];
+							DWORD delta = timeGetTime() - start;
+							SendMessage(hWnd, TDM_SET_PROGRESS_BAR_RANGE, 0, MAKELPARAM(delta, delta + timeout*1000));
+							SendMessage(hWnd, TDM_SET_PROGRESS_BAR_STATE, PBST_NORMAL, 0);
+						}
+
+						/* disable "OK" and "Cancel" */
+						SendMessage(hWnd, TDM_ENABLE_BUTTON, IDOK, 0);
+						SendMessage(hWnd, TDM_ENABLE_BUTTON, IDCANCEL, 0);
+
+						/* disable "x" */
+						HMENU menu = GetSystemMenu(hWnd, FALSE);
+						if (menu) {
+							EnableMenuItem(menu, SC_CLOSE, MF_BYCOMMAND | MF_GRAYED);
+						}
+
+						/* launch the function in another thread context store the thread handle */
+						((LONG_PTR*)dwRefData)[9] = (LONG_PTR) CreateThread(NULL, 0, md_dialog_perform_pin_operation_thread, (LPVOID) dwRefData, 0, NULL);
+					}
+					break;
+
+				default:
+					return S_FALSE;
+			}
+			break;
+
+		case TDN_DESTROYED:
 			/* clean resources used */
-			LPARAM param = GetWindowLongPtr(hWnd, GWLP_USERDATA);
+			param = GetWindowLongPtr(hWnd, GWLP_USERDATA);
 			if (param) {
-				HANDLE hThread = (HANDLE)((LONG_PTR*)param)[8];
+				HANDLE hThread = (HANDLE)((LONG_PTR*)param)[9];
 				CloseHandle(hThread);
 			}
-		}
-		break;
+			break;
 	}
-	return FALSE;
+
+	/* don't close the Task Dialog */
+	return S_FALSE;
 }
 
 
@@ -2421,12 +2959,16 @@ static int
 md_dialog_perform_pin_operation(PCARD_DATA pCardData, int operation, struct sc_pkcs15_card *p15card,
 		struct sc_pkcs15_object *pin_obj,
 		const u8 *pin1, size_t pin1len,
-		const u8 *pin2, size_t pin2len, BOOL displayUI)
+		const u8 *pin2, size_t *pin2len, BOOL displayUI, DWORD role)
 {
-	LONG_PTR parameter[10];
+	LONG_PTR parameter[12];
 	INT_PTR result = 0;
+	HWND hWndDlg = 0;
+	TASKDIALOGCONFIG tc = {0};
 	int rv = 0;
+	BOOL checked, user_checked;
 	VENDOR_SPECIFIC* pv = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+
 	/* stack the parameters */
 	parameter[0] = (LONG_PTR)operation;
 	parameter[1] = (LONG_PTR)p15card;
@@ -2436,18 +2978,119 @@ md_dialog_perform_pin_operation(PCARD_DATA pCardData, int operation, struct sc_p
 	parameter[5] = (LONG_PTR)pin2;
 	parameter[6] = (LONG_PTR)pin2len;
 	parameter[7] = (LONG_PTR)pCardData;
-	parameter[8] = 0; /* place holder for thread handle */
-	parameter[9] = 0; /* place holder for window handle */
+	parameter[8] = (LONG_PTR)role;
+	parameter[9] = 0; /* place holder for thread handle */
+	parameter[10] = 0; /* place holder for window handle */
+	parameter[11] = 0; /* place holder for end of timer */
+
 	/* launch the function to perform in the same thread context */
 	if (!displayUI) {
 		rv = md_dialog_perform_pin_operation_thread(parameter);
 		SecureZeroMemory(parameter, sizeof(parameter));
 		return rv;
 	}
+
 	/* launch the UI in the same thread context than the parent and the function to perform in another thread context 
 	this is the only way to display a modal dialog attached to a parent (hwndParent != 0) */
-	result = DialogBoxParam(g_inst, MAKEINTRESOURCE(IDD_PINPAD), pv->hwndParent, md_dialog_proc, (LPARAM) parameter);
+	tc.hwndParent = pv->hwndParent;
+	tc.hInstance = g_inst;
+
+	tc.pszWindowTitle = wchar_from_char_str(md_get_ui_str(pCardData,
+			MD_PINPAD_DLG_TITLE));
+	tc.pszMainInstruction = wchar_from_char_str(md_get_ui_str(pCardData,
+			MD_PINPAD_DLG_MAIN));
+	tc.pszExpandedControlText = wchar_from_char_str(md_get_ui_str(pCardData,
+			MD_PINPAD_DLG_CONTROL_EXPANDED));
+	tc.pszCollapsedControlText = wchar_from_char_str(md_get_ui_str(pCardData,
+			MD_PINPAD_DLG_CONTROL_COLLAPSED));
+	tc.pszExpandedInformation = wchar_from_char_str(md_get_ui_str(pCardData,
+			MD_PINPAD_DLG_EXPANDED));
+	tc.pszVerificationText = wchar_from_char_str(md_get_ui_str(pCardData,
+			MD_PINPAD_DLG_VERIFICATION));
+	switch (role) {
+		case ROLE_ADMIN:
+			tc.pszContent = wchar_from_char_str(md_get_ui_str(pCardData,
+					MD_PINPAD_DLG_CONTENT_ADMIN));
+			break;
+		case MD_ROLE_USER_SIGN:
+			tc.pszContent = wchar_from_char_str(md_get_ui_str(pCardData,
+					MD_PINPAD_DLG_CONTENT_USER_SIGN));
+			break;
+		case ROLE_USER:
+		default:
+			tc.pszContent = wchar_from_char_str(md_get_ui_str(pCardData,
+					MD_PINPAD_DLG_CONTENT_USER));
+			break;
+	}
+
+	if (pv->wszPinContext) {
+		/* overwrite the main instruction with the application's information if
+		 * possible */
+		tc.pszMainInstruction = pv->wszPinContext;
+	}
+
+	tc.dwFlags = TDF_POSITION_RELATIVE_TO_WINDOW;
+	if (tc.pszExpandedInformation != NULL) {
+		tc.dwFlags |= TDF_EXPAND_FOOTER_AREA;
+	}
+	if (md_get_pinpad_dlg_timeout(pCardData) > 0) {
+		tc.dwFlags |= TDF_SHOW_PROGRESS_BAR | TDF_CALLBACK_TIMER;
+	}
+	
+	checked = !md_is_pinpad_dlg_enable_cancel(pCardData);
+	if (checked) {
+		tc.dwFlags |= TDF_VERIFICATION_FLAG_CHECKED;
+		/* can't use TDCBF_CANCEL_BUTTON since this would implicitly set TDF_ALLOW_DIALOG_CANCELLATION */
+		tc.dwCommonButtons = TDCBF_CLOSE_BUTTON;
+	} else {
+		tc.dwFlags |= TDF_ALLOW_DIALOG_CANCELLATION;
+		tc.dwCommonButtons = TDCBF_CANCEL_BUTTON | TDCBF_OK_BUTTON;
+	}
+
+	tc.hMainIcon = md_get_pinpad_dlg_icon(pCardData);
+	if (tc.hMainIcon) {
+		tc.dwFlags |= TDF_USE_HICON_MAIN;
+	} else {
+		tc.pszMainIcon = MAKEINTRESOURCEW(IDI_SMARTCARD);
+	}
+	tc.pfCallback = md_dialog_proc;
+	tc.lpCallbackData = (LONG_PTR)parameter;
+	tc.cbSize = sizeof(tc);
+
+	result = TaskDialogIndirect(&tc, NULL, NULL, &user_checked);
+
+	if (user_checked != checked) {
+		TCHAR path[MAX_PATH]={0};
+		if (GetModuleFileName(NULL, path, ARRAYSIZE(path))) {
+			HKEY hKey;
+			LSTATUS lstatus = RegOpenKeyExA(HKEY_CURRENT_USER,
+					SUBKEY_ENABLE_CANCEL, 0, KEY_WRITE, &hKey);
+			if (ERROR_SUCCESS != lstatus) {
+				lstatus = RegCreateKeyExA(HKEY_CURRENT_USER,
+						SUBKEY_ENABLE_CANCEL, 0, NULL, REG_OPTION_NON_VOLATILE,
+						KEY_WRITE, NULL, &hKey, NULL);
+			}
+			if (ERROR_SUCCESS == lstatus) {
+				DWORD enable_cancel = 0;
+				if (user_checked == FALSE) {
+					enable_cancel = 1;
+				}
+				lstatus = RegSetValueEx(hKey, path, 0, REG_DWORD,
+						(const BYTE*)&enable_cancel, sizeof(enable_cancel));
+				RegCloseKey(hKey);
+			}
+		}
+	}
+
+	LocalFree((WCHAR *) tc.pszWindowTitle);
+	LocalFree((WCHAR *) tc.pszMainInstruction);
+	LocalFree((WCHAR *) tc.pszExpandedControlText);
+	LocalFree((WCHAR *) tc.pszCollapsedControlText);
+	LocalFree((WCHAR *) tc.pszExpandedInformation);
+	LocalFree((WCHAR *) tc.pszContent);
+
 	SecureZeroMemory(parameter, sizeof(parameter));
+
 	return (int) result;
 }
 
@@ -2519,9 +3162,7 @@ static DWORD md_translate_OpenSC_to_Windows_error(int OpenSCerror,
 DWORD WINAPI CardDeleteContext(__inout PCARD_DATA  pCardData)
 {
 	VENDOR_SPECIFIC *vs = NULL;
-
-	if (md_static_data.attach_check != MD_STATIC_PROCESS_ATTACHED)
-		return SCARD_S_SUCCESS;
+	CRITICAL_SECTION hScard_lock;
 
 	if(!pCardData)
 		return SCARD_E_INVALID_PARAMETER;
@@ -2537,20 +3178,25 @@ DWORD WINAPI CardDeleteContext(__inout PCARD_DATA  pCardData)
 	if(!vs)
 		return SCARD_E_INVALID_PARAMETER;
 
+	hScard_lock = vs->hScard_lock;
+	EnterCriticalSection(&hScard_lock);
+
 	disassociate_card(pCardData);
+	md_fs_finalize(pCardData);
 
 	if(vs->ctx)   {
 		logprintf(pCardData, 6, "release context\n");
 		sc_release_context(vs->ctx);
-		md_static_data.flags |= MD_STATIC_FLAG_CONTEXT_DELETED;
 		vs->ctx = NULL;
 	}
 
 	logprintf(pCardData, 1, "**********************************************************************\n");
 
-	md_fs_finalize(pCardData);
 	pCardData->pfnCspFree(pCardData->pvVendorSpecific);
 	pCardData->pvVendorSpecific = NULL;
+
+	LeaveCriticalSection(&hScard_lock);
+	DeleteCriticalSection(&hScard_lock);
 
 	return SCARD_S_SUCCESS;
 }
@@ -2565,16 +3211,23 @@ DWORD WINAPI CardQueryCapabilities(__in PCARD_DATA pCardData,
 		  (unsigned long)GetCurrentThreadId(), pCardData);
 	logprintf(pCardData, 1, "pCardCapabilities=%p\n", pCardCapabilities);
 
-	if (!pCardData || !pCardCapabilities)
+	if (!pCardData || !pCardCapabilities || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
 
+	dwret = check_card_status(pCardData, "CardQueryCapabilities");
+	if (dwret != SCARD_S_SUCCESS) {
+		goto err;
+	}
+
 	dwret = md_card_capabilities(pCardData, pCardCapabilities);
-	if (dwret != SCARD_S_SUCCESS)
-		return dwret;
+	if (dwret != SCARD_S_SUCCESS) {
+		goto err;
+	}
 
-	check_reader_status(pCardData);
+err:
+	unlock(pCardData);
 
-	return SCARD_S_SUCCESS;
+	return dwret;
 }
 
 DWORD WINAPI CardDeleteContainer(__in PCARD_DATA pCardData,
@@ -2590,61 +3243,95 @@ DWORD WINAPI CardDeleteContainer(__in PCARD_DATA pCardData,
 	logprintf(pCardData, 1, "CardDeleteContainer(idx:%u)\n",
 		  (unsigned int)bContainerIndex);
 
-	if (!pCardData)
+	if (!pCardData || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
 
-	if (bContainerIndex >= MD_MAX_KEY_CONTAINERS)
-		return SCARD_E_INVALID_PARAMETER;
+	dwret = check_card_reader_status(pCardData, "CardDeleteContainer");
+	if (dwret != SCARD_S_SUCCESS) {
+		goto err;
+	}
+
+	if (bContainerIndex >= MD_MAX_KEY_CONTAINERS) {
+		dwret = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
 
 	if (!md_is_supports_container_key_gen(pCardData))   {
 		logprintf(pCardData, 1, "Denied 'deletion' mechanism to delete container.\n");
-		return SCARD_E_UNSUPPORTED_FEATURE;
+		dwret = SCARD_E_UNSUPPORTED_FEATURE;
+		goto err;
 	}
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
-	if(!vs)
-		return SCARD_E_INVALID_PARAMETER;
+	if(!vs) {
+		dwret = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
 
 	cont = &(vs->p15_containers[bContainerIndex]);
 
 	dwret = md_pkcs15_delete_object(pCardData, cont->prkey_obj);
-	if (dwret != SCARD_S_SUCCESS)   {
+	if (dwret != SCARD_S_SUCCESS) {
 		logprintf(pCardData, 1, "private key deletion failed\n");
-		return dwret;
+		goto err;
 	}
 
 	dwret = md_pkcs15_delete_object(pCardData, cont->pubkey_obj);
 	if (dwret != SCARD_S_SUCCESS)   {
 		logprintf(pCardData, 1, "public key deletion failed\n");
-		return dwret;
+		goto err;
 	}
 
 	ZeroMemory(cont, sizeof(struct md_pkcs15_container));
 
 	logprintf(pCardData, 1, "key deleted\n");
-	return SCARD_S_SUCCESS;
+
+err:
+	unlock(pCardData);
+
+	return dwret;
 }
 
-
-DWORD WINAPI CardCreateContainer(__in PCARD_DATA pCardData,
-	__in BYTE bContainerIndex,
-	__in DWORD dwFlags,
-	__in DWORD dwKeySpec,
-	__in DWORD dwKeySize,
-	__in PBYTE pbKeyData)
+/** The CardCreateContainerEx function creates a new key container that the
+container index identifies and the bContainerIndex parameter specifies. The function
+associates the key container with the PIN that the PinId parameter specified.
+This function is useful if the card-edge does not allow for changing the key attributes
+after the key container is created. This function replaces the need to call
+CardSetContainerProperty to set the CCP_PIN_IDENTIFIER property CardCreateContainer
+is called.
+The caller of this function can provide the key material that the card imports.
+This is useful in those situations in which the card either does not support internal
+key generation or the caller requests that the key be archived in the card.*/
+DWORD WINAPI CardCreateContainerEx(__in PCARD_DATA  pCardData,
+				   __in BYTE  bContainerIndex,
+				   __in DWORD  dwFlags,
+				   __in DWORD  dwKeySpec,
+				   __in DWORD  dwKeySize,
+				   __in PBYTE  pbKeyData,
+				   __in PIN_ID  PinId)
 {
 	DWORD dwret;
 
-	if (!pCardData)
+	if (!pCardData || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
+
+	if (PinId == ROLE_ADMIN) {
+		dwret = SCARD_W_SECURITY_VIOLATION;
+		goto err;
+	}
+
+	dwret = check_card_reader_status(pCardData, "CardCreateContainerEx");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
 
 	logprintf(pCardData, 1, "\nP:%lu T:%lu pCardData:%p ",
 		  (unsigned long)GetCurrentProcessId(),
 		  (unsigned long)GetCurrentThreadId(), pCardData);
 	logprintf(pCardData, 1,
-		  "CardCreateContainerEx(idx:%u,flags:%lX,type:%lX,size:%lu,data:%p)\n",
+		  "CardCreateContainerEx(idx:%u,flags:%lX,type:%lX,size:%lu,data:%p,pin:%u)\n",
 		  (unsigned int)bContainerIndex, (unsigned long)dwFlags,
-		  (unsigned long)dwKeySpec, (unsigned long)dwKeySize, pbKeyData);
+		  (unsigned long)dwKeySpec, (unsigned long)dwKeySize, pbKeyData,
+		  (unsigned int)PinId);
 
 	if (pbKeyData)   {
 		logprintf(pCardData, 7, "Key data\n");
@@ -2654,7 +3341,7 @@ DWORD WINAPI CardCreateContainer(__in PCARD_DATA pCardData,
 	dwret = md_check_key_compatibility(pCardData, dwFlags, dwKeySpec, dwKeySize, pbKeyData);
 	if (dwret != SCARD_S_SUCCESS)   {
 		logprintf(pCardData, 1, "check key compatibility failed\n");
-		return dwret;
+		goto err;
 	}
 
 	if (!md_is_supports_container_key_gen(pCardData))   {
@@ -2669,34 +3356,50 @@ DWORD WINAPI CardCreateContainer(__in PCARD_DATA pCardData,
 
 	if (!dwFlags)   {
 		logprintf(pCardData, 1, "Unsupported create container mechanism.\n");
-		return SCARD_E_UNSUPPORTED_FEATURE;
+		dwret = SCARD_E_UNSUPPORTED_FEATURE;
+		goto err;
 	}
 
 	if (dwFlags & CARD_CREATE_CONTAINER_KEY_GEN)   {
-		dwret = md_pkcs15_generate_key(pCardData, bContainerIndex, dwKeySpec, dwKeySize);
+		dwret = md_pkcs15_generate_key(pCardData, bContainerIndex, dwKeySpec, dwKeySize, PinId);
 		if (dwret != SCARD_S_SUCCESS)   {
 			logprintf(pCardData, 1, "key generation failed\n");
-			return dwret;
+			goto err;
 		}
 		logprintf(pCardData, 1, "key generated\n");
 	}
 	else if ((dwFlags & CARD_CREATE_CONTAINER_KEY_IMPORT) && (pbKeyData != NULL)) {
-		dwret = md_pkcs15_store_key(pCardData, bContainerIndex, dwKeySpec, pbKeyData, dwKeySize);
+		dwret = md_pkcs15_store_key(pCardData, bContainerIndex, dwKeySpec, pbKeyData, dwKeySize, PinId);
 		if (dwret != SCARD_S_SUCCESS)   {
 			logprintf(pCardData, 1, "key store failed\n");
-			return dwret;
+			goto err;
 		}
 		logprintf(pCardData, 1, "key imported\n");
 	}
 	else   {
 		logprintf(pCardData, 1, "Invalid dwFlags value: 0x%lX\n",
 			  (unsigned long)dwFlags);
-		return SCARD_E_INVALID_PARAMETER;
+		dwret = SCARD_E_INVALID_PARAMETER;
+		goto err;
 	}
 
-	return SCARD_S_SUCCESS;
+err:
+	unlock(pCardData);
+
+	return dwret;
 }
 
+DWORD WINAPI CardCreateContainer(__in PCARD_DATA pCardData,
+				 __in BYTE bContainerIndex,
+				 __in DWORD dwFlags,
+				 __in DWORD dwKeySpec,
+				 __in DWORD dwKeySize,
+				 __in PBYTE pbKeyData)
+{
+	return CardCreateContainerEx(pCardData, bContainerIndex, dwFlags,
+				     dwKeySpec, dwKeySize, pbKeyData,
+				     ROLE_USER);
+}
 
 typedef struct {
 	PUBLICKEYSTRUC  publickeystruc;
@@ -2708,16 +3411,22 @@ DWORD WINAPI CardGetContainerInfo(__in PCARD_DATA pCardData, __in BYTE bContaine
 {
 	VENDOR_SPECIFIC *vs = NULL;
 	DWORD sz = 0;
-	DWORD ret = SCARD_F_UNKNOWN_ERROR;
+	DWORD ret;
 	struct md_pkcs15_container *cont = NULL;
 	struct sc_pkcs15_der pubkey_der;
 	struct sc_pkcs15_prkey_info *prkey_info = NULL;
 	int rv;
+	pubkey_der.value = NULL;
+	pubkey_der.len = 0;
 
 	if(!pCardData)
 		return SCARD_E_INVALID_PARAMETER;
-	if (!pContainerInfo)
+	if (!pContainerInfo || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
+
+	ret = check_card_reader_status(pCardData, "CardGetContainerInfo");
+	if (ret != SCARD_S_SUCCESS)
+		goto err;
 
 	logprintf(pCardData, 1, "\nP:%lu T:%lu pCardData:%p ",
 		  (unsigned long)GetCurrentProcessId(),
@@ -2729,33 +3438,38 @@ DWORD WINAPI CardGetContainerInfo(__in PCARD_DATA pCardData, __in BYTE bContaine
 		  (unsigned long)pContainerInfo->cbSigPublicKey,
 		  (unsigned long)pContainerInfo->cbKeyExPublicKey);
 
-	if (dwFlags)
-		return SCARD_E_INVALID_PARAMETER;
-	if (bContainerIndex >= MD_MAX_KEY_CONTAINERS)
-		return SCARD_E_NO_KEY_CONTAINER;
-	if (pContainerInfo->dwVersion > CONTAINER_INFO_CURRENT_VERSION)
-		return ERROR_REVISION_MISMATCH;
+	if (dwFlags) {
+		ret = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
+	if (bContainerIndex >= MD_MAX_KEY_CONTAINERS) {
+		ret = SCARD_E_NO_KEY_CONTAINER;
+		goto err;
+	}
+	if (pContainerInfo->dwVersion > CONTAINER_INFO_CURRENT_VERSION) {
+		ret = ERROR_REVISION_MISMATCH;
+		goto err;
+	}
 
 	pContainerInfo->dwVersion = CONTAINER_INFO_CURRENT_VERSION;
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs) {
+		ret = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
+
 	cont = &vs->p15_containers[bContainerIndex];
 
 	if (!cont->prkey_obj)   {
 		logprintf(pCardData, 7, "Container %u is empty\n",
 			  (unsigned int)bContainerIndex);
-		return SCARD_E_NO_KEY_CONTAINER;
+		ret = SCARD_E_NO_KEY_CONTAINER;
+		goto err;
 	}
 
-	if (vs->p15card == NULL) {
-		return SCARD_F_INTERNAL_ERROR;
-	}
-
+	ret = SCARD_F_UNKNOWN_ERROR;
 	prkey_info = (struct sc_pkcs15_prkey_info *)cont->prkey_obj->data;
-
-	check_reader_status(pCardData);
-	pubkey_der.value = NULL;
-	pubkey_der.len = 0;
 
 	if ((cont->prkey_obj->content.value != NULL) && (cont->prkey_obj->content.len > 0))   {
 		sc_der_copy(&pubkey_der, &cont->prkey_obj->content);
@@ -2814,14 +3528,15 @@ DWORD WINAPI CardGetContainerInfo(__in PCARD_DATA pCardData, __in BYTE bContaine
 
 	if (!pubkey_der.value && (cont->size_sign || cont->size_key_exchange)) {
 		logprintf(pCardData, 2, "cannot find public key\n");
-		return SCARD_F_INTERNAL_ERROR;
+		ret = SCARD_F_INTERNAL_ERROR;
+		goto err;
 	}
 
 	if (ret != SCARD_S_SUCCESS)   {
 		logprintf(pCardData, 7,
 			  "GetContainerInfo(idx:%u) failed; error %lX",
 			  (unsigned int)bContainerIndex, (unsigned long)ret);
-		return ret;
+		goto err;
 	}
 
 	logprintf(pCardData, 7, "SubjectPublicKeyInfo:\n");
@@ -2836,8 +3551,10 @@ DWORD WINAPI CardGetContainerInfo(__in PCARD_DATA pCardData, __in BYTE bContaine
 
 			if (cont->size_sign)   {
 				PUBRSAKEYSTRUCT_BASE *publicKey = (PUBRSAKEYSTRUCT_BASE *)pCardData->pfnCspAlloc(sz);
-				if (!publicKey)
-					return SCARD_E_NO_MEMORY;
+				if (!publicKey) {
+					ret = SCARD_E_NO_MEMORY;
+					goto err;
+				}
 
 				CryptDecodeObject(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, RSA_CSP_PUBLICKEYBLOB,
 						pubkey_der.value, (DWORD) pubkey_der.len, 0, publicKey, &sz);
@@ -2853,8 +3570,10 @@ DWORD WINAPI CardGetContainerInfo(__in PCARD_DATA pCardData, __in BYTE bContaine
 
 			if (cont->size_key_exchange)   {
 				PUBRSAKEYSTRUCT_BASE *publicKey = (PUBRSAKEYSTRUCT_BASE*)pCardData->pfnCspAlloc(sz);
-				if (!publicKey)
-					return SCARD_E_NO_MEMORY;
+				if (!publicKey) {
+					ret = SCARD_E_NO_MEMORY;
+					goto err;
+				}
 
 				CryptDecodeObject(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, RSA_CSP_PUBLICKEYBLOB,
 						pubkey_der.value, (DWORD) pubkey_der.len, 0, publicKey, &sz);
@@ -2892,12 +3611,15 @@ DWORD WINAPI CardGetContainerInfo(__in PCARD_DATA pCardData, __in BYTE bContaine
 					logprintf(pCardData, 3,
 						  "Unable to match the ECC public size to one of Microsoft algorithm %"SC_FORMAT_LEN_SIZE_T"u\n",
 						  cont->size_sign);
-					return SCARD_F_INTERNAL_ERROR;
+					ret = SCARD_F_INTERNAL_ERROR;
+					goto err;
 				}
 
 				publicKey = (BCRYPT_ECCKEY_BLOB *)pCardData->pfnCspAlloc(sz);
-				if (!publicKey)
-					return SCARD_E_NO_MEMORY;
+				if (!publicKey) {
+					ret = SCARD_E_NO_MEMORY;
+					goto err;
+				}
 
 				publicKey->cbKey =  (DWORD)(pubkey_der.len -3) /2;
 				publicKey->dwMagic = dwMagic;
@@ -2928,12 +3650,15 @@ DWORD WINAPI CardGetContainerInfo(__in PCARD_DATA pCardData, __in BYTE bContaine
 					logprintf(pCardData, 3,
 						  "Unable to match the ECC public size to one of Microsoft algorithm %"SC_FORMAT_LEN_SIZE_T"u\n",
 						  cont->size_key_exchange);
-					return SCARD_F_INTERNAL_ERROR;
+					ret = SCARD_F_INTERNAL_ERROR;
+					goto err;
 				}
 
 				publicKey = (BCRYPT_ECCKEY_BLOB *)pCardData->pfnCspAlloc(sz);
-				if (!publicKey)
-					return SCARD_E_NO_MEMORY;
+				if (!publicKey) {
+					ret = SCARD_E_NO_MEMORY;
+					goto err;
+				}
 
 				publicKey->cbKey =  (DWORD)(pubkey_der.len -3) /2;
 				publicKey->dwMagic = dwMagic;
@@ -2948,10 +3673,14 @@ DWORD WINAPI CardGetContainerInfo(__in PCARD_DATA pCardData, __in BYTE bContaine
 			}
 		}
 	}
-
 	logprintf(pCardData, 7, "returns container(idx:%u) info",
 		  (unsigned int)bContainerIndex);
-	return SCARD_S_SUCCESS;
+
+err:
+	free(pubkey_der.value);
+	unlock(pCardData);
+
+	return ret;
 }
 
 DWORD WINAPI CardAuthenticatePin(__in PCARD_DATA pCardData,
@@ -2988,6 +3717,7 @@ DWORD WINAPI CardGetChallenge(__in PCARD_DATA pCardData,
 	__out                                 PDWORD pcbChallengeData)
 {
 	VENDOR_SPECIFIC *vs;
+	DWORD dwret;
 	int rv;
 
 	logprintf(pCardData, 1, "\nP:%lu T:%lu pCardData:%p ",
@@ -2997,31 +3727,45 @@ DWORD WINAPI CardGetChallenge(__in PCARD_DATA pCardData,
 
 	if(!pCardData)
 		return SCARD_E_INVALID_PARAMETER;
-	if (!ppbChallengeData || !pcbChallengeData)
+	if (!ppbChallengeData || !pcbChallengeData || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
 
-	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	dwret = check_card_reader_status(pCardData, "CardGetChallenge");
+	if (dwret != SCARD_S_SUCCESS) {
+		goto err;
+	}
 
-	check_reader_status(pCardData);
+	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs) {
+		dwret = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
 
 	*pcbChallengeData = 8;
 
 	*ppbChallengeData = (PBYTE) pCardData->pfnCspAlloc(8);
-	if (!*ppbChallengeData)
-		return SCARD_E_NO_MEMORY;
+	if (!*ppbChallengeData) {
+		dwret = SCARD_E_NO_MEMORY;
+		goto err;
+	}
 
 	rv = sc_get_challenge(vs->p15card->card, *ppbChallengeData, 8);
-	if (rv)   {
+	if (rv < 0) {
 		logprintf(pCardData, 1, "Get challenge failed: %s\n", sc_strerror(rv));
 		pCardData->pfnCspFree(*ppbChallengeData);
 		*ppbChallengeData = NULL;
-		return SCARD_E_UNEXPECTED;
+		dwret = SCARD_E_UNEXPECTED;
+		goto err;
 	}
+	dwret = SCARD_S_SUCCESS;
 
 	logprintf(pCardData, 7, "returns %lu bytes:\n",
 		  (unsigned long)*pcbChallengeData);
 	loghex(pCardData, 7, *ppbChallengeData, *pcbChallengeData);
-	return SCARD_S_SUCCESS;
+
+err:
+	unlock(pCardData);
+	return dwret;
 }
 
 
@@ -3047,7 +3791,9 @@ DWORD WINAPI CardUnblockPin(__in PCARD_DATA  pCardData,
 	__in DWORD  cRetryCount,
 	__in DWORD  dwFlags)
 {
-	if(!pCardData)
+	DWORD r = SCARD_S_SUCCESS;
+
+	if(!pCardData || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
 
 	logprintf(pCardData, 1, "\nP:%lu T:%lu pCardData:%p ",
@@ -3057,43 +3803,52 @@ DWORD WINAPI CardUnblockPin(__in PCARD_DATA  pCardData,
 
 	if (pwszUserId == NULL) {
 		logprintf(pCardData, 1, "no user ID\n");
-		return SCARD_E_INVALID_PARAMETER;
+		r = SCARD_E_INVALID_PARAMETER;
+		goto err;
 	}
 	if (wcscmp(wszCARD_USER_USER, pwszUserId) != 0 && wcscmp(wszCARD_USER_ADMIN,pwszUserId) != 0) {
 		logprintf(pCardData, 1, "unknown user ID %S\n", pwszUserId);
-		return SCARD_E_INVALID_PARAMETER;
+		r = SCARD_E_INVALID_PARAMETER;
+		goto err;
 	}
 	if (wcscmp(wszCARD_USER_ADMIN, pwszUserId) == 0) {
 		logprintf(pCardData, 1, "unlocking admin not supported\n");
-		return SCARD_E_UNSUPPORTED_FEATURE;
+		r = SCARD_E_UNSUPPORTED_FEATURE;
+		goto err;
 	}
 	if (dwFlags & CARD_AUTHENTICATE_PIN_CHALLENGE_RESPONSE) {
 		logprintf(pCardData, 1,
-			  "challenge / response not supported, we'll treat response as a PUK\n");
+				"challenge / response not supported, we'll treat response as a PUK\n");
 		logprintf(pCardData, 1,
-			  "note that you'll need to type PUK in hex (replace every PUK digit X with '3X') in Win CAD unblock dialog response field\n");
+				"note that you'll need to type PUK in hex (replace every PUK digit X with '3X') in Win CAD unblock dialog response field\n");
 		dwFlags &= ~CARD_AUTHENTICATE_PIN_CHALLENGE_RESPONSE;
 	}
 	if (dwFlags) {
 		logprintf(pCardData, 1, "flags of %x not supported\n",
-			  (unsigned int)dwFlags);
-		return SCARD_E_INVALID_PARAMETER;
+				(unsigned int)dwFlags);
+		r = SCARD_E_INVALID_PARAMETER;
+		goto err;
 	}
 
 	logprintf(pCardData, 1,
-		  "UserID('%S'), AuthData(%p, %lu), NewPIN(%p, %lu), Retry(%lu), dwFlags(0x%lX)\n",
-		  pwszUserId, pbAuthenticationData,
-		  (unsigned long)cbAuthenticationData, pbNewPinData,
-		  (unsigned long)cbNewPinData, (unsigned long)cRetryCount,
-		  (unsigned long)dwFlags);
+			"UserID('%S'), AuthData(%p, %lu), NewPIN(%p, %lu), Retry(%lu), dwFlags(0x%lX)\n",
+			pwszUserId, pbAuthenticationData,
+			(unsigned long)cbAuthenticationData, pbNewPinData,
+			(unsigned long)cbNewPinData, (unsigned long)cRetryCount,
+			(unsigned long)dwFlags);
 
-	return CardChangeAuthenticatorEx(pCardData,
-					 PIN_CHANGE_FLAG_UNBLOCK |
-					 CARD_PIN_SILENT_CONTEXT,
-					 ROLE_ADMIN, pbAuthenticationData,
-					 cbAuthenticationData, ROLE_USER,
-					 pbNewPinData, cbNewPinData,
-					 cRetryCount, NULL);
+	r = CardChangeAuthenticatorEx(pCardData,
+			PIN_CHANGE_FLAG_UNBLOCK |
+			CARD_PIN_SILENT_CONTEXT,
+			ROLE_ADMIN, pbAuthenticationData,
+			cbAuthenticationData, ROLE_USER,
+			pbNewPinData, cbNewPinData,
+			cRetryCount, NULL);
+
+err:
+	unlock(pCardData);
+
+	return r;
 }
 
 
@@ -3107,78 +3862,106 @@ DWORD WINAPI CardChangeAuthenticator(__in PCARD_DATA  pCardData,
 	__in DWORD dwFlags,
 	__out_opt PDWORD pcAttemptsRemaining)
 {
+	DWORD r = SCARD_S_SUCCESS;
 	PIN_ID pinid;
-	if(!pCardData)
+
+	if(!pCardData || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
 
 	logprintf(pCardData, 1, "\nP:%lu T:%lu pCardData:%p ",
-		  (unsigned long)GetCurrentProcessId(),
-		  (unsigned long)GetCurrentThreadId(), pCardData);
+			(unsigned long)GetCurrentProcessId(),
+			(unsigned long)GetCurrentThreadId(), pCardData);
 	logprintf(pCardData, 1, "CardChangeAuthenticator\n");
 
-	if (pwszUserId == NULL)
-		return SCARD_E_INVALID_PARAMETER;
+	if (pwszUserId == NULL) {
+		r = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
 
 	if (dwFlags == CARD_AUTHENTICATE_PIN_CHALLENGE_RESPONSE)   {
 		logprintf(pCardData, 1, "Other then 'authentication' the PIN are not supported\n");
-		return SCARD_E_UNSUPPORTED_FEATURE;
+		r = SCARD_E_UNSUPPORTED_FEATURE;
+		goto err;
 	}
 	else if (dwFlags != CARD_AUTHENTICATE_PIN_PIN){
-		return SCARD_E_INVALID_PARAMETER;
+		r = SCARD_E_INVALID_PARAMETER;
+		goto err;
 	}
 
-	if (wcscmp(wszCARD_USER_USER, pwszUserId) != 0 && wcscmp(wszCARD_USER_ADMIN, pwszUserId) != 0)
-		return SCARD_E_INVALID_PARAMETER;
+	if (wcscmp(wszCARD_USER_USER, pwszUserId) != 0 && wcscmp(wszCARD_USER_ADMIN, pwszUserId) != 0) {
+		r = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
 
 	logprintf(pCardData, 1,
-		  "UserID('%S'), CurrentPIN(%p, %lu), NewPIN(%p, %lu), Retry(%lu), dwFlags(0x%lX)\n",
-		  pwszUserId, pbCurrentAuthenticator,
-		  (unsigned long)cbCurrentAuthenticator, pbNewAuthenticator,
-		  (unsigned long)cbNewAuthenticator, (unsigned long)cRetryCount,
-		  (unsigned long)dwFlags);
+			"UserID('%S'), CurrentPIN(%p, %lu), NewPIN(%p, %lu), Retry(%lu), dwFlags(0x%lX)\n",
+			pwszUserId, pbCurrentAuthenticator,
+			(unsigned long)cbCurrentAuthenticator, pbNewAuthenticator,
+			(unsigned long)cbNewAuthenticator, (unsigned long)cRetryCount,
+			(unsigned long)dwFlags);
 
 	if (wcscmp(wszCARD_USER_USER, pwszUserId) == 0)
 		pinid = ROLE_USER;
 	else
 		pinid = ROLE_ADMIN;
 
-	return CardChangeAuthenticatorEx(pCardData, PIN_CHANGE_FLAG_CHANGEPIN |
-					 CARD_PIN_SILENT_CONTEXT, pinid,
-					 pbCurrentAuthenticator,
-					 cbCurrentAuthenticator, pinid,
-					 pbNewAuthenticator, cbNewAuthenticator,
-					 cRetryCount, pcAttemptsRemaining);
+	r = CardChangeAuthenticatorEx(pCardData, PIN_CHANGE_FLAG_CHANGEPIN |
+			CARD_PIN_SILENT_CONTEXT, pinid,
+			pbCurrentAuthenticator,
+			cbCurrentAuthenticator, pinid,
+			pbNewAuthenticator, cbNewAuthenticator,
+			cRetryCount, pcAttemptsRemaining);
+
+err:
+	unlock(pCardData);
+	return r;
 }
 
-/* this function is not called on purpose.
-If a deauthentication is not possible, it should be set to NULL in CardAcquireContext.
-Because this function do nothing - it is not called.
-Note: the PIN freshnesh will be managed by the Base CSP*/
+/* Note: the PIN freshness will be managed by the Base CSP */
 DWORD WINAPI CardDeauthenticate(__in PCARD_DATA pCardData,
 	__in LPWSTR pwszUserId,
 	__in DWORD dwFlags)
 {
+	DWORD dwret;
 	VENDOR_SPECIFIC* vs = NULL;
 	int rv;
+
 	logprintf(pCardData, 1, "\nP:%ld T:%ld pCardData:%p ",
 		  (unsigned long)GetCurrentProcessId(),
 		  (unsigned long)GetCurrentThreadId(), pCardData);
 	logprintf(pCardData, 1, "CardDeauthenticate(%S) %lu\n",
 		  NULLWSTR(pwszUserId), (unsigned long)dwFlags);
 
-	if(!pCardData)
+	if(!pCardData || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
 
+	dwret = check_card_reader_status(pCardData, "CardDeauthenticate");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
+
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs) {
+		dwret = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
 
 	sc_pkcs15_pincache_clear(vs->p15card);
 
 	rv = sc_logout(vs->p15card->card);
 
-	if (rv != SC_SUCCESS)
-		return SCARD_E_UNSUPPORTED_FEATURE;
-	/* force a reset of a card - SCARD_S_SUCCESS do not lead to the reset of the card and leave it still authenticated */
-	return SCARD_S_SUCCESS;
+	if (rv != SC_SUCCESS) {
+		/* force a reset of a card - SCARD_S_SUCCESS do not lead to the reset
+		 * of the card and leave it still authenticated */
+		dwret = SCARD_E_UNSUPPORTED_FEATURE;
+		goto err;
+	}
+
+	dwret = SCARD_S_SUCCESS;
+
+err:
+	unlock(pCardData);
+
+	return dwret;
 }
 
 DWORD WINAPI CardCreateDirectory(__in PCARD_DATA pCardData,
@@ -3219,17 +4002,27 @@ DWORD WINAPI CardCreateFile(__in PCARD_DATA pCardData,
 		  NULLSTR(pszDirectoryName), NULLSTR(pszFileName),
 		  (unsigned long)cbInitialCreationSize, AccessCondition);
 
+	if (!lock(pCardData))
+		return SCARD_E_INVALID_PARAMETER;
+
+	dwret = check_card_status(pCardData, "CardCreateFile");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
+
 	dwret = md_fs_find_directory(pCardData, NULL, pszDirectoryName, &dir);
 	if (dwret != SCARD_S_SUCCESS)   {
 		logprintf(pCardData, 1, "CardCreateFile() cannot find parent directory '%s'", NULLSTR(pszDirectoryName));
-		return dwret;
+		goto err;
 	}
 
 	dwret = md_fs_add_file(pCardData, &dir->files, pszFileName, AccessCondition, NULL, cbInitialCreationSize, NULL);
 	if (dwret != SCARD_S_SUCCESS)
-		return dwret;
+		goto err;
 
-	return SCARD_S_SUCCESS;
+err:
+	unlock(pCardData);
+
+	return dwret;
 }
 
 
@@ -3241,13 +4034,14 @@ DWORD WINAPI CardReadFile(__in PCARD_DATA pCardData,
 	__out PDWORD pcbData)
 {
 	struct md_file *file = NULL;
+	DWORD dwret;
 
 	logprintf(pCardData, 1, "\nP:%lu T:%lu pCardData:%p ",
 		  (unsigned long)GetCurrentProcessId(),
 		  (unsigned long)GetCurrentThreadId(), pCardData);
 	logprintf(pCardData, 1, "CardReadFile\n");
 
-	if(!pCardData)
+	if(!pCardData || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
 
 	logprintf(pCardData, 2,
@@ -3255,31 +4049,34 @@ DWORD WINAPI CardReadFile(__in PCARD_DATA pCardData,
 		  NULLSTR(pszDirectoryName), NULLSTR(pszFileName),
 		  (unsigned long)dwFlags, pcbData, ppbData);
 
-	if (!pszFileName || !strlen(pszFileName))
-		return SCARD_E_INVALID_PARAMETER;
-	if (dwFlags)
-		return SCARD_E_INVALID_PARAMETER;
+	if (!pszFileName || !strlen(pszFileName) || dwFlags) {
+		dwret = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
 
-	check_reader_status(pCardData);
+	dwret = check_card_reader_status(pCardData, "CardReadFile");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
 
 	md_fs_find_file(pCardData, pszDirectoryName, pszFileName, &file);
 	if (!file)   {
 		logprintf(pCardData, 2, "CardReadFile(): file '%s' not found in '%s'\n", NULLSTR(pszFileName), NULLSTR(pszDirectoryName));
-		return SCARD_E_FILE_NOT_FOUND;
+		dwret = SCARD_E_FILE_NOT_FOUND;
+		goto err;
 	}
 
 	if (!file->blob) {
-		DWORD dwret;
-
 		dwret = md_fs_read_content(pCardData, pszDirectoryName, file);
 		if (dwret != SCARD_S_SUCCESS)
-			return dwret;
+			goto err;
 	}
 
 	if (ppbData) {
 		*ppbData = pCardData->pfnCspAlloc(file->size);
-		if(!*ppbData)
-			return SCARD_E_NO_MEMORY;
+		if(!*ppbData) {
+			dwret = SCARD_E_NO_MEMORY;
+			goto err;
+		}
 
 		memcpy(*ppbData, file->blob, file->size);
 	}
@@ -3289,7 +4086,11 @@ DWORD WINAPI CardReadFile(__in PCARD_DATA pCardData,
 
 	logprintf(pCardData, 7, "returns '%s' content:\n",  NULLSTR(pszFileName));
 	loghex(pCardData, 7, file->blob, file->size);
-	return SCARD_S_SUCCESS;
+
+err:
+	unlock(pCardData);
+
+	return dwret;
 }
 
 
@@ -3303,7 +4104,7 @@ DWORD WINAPI CardWriteFile(__in PCARD_DATA pCardData,
 	struct md_file *file = NULL;
 	DWORD dwret;
 
-	if(!pCardData)
+	if(!pCardData || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
 
 	logprintf(pCardData, 1, "\nP:%lu T:%lu pCardData:%p ",
@@ -3311,7 +4112,9 @@ DWORD WINAPI CardWriteFile(__in PCARD_DATA pCardData,
 		  (unsigned long)GetCurrentThreadId(), pCardData);
 	logprintf(pCardData, 1, "CardWriteFile() dirName:'%s', fileName:'%s' \n", NULLSTR(pszDirectoryName), NULLSTR(pszFileName));
 
-	check_reader_status(pCardData);
+	dwret = check_card_reader_status(pCardData, "CardWriteFile");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
 
 	if (pbData && cbData)   {
 		logprintf(pCardData, 1, "CardWriteFile try to write (%lu):\n",
@@ -3322,7 +4125,8 @@ DWORD WINAPI CardWriteFile(__in PCARD_DATA pCardData,
 	md_fs_find_file(pCardData, pszDirectoryName, pszFileName, &file);
 	if (!file)   {
 		logprintf(pCardData, 2, "CardWriteFile(): file '%s' not found in '%s'\n", NULLSTR(pszFileName), NULLSTR(pszDirectoryName));
-		return SCARD_E_FILE_NOT_FOUND;
+		dwret = SCARD_E_FILE_NOT_FOUND;
+		goto err;
 	}
 
 	logprintf(pCardData, 7, "set content of '%s' to:\n",  NULLSTR(pszFileName));
@@ -3332,20 +4136,23 @@ DWORD WINAPI CardWriteFile(__in PCARD_DATA pCardData,
 	if (dwret != SCARD_S_SUCCESS)   {
 		logprintf(pCardData, 1, "cannot set file content: %lu\n",
 			  (unsigned long)dwret);
-		return dwret;
+		goto err;
 	}
 
 	if (pszDirectoryName && !strcmp(pszDirectoryName, "mscp"))   {
 		if ((strstr(pszFileName, "kxc") == pszFileName) || (strstr(pszFileName, "ksc") == pszFileName))	{
 			dwret = md_pkcs15_store_certificate(pCardData, pszFileName, pbData, cbData);
 			if (dwret != SCARD_S_SUCCESS)
-				return dwret;
+				goto err;
 			logprintf(pCardData, 2, "md_pkcs15_store_certificate() OK\n");
 		}
 	}
 
 	logprintf(pCardData, 2, "write '%s' ok.\n",  NULLSTR(pszFileName));
-	return SCARD_S_SUCCESS;
+
+err:
+	unlock(pCardData);
+	return dwret;
 }
 
 DWORD WINAPI CardDeleteFile(__in PCARD_DATA pCardData,
@@ -3360,20 +4167,24 @@ DWORD WINAPI CardDeleteFile(__in PCARD_DATA pCardData,
 		  (unsigned long)GetCurrentThreadId(), pCardData);
 	logprintf(pCardData, 1, "CardDeleteFile(%s, %s) called\n", NULLSTR(pszDirectoryName), NULLSTR(pszFileName));
 
-	if(!pCardData)
+	if(!pCardData  || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
 
-	check_reader_status(pCardData);
+	dwret = check_card_reader_status(pCardData, "CardDeleteFile");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
 
 	dwret = md_fs_delete_file(pCardData, pszDirectoryName, pszFileName);
 	if (dwret != SCARD_S_SUCCESS)   {
 		logprintf(pCardData, 2,
 			  "CardDeleteFile(): delete file error: %lX\n",
 			  (unsigned long)dwret);
-		return dwret;
+		goto err;
 	}
 
-	return SCARD_S_SUCCESS;
+err:
+	unlock(pCardData);
+	return dwret;
 }
 
 
@@ -3384,6 +4195,7 @@ DWORD WINAPI CardEnumFiles(__in PCARD_DATA pCardData,
 	__in DWORD dwFlags)
 {
 	VENDOR_SPECIFIC *vs = NULL;
+	DWORD dwret;
 	char mstr[0x100];
 	struct md_directory *dir = NULL;
 	struct md_file *file = NULL;
@@ -3394,18 +4206,25 @@ DWORD WINAPI CardEnumFiles(__in PCARD_DATA pCardData,
 		  (unsigned long)GetCurrentThreadId(), pCardData);
 	logprintf(pCardData, 1, "CardEnumFiles() directory '%s'\n", NULLSTR(pszDirectoryName));
 
-	if (!pCardData)
-		return SCARD_E_INVALID_PARAMETER;
-	if (!pmszFileNames || !pdwcbFileName)
+	if (!pCardData || !pmszFileNames || !pdwcbFileName || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
 	if (dwFlags)   {
 		logprintf(pCardData, 1,
 			  "CardEnumFiles() dwFlags not 'zero' -- %lX\n",
 			  (unsigned long)dwFlags);
-		return SCARD_E_INVALID_PARAMETER;
+		dwret = SCARD_E_INVALID_PARAMETER;
+		goto err;
 	}
 
+	dwret = check_card_status(pCardData, "CardEnumFiles");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
+
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs) {
+		dwret = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
 
 	memset(mstr, 0, sizeof(mstr));
 
@@ -3415,7 +4234,8 @@ DWORD WINAPI CardEnumFiles(__in PCARD_DATA pCardData,
 		md_fs_find_directory(pCardData, NULL, pszDirectoryName, &dir);
 	if (!dir)   {
 		logprintf(pCardData, 2, "enum files() failed: directory '%s' not found\n", NULLSTR(pszDirectoryName));
-		return SCARD_E_FILE_NOT_FOUND;
+		dwret = SCARD_E_FILE_NOT_FOUND;
+		goto err;
 	}
 
 	file = dir->files;
@@ -3429,12 +4249,17 @@ DWORD WINAPI CardEnumFiles(__in PCARD_DATA pCardData,
 	offs += 1;
 
 	*pmszFileNames = (LPSTR)(*pCardData->pfnCspAlloc)(offs);
-	if (*pmszFileNames == NULL)
-		return SCARD_E_NO_MEMORY;
+	if (*pmszFileNames == NULL) {
+		dwret = SCARD_E_NO_MEMORY;
+		goto err;
+	}
 
 	CopyMemory(*pmszFileNames, mstr, offs);
 	*pdwcbFileName = (DWORD) offs;
-	return SCARD_S_SUCCESS;
+
+err:
+	unlock(pCardData);
+	return dwret;
 }
 
 
@@ -3443,24 +4268,35 @@ DWORD WINAPI CardGetFileInfo(__in PCARD_DATA pCardData,
 	__in LPSTR pszFileName,
 	__inout PCARD_FILE_INFO pCardFileInfo)
 {
+	DWORD dwret;
 	struct md_file *file = NULL;
+
+	if(!pCardData  || !lock(pCardData))
+		return SCARD_E_INVALID_PARAMETER;
 
 	logprintf(pCardData, 1, "\nP:%lu T:%lu pCardData:%p ",
 		  (unsigned long)GetCurrentProcessId(),
 		  (unsigned long)GetCurrentThreadId(), pCardData);
 	logprintf(pCardData, 1, "CardGetFileInfo(dirName:'%s',fileName:'%s', out %p)\n", NULLSTR(pszDirectoryName), NULLSTR(pszFileName), pCardFileInfo);
 
+	dwret = check_card_status(pCardData, "CardGetFileInfo");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
+
 	md_fs_find_file(pCardData, pszDirectoryName, pszFileName, &file);
 	if (!file)   {
 		logprintf(pCardData, 2, "CardWriteFile(): file '%s' not found in '%s'\n", NULLSTR(pszFileName), NULLSTR(pszDirectoryName));
-		return SCARD_E_FILE_NOT_FOUND;
+		dwret = SCARD_E_FILE_NOT_FOUND;
+		goto err;
 	}
 
 	pCardFileInfo->dwVersion = CARD_FILE_INFO_CURRENT_VERSION;
 	pCardFileInfo->cbFileSize = (DWORD) file->size;
 	pCardFileInfo->AccessCondition = file->acl;
 
-	return SCARD_S_SUCCESS;
+err:
+	unlock(pCardData);
+	return dwret;
 }
 
 
@@ -3477,20 +4313,25 @@ DWORD WINAPI CardQueryFreeSpace(__in PCARD_DATA pCardData, __in DWORD dwFlags,
 		  pCardFreeSpaceInfo, (unsigned long)dwFlags,
 		  (unsigned long)pCardFreeSpaceInfo->dwVersion);
 
-	if (!pCardData)
+	if (!pCardData || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
 
-	check_reader_status(pCardData);
+	dwret = check_card_status(pCardData, "CardQueryFreeSpace");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
 
 	dwret = md_free_space(pCardData, pCardFreeSpaceInfo);
 	if (dwret != SCARD_S_SUCCESS)   {
 		logprintf(pCardData, 1, "CardQueryFreeSpace() md free space error");
-		return dwret;
+		goto err;
 	}
 
 	logprintf(pCardData, 7, "FreeSpace:\n");
 	loghex(pCardData, 7, (BYTE *)pCardFreeSpaceInfo, sizeof(*pCardFreeSpaceInfo));
-	return SCARD_S_SUCCESS;
+
+err:
+	unlock(pCardData);
+	return dwret;
 }
 
 
@@ -3509,20 +4350,23 @@ DWORD WINAPI CardQueryKeySizes(__in PCARD_DATA pCardData,
 		  (unsigned long)dwKeySpec, (unsigned long)dwFlags,
 		  pKeySizes ? (unsigned long)pKeySizes->dwVersion : 0);
 
-	if (!pCardData)
+	if (!pCardData || dwFlags != 0 || dwKeySpec == 0 || !lock(pCardData))
 		return SCARD_E_INVALID_PARAMETER;
-	if ( dwFlags != 0 )
-		return SCARD_E_INVALID_PARAMETER;
-	if ( dwKeySpec == 0 )
-		return SCARD_E_INVALID_PARAMETER;
+
+	dwret = check_card_status(pCardData, "CardQueryKeySizes");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
 
 	dwret = md_query_key_sizes(pCardData, dwKeySpec, pKeySizes);
 	if (dwret != SCARD_S_SUCCESS)
-		return dwret;
+		goto err;
 
 	logprintf(pCardData, 7, "pKeySizes:\n");
 	loghex(pCardData, 7, (BYTE *)pKeySizes, sizeof(*pKeySizes));
-	return SCARD_S_SUCCESS;
+
+err:
+	unlock(pCardData);
+	return dwret;
 }
 
 
@@ -3530,6 +4374,7 @@ DWORD WINAPI CardRSADecrypt(__in PCARD_DATA pCardData,
 	__inout PCARD_RSA_DECRYPT_INFO  pInfo)
 
 {
+	DWORD dwret;
 	int r, opt_crypt_flags = 0;
 	unsigned ui;
 	VENDOR_SPECIFIC *vs;
@@ -3542,11 +4387,7 @@ DWORD WINAPI CardRSADecrypt(__in PCARD_DATA pCardData,
 		  (unsigned long)GetCurrentProcessId(),
 		  (unsigned long)GetCurrentThreadId(), pCardData);
 	logprintf(pCardData, 1, "CardRSADecrypt\n");
-	if (!pCardData)
-		return SCARD_E_INVALID_PARAMETER;
-	if (!pInfo)
-		return SCARD_E_INVALID_PARAMETER;
-	if ( pInfo->pbData == NULL )
+	if (!pCardData || !pInfo || pInfo->pbData == NULL)
 		return SCARD_E_INVALID_PARAMETER;
 	if (pInfo->dwVersion > CARD_RSA_KEY_DECRYPT_INFO_CURRENT_VERSION)
 		return ERROR_REVISION_MISMATCH;
@@ -3556,13 +4397,24 @@ DWORD WINAPI CardRSADecrypt(__in PCARD_DATA pCardData,
 	if (pInfo->dwKeySpec != AT_KEYEXCHANGE)
 		return SCARD_E_INVALID_PARAMETER;
 
+	if (!lock(pCardData))
+		return SCARD_E_INVALID_PARAMETER;
+
+	dwret = check_card_reader_status(pCardData, "CardRSADecrypt");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
+
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs) {
+		dwret = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
 
 	/* check if the container exists */
-	if (pInfo->bContainerIndex >= MD_MAX_KEY_CONTAINERS)
-		return SCARD_E_NO_KEY_CONTAINER;
-
-	check_reader_status(pCardData);
+	if (pInfo->bContainerIndex >= MD_MAX_KEY_CONTAINERS) {
+		dwret = SCARD_E_NO_KEY_CONTAINER;
+		goto err;
+	}
 
 	logprintf(pCardData, 2,
 		  "CardRSADecrypt dwVersion=%lu, bContainerIndex=%u, dwKeySpec=%lu pbData=%p, cbData=%lu\n",
@@ -3580,18 +4432,22 @@ DWORD WINAPI CardRSADecrypt(__in PCARD_DATA pCardData,
 	pkey = vs->p15_containers[pInfo->bContainerIndex].prkey_obj;
 	if (!pkey)   {
 		logprintf(pCardData, 2, "CardRSADecrypt prkey not found\n");
-		return SCARD_E_NO_KEY_CONTAINER;
+		dwret = SCARD_E_NO_KEY_CONTAINER;
+		goto err;
 	}
 
 	/* input and output buffers are always the same size */
 	pbuf = pCardData->pfnCspAlloc(pInfo->cbData);
-	if (!pbuf)
-		return SCARD_E_NO_MEMORY;
+	if (!pbuf) {
+		dwret = SCARD_E_NO_MEMORY;
+		goto err;
+	}
 
 	pbuf2 = pCardData->pfnCspAlloc(pInfo->cbData);
 	if (!pbuf2) {
 		pCardData->pfnCspFree(pbuf);
-		return SCARD_E_NO_MEMORY;
+		dwret = SCARD_E_NO_MEMORY;
+		goto err;
 	}
 
 	/*inversion donnees*/
@@ -3608,17 +4464,19 @@ DWORD WINAPI CardRSADecrypt(__in PCARD_DATA pCardData,
 			  prkey_info->modulus_length);
 		pCardData->pfnCspFree(pbuf);
 		pCardData->pfnCspFree(pbuf2);
-		return SCARD_F_INTERNAL_ERROR;
+		dwret = SCARD_F_INTERNAL_ERROR;
+		goto err;
 	}
 
-	/* filter boggus input: the data to decrypt is shorter than the RSA key ? */
+	/* filter bogus input: the data to decrypt is shorter than the RSA key ? */
 	if ( pInfo->cbData < prkey_info->modulus_length / 8)
 	{
 		/* according to the minidriver specs, this is the error code to return
 		(instead of invalid parameter when the call is forwarded to the card implementation) */
 		pCardData->pfnCspFree(pbuf);
 		pCardData->pfnCspFree(pbuf2);
-		return SCARD_E_INSUFFICIENT_BUFFER;
+		dwret = SCARD_E_INSUFFICIENT_BUFFER;
+		goto err;
 	}
 
 	if (alg_info->flags & SC_ALGORITHM_RSA_RAW)   {
@@ -3641,7 +4499,8 @@ DWORD WINAPI CardRSADecrypt(__in PCARD_DATA pCardData,
 						logprintf(pCardData, 2, "Cannot strip PKCS1 padding: %i\n", r);
 						pCardData->pfnCspFree(pbuf);
 						pCardData->pfnCspFree(pbuf2);
-						return SCARD_F_INTERNAL_ERROR;
+						dwret = SCARD_F_INTERNAL_ERROR;
+						goto err;
 					}
 				}
 				else if (pInfo->dwPaddingType == CARD_PADDING_OAEP)   {
@@ -3649,7 +4508,8 @@ DWORD WINAPI CardRSADecrypt(__in PCARD_DATA pCardData,
 					logprintf(pCardData, 2, "OAEP padding not implemented\n");
 					pCardData->pfnCspFree(pbuf);
 					pCardData->pfnCspFree(pbuf2);
-					return SCARD_F_INTERNAL_ERROR;
+					dwret = SCARD_F_INTERNAL_ERROR;
+					goto err;
 				}
 			}
 		}
@@ -3685,14 +4545,16 @@ DWORD WINAPI CardRSADecrypt(__in PCARD_DATA pCardData,
 		logprintf(pCardData, 2, "CardRSADecrypt: no usable RSA algorithm\n");
 		pCardData->pfnCspFree(pbuf);
 		pCardData->pfnCspFree(pbuf2);
-		return SCARD_E_INVALID_PARAMETER;
+		dwret = SCARD_E_INVALID_PARAMETER;
+		goto err;
 	}
 
 	if ( r < 0)   {
 		logprintf(pCardData, 2, "sc_pkcs15_decipher error(%i): %s\n", r, sc_strerror(r));
 		pCardData->pfnCspFree(pbuf);
 		pCardData->pfnCspFree(pbuf2);
-		return md_translate_OpenSC_to_Windows_error(r, SCARD_E_INVALID_VALUE);
+		dwret = md_translate_OpenSC_to_Windows_error(r, SCARD_E_INVALID_VALUE);
+		goto err;
 	}
 
 	logprintf(pCardData, 2, "decrypted data(%lu):\n",
@@ -3705,17 +4567,21 @@ DWORD WINAPI CardRSADecrypt(__in PCARD_DATA pCardData,
 
 	pCardData->pfnCspFree(pbuf);
 	pCardData->pfnCspFree(pbuf2);
-	return SCARD_S_SUCCESS;
+
+err:
+	unlock(pCardData);
+	return dwret;
 }
 
 
 DWORD WINAPI CardSignData(__in PCARD_DATA pCardData, __inout PCARD_SIGNING_INFO pInfo)
 {
+	DWORD dwret;
 	VENDOR_SPECIFIC *vs;
 	ALG_ID hashAlg;
 	sc_pkcs15_prkey_info_t *prkey_info;
 	BYTE dataToSign[0x200];
-	int r, opt_crypt_flags = 0, opt_hash_flags = 0;
+	int opt_crypt_flags;
 	size_t dataToSignLen = sizeof(dataToSign);
 	sc_pkcs15_object_t *pkey;
 
@@ -3748,6 +4614,13 @@ DWORD WINAPI CardSignData(__in PCARD_DATA pCardData, __inout PCARD_SIGNING_INFO 
 	if (pInfo->dwSigningFlags & ~(CARD_PADDING_INFO_PRESENT | CARD_PADDING_NONE | CARD_BUFFER_SIZE_ONLY | CARD_PADDING_PKCS1 | CARD_PADDING_PSS | CARD_PADDING_OAEP))
 		return SCARD_E_INVALID_PARAMETER;
 
+	if (!lock(pCardData))
+		return SCARD_E_INVALID_PARAMETER;
+
+	dwret = check_card_reader_status(pCardData, "CardSignData");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
+
 	logprintf(pCardData, 2,
 		  "CardSignData dwVersion=%lu, bContainerIndex=%u, dwKeySpec=%lu, dwSigningFlags=0x%08X, aiHashAlg=0x%08X\n",
 		  (unsigned long)pInfo->dwVersion,
@@ -3763,125 +4636,113 @@ DWORD WINAPI CardSignData(__in PCARD_DATA pCardData, __inout PCARD_SIGNING_INFO 
 	hashAlg = pInfo->aiHashAlg;
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
-	if (pInfo->bContainerIndex >= MD_MAX_KEY_CONTAINERS)
-		return SCARD_E_NO_KEY_CONTAINER;
+	if (!vs) {
+		dwret = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
+
+	if (pInfo->bContainerIndex >= MD_MAX_KEY_CONTAINERS) {
+		dwret = SCARD_E_NO_KEY_CONTAINER;
+		goto err;
+	}
 
 	pkey = vs->p15_containers[pInfo->bContainerIndex].prkey_obj;
-	if (!pkey)
-		return SCARD_E_NO_KEY_CONTAINER;
+	if (!pkey) {
+		dwret = SCARD_E_NO_KEY_CONTAINER;
+		goto err;
+	}
 	prkey_info = (struct sc_pkcs15_prkey_info *)(pkey->data);
-
-	check_reader_status(pCardData);
 
 	logprintf(pCardData, 2, "pInfo->dwVersion = %lu\n",
 		  (unsigned long)pInfo->dwVersion);
 
-	if (dataToSignLen < pInfo->cbData)
-		return SCARD_E_INSUFFICIENT_BUFFER;
+	if (dataToSignLen < pInfo->cbData) {
+		dwret = SCARD_E_INSUFFICIENT_BUFFER;
+		goto err;
+	}
 	memcpy(dataToSign, pInfo->pbData, pInfo->cbData);
 	dataToSignLen = pInfo->cbData;
 
-	if (CARD_PADDING_INFO_PRESENT & pInfo->dwSigningFlags)   {
-		BCRYPT_PKCS1_PADDING_INFO *pinf = (BCRYPT_PKCS1_PADDING_INFO *)pInfo->pPaddingInfo;
-		if (CARD_PADDING_PSS == pInfo->dwPaddingType)   {
-			logprintf(pCardData, 0, "unsupported paddingtype CARD_PADDING_PSS\n");
-			return SCARD_E_UNSUPPORTED_FEATURE;
-		}
-		else if (CARD_PADDING_PKCS1 != pInfo->dwPaddingType)   {
-			logprintf(pCardData, 0, "unsupported paddingtype\n");
-			return SCARD_E_INVALID_PARAMETER;
-		}
-			
-		if (!pinf->pszAlgId)   {
-			/* hashAlg = CALG_SSL3_SHAMD5; */
-			logprintf(pCardData, 3, "Using CALG_SSL3_SHAMD5  hashAlg\n");
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_MD5_SHA1;
-		}
-		else   {
-			if (wcscmp(pinf->pszAlgId, L"MD5") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_MD5;
-			else if (wcscmp(pinf->pszAlgId, L"SHA1") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA1;
-			else if (wcscmp(pinf->pszAlgId, L"SHAMD5") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_MD5_SHA1;
-			else if (wcscmp(pinf->pszAlgId, L"SHA224") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA224;
-			else if (wcscmp(pinf->pszAlgId, L"SHA256") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA256;
-			else if (wcscmp(pinf->pszAlgId, L"SHA384") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA384;
-			else if (wcscmp(pinf->pszAlgId, L"SHA512") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA512;
-			else if (wcscmp(pinf->pszAlgId, L"RIPEMD160") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_RIPEMD160;
-			else
-						{
-				logprintf(pCardData, 0,"unknown AlgId %S\n",NULLWSTR(pinf->pszAlgId));
-								return SCARD_E_UNSUPPORTED_FEATURE;
-						}
-		}
-	}
-	else   {
+	if (0 == (CARD_PADDING_INFO_PRESENT & pInfo->dwSigningFlags))   {
+		/* When CARD_PADDING_INFO_PRESENT is not set in dwSigningFlags, this is
+		 * the basic version of the signing structure. (If this is not the
+		 * basic verison of the signing structure, the minidriver should return
+		 * ERROR_REVISION_MISMATCH.) The minidriver should only do PKCS1
+		 * padding and use the value in aiHashAlg. */
 		logprintf(pCardData, 3, "CARD_PADDING_INFO_PRESENT not set\n");
 
+		opt_crypt_flags = SC_ALGORITHM_RSA_PAD_PKCS1;
 		if (hashAlg == CALG_MD5)
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_MD5;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_MD5;
 		else if (hashAlg == CALG_SHA1)
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA1;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA1;
 		else if (hashAlg == CALG_SSL3_SHAMD5)
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_MD5_SHA1;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_MD5_SHA1;
 		else if (hashAlg == CALG_SHA_256)
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA256;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA256;
 		else if (hashAlg == CALG_SHA_384)
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA384;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA384;
 		else if (hashAlg == CALG_SHA_512)
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA512;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA512;
 		else if (hashAlg == (ALG_CLASS_HASH | ALG_TYPE_ANY | ALG_SID_RIPEMD160))
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_RIPEMD160;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_RIPEMD160;
 		else if (hashAlg !=0) {
 			logprintf(pCardData, 0, "bogus aiHashAlg %i\n", hashAlg);
-			return SCARD_E_UNSUPPORTED_FEATURE;
+			dwret = SCARD_E_UNSUPPORTED_FEATURE;
+			goto err;
+		}
+	} else {
+		switch (pInfo->dwPaddingType) {
+			case CARD_PADDING_NONE:
+				opt_crypt_flags = SC_ALGORITHM_RSA_PAD_NONE;
+				break;
+
+			case CARD_PADDING_PKCS1:
+				opt_crypt_flags = SC_ALGORITHM_RSA_PAD_PKCS1;
+				BCRYPT_PKCS1_PADDING_INFO *pinf = (BCRYPT_PKCS1_PADDING_INFO *)pInfo->pPaddingInfo;
+
+				if (!pinf->pszAlgId) {
+					/* hashAlg = CALG_SSL3_SHAMD5; */
+					logprintf(pCardData, 3, "Using CALG_SSL3_SHAMD5  hashAlg\n");
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_MD5_SHA1;
+				} else {
+					if (wcscmp(pinf->pszAlgId, L"MD5") == 0)
+						opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_MD5;
+					else if (wcscmp(pinf->pszAlgId, L"SHA1") == 0)
+						opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA1;
+					else if (wcscmp(pinf->pszAlgId, L"SHAMD5") == 0)
+						opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_MD5_SHA1;
+					else if (wcscmp(pinf->pszAlgId, L"SHA224") == 0)
+						opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA224;
+					else if (wcscmp(pinf->pszAlgId, L"SHA256") == 0)
+						opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA256;
+					else if (wcscmp(pinf->pszAlgId, L"SHA384") == 0)
+						opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA384;
+					else if (wcscmp(pinf->pszAlgId, L"SHA512") == 0)
+						opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA512;
+					else if (wcscmp(pinf->pszAlgId, L"RIPEMD160") == 0)
+						opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_RIPEMD160;
+					else {
+						logprintf(pCardData, 0,"unknown AlgId %S\n",NULLWSTR(pinf->pszAlgId));
+						dwret = SCARD_E_UNSUPPORTED_FEATURE;
+						goto err;
+					}
+				}
+				break;
+
+			default:
+				logprintf(pCardData, 0, "unsupported paddingtype\n");
+				dwret = SCARD_E_INVALID_PARAMETER;
+				goto err;
 		}
 	}
 	
-	if (pInfo->dwSigningFlags & CARD_PADDING_NONE)
-	{
-		/* do not add the digest info when called from CryptSignHash(CRYPT_NOHASHOID)
-
-		Note: SC_ALGORITHM_RSA_HASH_MD5_SHA1 aka CALG_SSL3_SHAMD5 do not have a digest info to be added
-		      CryptSignHash(CALG_SSL3_SHAMD5,CRYPT_NOHASHOID) is the same than CryptSignHash(CALG_SSL3_SHAMD5)
-		*/
-		opt_hash_flags = 0;
-	}
-
-	/* From sc-minidriver_specs_v7.docx pp.76:
-	 * 'The Base CSP/KSP performs the hashing operation on the data before passing it
-	 *	to CardSignData for signature.'
-	 * So, the SC_ALGORITHM_RSA_HASH_* flags should not be passed to pkcs15 library
-	 *	when calculating the signature .
-	 *
-	 * From sc-minidriver_specs_v7.docx pp.76:
-	 * 'If the aiHashAlg member is nonzero, it specifies the hash algorithm’s object identifier (OID)
-	 *  that is encoded in the PKCS padding.'
-	 * So, the digest info has be included into the data to be signed.
-	 * */
-	if (opt_hash_flags)   {
-		logprintf(pCardData, 2, "include digest info of the algorithm 0x%08X\n", opt_hash_flags);
-		dataToSignLen = sizeof(dataToSign);
-		r = sc_pkcs1_encode(vs->ctx, opt_hash_flags, pInfo->pbData, pInfo->cbData, dataToSign, &dataToSignLen, 0);
-		if (r)   {
-			logprintf(pCardData, 2, "PKCS#1 encode error %s\n", sc_strerror(r));
-			return SCARD_E_INVALID_VALUE;
-		}
-	}
 
 	/* Compute output size */
 	if ( prkey_info->modulus_length > 0) {
 		/* RSA */
 		pInfo->cbSignedData = (DWORD) prkey_info->modulus_length / 8;
-		opt_crypt_flags = SC_ALGORITHM_RSA_PAD_PKCS1 | SC_ALGORITHM_RSA_HASH_NONE;
 	} else if ( prkey_info->field_length > 0) {
-		opt_crypt_flags = SC_ALGORITHM_ECDSA_HASH_NONE;
 		switch(prkey_info->field_length) {
 			case 256:
 				/* ECDSA_P256 */
@@ -3899,11 +4760,13 @@ DWORD WINAPI CardSignData(__in PCARD_DATA pCardData, __inout PCARD_SIGNING_INFO 
 				logprintf(pCardData, 0,
 					  "unknown ECC key size %"SC_FORMAT_LEN_SIZE_T"u\n",
 					  prkey_info->field_length);
-				return SCARD_E_INVALID_VALUE;
+				dwret = SCARD_E_INVALID_VALUE;
+				goto err;
 		}
 	} else {
 		logprintf(pCardData, 0, "invalid private key\n");
-		return SCARD_E_INVALID_VALUE;
+		dwret = SCARD_E_INVALID_VALUE;
+		goto err;
 	}
 
 	logprintf(pCardData, 3, "pInfo->cbSignedData = %lu\n",
@@ -3917,8 +4780,10 @@ DWORD WINAPI CardSignData(__in PCARD_DATA pCardData, __inout PCARD_SIGNING_INFO 
 		lg = pInfo->cbSignedData;
 		logprintf(pCardData, 3, "lg = %lu\n", (unsigned long)lg);
 		pbuf = pCardData->pfnCspAlloc(lg);
-		if (!pbuf)
-			return SCARD_E_NO_MEMORY;
+		if (!pbuf) {
+			dwret = SCARD_E_NO_MEMORY;
+			goto err;
+		}
 
 		logprintf(pCardData, 7, "Data to sign: ");
 		loghex(pCardData, 7, dataToSign, dataToSignLen);
@@ -3926,7 +4791,8 @@ DWORD WINAPI CardSignData(__in PCARD_DATA pCardData, __inout PCARD_SIGNING_INFO 
 		pInfo->pbSignedData = (PBYTE) pCardData->pfnCspAlloc(pInfo->cbSignedData);
 		if (!pInfo->pbSignedData)   {
 			pCardData->pfnCspFree(pbuf);
-			return SCARD_E_NO_MEMORY;
+			dwret = SCARD_E_NO_MEMORY;
+			goto err;
 		}
 
 		r = sc_pkcs15_compute_signature(vs->p15card, pkey, opt_crypt_flags, dataToSign, dataToSignLen, pbuf, lg);
@@ -3934,7 +4800,8 @@ DWORD WINAPI CardSignData(__in PCARD_DATA pCardData, __inout PCARD_SIGNING_INFO 
 		if(r < 0)   {
 			logprintf(pCardData, 2, "sc_pkcs15_compute_signature error %s\n", sc_strerror(r));
 			pCardData->pfnCspFree(pbuf);
-			return md_translate_OpenSC_to_Windows_error(r, SCARD_F_INTERNAL_ERROR);
+			dwret = md_translate_OpenSC_to_Windows_error(r, SCARD_F_INTERNAL_ERROR);
+			goto err;
 		}
 
 		pInfo->cbSignedData = r;
@@ -3962,12 +4829,15 @@ DWORD WINAPI CardSignData(__in PCARD_DATA pCardData, __inout PCARD_SIGNING_INFO 
 		  (unsigned int)pCardData->hScard,
 		  (unsigned int)pCardData->hSCardCtx);
 
-	return SCARD_S_SUCCESS;
+err:
+	unlock(pCardData);
+	return dwret;
 }
 
 DWORD WINAPI CardConstructDHAgreement(__in PCARD_DATA pCardData,
 	__inout PCARD_DH_AGREEMENT_INFO pAgreementInfo)
 {
+	DWORD dwret;
 	VENDOR_SPECIFIC *vs;
 	struct sc_pkcs15_object *pkey = NULL;
 	int r, opt_derive_flags = 0;
@@ -3996,13 +4866,24 @@ DWORD WINAPI CardConstructDHAgreement(__in PCARD_DATA pCardData,
 			&& pCardData->dwVersion == CARD_DATA_CURRENT_VERSION)
 		return ERROR_REVISION_MISMATCH;
 
+	if (!lock(pCardData))
+		return SCARD_E_INVALID_PARAMETER;
+
+	dwret = check_card_reader_status(pCardData, "CardConstructDHAgreement");
+	if (dwret != SCARD_S_SUCCESS)
+		goto err;
+
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs) {
+		dwret = SCARD_E_INVALID_PARAMETER;
+		goto err;
+	}
 
 	/* check if the container exists */
-	if (pAgreementInfo->bContainerIndex >= MD_MAX_KEY_CONTAINERS)
-		return SCARD_E_NO_KEY_CONTAINER;
-
-	check_reader_status(pCardData);
+	if (pAgreementInfo->bContainerIndex >= MD_MAX_KEY_CONTAINERS) {
+		dwret = SCARD_E_NO_KEY_CONTAINER;
+		goto err;
+	}
 
 	logprintf(pCardData, 2, "CardConstructDHAgreement dwVersion=%lu, dwKeySpec=%u pbData=%p, cbData=%lu\n",
 		  (unsigned long)pAgreementInfo->dwVersion,
@@ -4013,14 +4894,16 @@ DWORD WINAPI CardConstructDHAgreement(__in PCARD_DATA pCardData,
 	pkey = vs->p15_containers[pAgreementInfo->bContainerIndex].prkey_obj;
 	if (!pkey)   {
 		logprintf(pCardData, 2, "CardConstructDHAgreement prkey not found\n");
-		return SCARD_E_NO_KEY_CONTAINER;
+		dwret = SCARD_E_NO_KEY_CONTAINER;
+		goto err;
 	}
 
 	/* convert the Windows public key into an OpenSC public key */
 	dwPublicKeySize = pAgreementInfo->dwPublicKey - sizeof(BCRYPT_ECCKEY_BLOB) + 1;
 	pbPublicKey = (PBYTE) pCardData->pfnCspAlloc(dwPublicKeySize);
 	if (!pbPublicKey) {
-		return ERROR_OUTOFMEMORY;
+		dwret = ERROR_OUTOFMEMORY;
+		goto err;
 	}
 
 	pbPublicKey[0] = 4;
@@ -4033,13 +4916,15 @@ DWORD WINAPI CardConstructDHAgreement(__in PCARD_DATA pCardData,
 	if ( r < 0)   {
 		logprintf(pCardData, 2, "sc_pkcs15_derive error(%i): %s\n", r, sc_strerror(r));
 		pCardData->pfnCspFree(pbPublicKey);
-		return md_translate_OpenSC_to_Windows_error(r, SCARD_E_INVALID_VALUE);
+		dwret = md_translate_OpenSC_to_Windows_error(r, SCARD_E_INVALID_VALUE);
+		goto err;
 	}
 
 	out = pCardData->pfnCspAlloc(outlen);
 
 	if (!out) {
-		return ERROR_OUTOFMEMORY;
+		dwret = ERROR_OUTOFMEMORY;
+		goto err;
 	}
 
 	r = sc_pkcs15_derive(vs->p15card, pkey, opt_derive_flags, pbPublicKey, dwPublicKeySize, out, &outlen );
@@ -4050,7 +4935,8 @@ DWORD WINAPI CardConstructDHAgreement(__in PCARD_DATA pCardData,
 	if ( r < 0)   {
 		logprintf(pCardData, 2, "sc_pkcs15_derive error(%i): %s\n", r, sc_strerror(r));
 		pCardData->pfnCspFree(out);
-		return md_translate_OpenSC_to_Windows_error(r, SCARD_E_INVALID_VALUE);
+		dwret = md_translate_OpenSC_to_Windows_error(r, SCARD_E_INVALID_VALUE);
+		goto err;
 	}
 
 	/* save the dh agreement for later use */
@@ -4062,14 +4948,16 @@ DWORD WINAPI CardConstructDHAgreement(__in PCARD_DATA pCardData,
 			pAgreementInfo->bSecretAgreementIndex = i;
 			dh_agreement->pbAgreement = out;
 			dh_agreement->dwSize = outlen;
-			return SCARD_S_SUCCESS;
+			dwret = SCARD_S_SUCCESS;
+			goto err;
 		}
 	}
 	/* no empty space => need to allocate memory */
 	temp = (struct md_dh_agreement*) pCardData->pfnCspAlloc((vs->allocatedAgreements+1) * sizeof(struct md_dh_agreement));
 	if (!temp) {
 		pCardData->pfnCspFree(out);
-		return SCARD_E_NO_MEMORY;
+		dwret = SCARD_E_NO_MEMORY;
+		goto err;
 	}
 	if ((vs->allocatedAgreements) > 0) {
 		memcpy(temp, vs->dh_agreements, sizeof(struct md_dh_agreement) * (vs->allocatedAgreements));
@@ -4081,7 +4969,10 @@ DWORD WINAPI CardConstructDHAgreement(__in PCARD_DATA pCardData,
 	dh_agreement->pbAgreement = out;
 	dh_agreement->dwSize = outlen;
 	vs->allocatedAgreements++;
-	return SCARD_S_SUCCESS;
+
+err:
+	unlock(pCardData);
+	return dwret;
 }
 
 
@@ -4531,14 +5422,16 @@ DWORD WINAPI CardDeriveKey(__in PCARD_DATA pCardData,
 	if (pAgreementInfo->dwFlags & ~(KDF_USE_SECRET_AS_HMAC_KEY_FLAG | CARD_RETURN_KEY_HANDLE | CARD_BUFFER_SIZE_ONLY))
 		return SCARD_E_INVALID_PARAMETER;
 
-	/* according to the documenation, CARD_DERIVE_KEY_CURRENT_VERSION should be equal to 2. 
-	In pratice it is not 2 but 1
+	/* according to the documentation, CARD_DERIVE_KEY_CURRENT_VERSION should be equal to 2.
+	In practice it is not 2 but 1
 
 	if ( pAgreementInfo->dwVersion < CARD_DERIVE_KEY_CURRENT_VERSION
 			&& pCardData->dwVersion == CARD_DATA_CURRENT_VERSION)
 		return ERROR_REVISION_MISMATCH;*/
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
 
 	/* check if the agreement index is ok */
 	if (pAgreementInfo->bSecretAgreementIndex >= vs->allocatedAgreements) {
@@ -4640,7 +5533,7 @@ DWORD WINAPI CardDeriveKey(__in PCARD_DATA pCardData,
 		szAlgorithm = BCRYPT_SHA1_ALGORITHM;
 	}
 
-	/* check the values with the KDF choosen */
+	/* check the values with the KDF chosen */
 	if (wcscmp(pAgreementInfo->pwszKDF, BCRYPT_KDF_HASH) == 0) {
 	}
 	else if (wcscmp(pAgreementInfo->pwszKDF, BCRYPT_KDF_HMAC) == 0) {
@@ -4709,6 +5602,8 @@ DWORD WINAPI CardDestroyDHAgreement(
 	if (dwFlags)
 		return SCARD_E_INVALID_PARAMETER;
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
 
 	if (bSecretAgreementIndex >= vs->allocatedAgreements) {
 		return SCARD_E_INVALID_PARAMETER;
@@ -4747,9 +5642,11 @@ DWORD WINAPI CardAuthenticateEx(__in PCARD_DATA pCardData,
 	__out_opt PDWORD pcbSessionPin,
 	__out_opt PDWORD pcAttemptsRemaining)
 {
+	DWORD dwret;
 	VENDOR_SPECIFIC *vs;
 	struct sc_pkcs15_object *pin_obj = NULL;
 	struct sc_pkcs15_auth_info *auth_info = NULL;
+	unsigned int  auth_method;
 	int r;
 	BOOL DisplayPinpadUI = FALSE;
 
@@ -4761,29 +5658,48 @@ DWORD WINAPI CardAuthenticateEx(__in PCARD_DATA pCardData,
 	if (!pCardData)
 		return SCARD_E_INVALID_PARAMETER;
 
+	dwret = check_card_reader_status(pCardData, "CardAuthenticateEx");
+	if (dwret != SCARD_S_SUCCESS)
+		return dwret;
+
 	logprintf(pCardData, 2,
 		  "CardAuthenticateEx: PinId=%u, dwFlags=0x%08X, cbPinData=%lu, Attempts %s\n",
 		  (unsigned int)PinId, (unsigned int)dwFlags,
 		  (unsigned long)cbPinData, pcAttemptsRemaining ? "YES" : "NO");
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
 
-	r = check_reader_status(pCardData);
+	if (PinId >= MD_MAX_PINS)
+		return SCARD_E_INVALID_PARAMETER;
 
-	if ((vs->p15card) == NULL)
-		return SCARD_F_INTERNAL_ERROR;
+	pin_obj = vs->pin_objs[PinId];
+	if (!pin_obj)
+		return SCARD_E_INVALID_PARAMETER;
 
+#if 0
+	/* TODO do we need to return SCARD_E_UNSUPPORTED_FEATURE if the card
+	 * doesn't support it or if the minidriver doesn't support it in general?
+	 * */
 	if (dwFlags == CARD_AUTHENTICATE_GENERATE_SESSION_PIN || dwFlags == CARD_AUTHENTICATE_SESSION_PIN) {
-		if (! (vs->reader->capabilities & SC_READER_CAP_PIN_PAD))
+		if (! (vs->reader->capabilities & SC_READER_CAP_PIN_PAD
+					|| vs->p15card->card->caps & SC_CARD_CAP_PROTECTED_AUTHENTICATION_PATH))
 			return SCARD_E_UNSUPPORTED_FEATURE;
 	}
+#endif
 
 	if (dwFlags & ~(CARD_AUTHENTICATE_GENERATE_SESSION_PIN | CARD_AUTHENTICATE_SESSION_PIN | CARD_PIN_SILENT_CONTEXT))
 		return SCARD_E_INVALID_PARAMETER;
 
+	if (dwFlags & CARD_AUTHENTICATE_GENERATE_SESSION_PIN &&
+		(ppbSessionPin == NULL || pcbSessionPin == NULL))
+		return SCARD_E_INVALID_PARAMETER;
+
 	/* using a pin pad */
 	if (NULL == pbPinData) {
-		if (!(vs->reader->capabilities & SC_READER_CAP_PIN_PAD))
+		if (!(vs->reader->capabilities & SC_READER_CAP_PIN_PAD
+					|| vs->p15card->card->caps & SC_CARD_CAP_PROTECTED_AUTHENTICATION_PATH))
 			return SCARD_E_INVALID_PARAMETER;
 		if (!(dwFlags & CARD_PIN_SILENT_CONTEXT)
 				&& !(vs->ctx->flags & SC_CTX_FLAG_DISABLE_POPUPS)) {
@@ -4791,33 +5707,81 @@ DWORD WINAPI CardAuthenticateEx(__in PCARD_DATA pCardData,
 		}
 	}
 
-	if (PinId != ROLE_USER)
-		return SCARD_E_INVALID_PARAMETER;
-
 	if(pcAttemptsRemaining)
 		(*pcAttemptsRemaining) = (DWORD) -1;
 
-	r = md_get_pin_by_role(pCardData, PinId, &pin_obj);
-	if (r != SCARD_S_SUCCESS)   {
-		logprintf(pCardData, 2, "Cannot get User PIN object");
-		return r;
-	}
-
-	if (!pin_obj)
-		return SCARD_F_INTERNAL_ERROR;
 	auth_info = (struct sc_pkcs15_auth_info *)pin_obj->data;
+	/* save the pin type */
+	auth_method = auth_info->auth_method;
 
 	/* Do we need to display a prompt to enter PIN on pin pad? */
 	logprintf(pCardData, 7, "PIN pad=%s, pbPinData=%p, hwndParent=%p\n",
-		vs->reader->capabilities & SC_READER_CAP_PIN_PAD ? "yes" : "no", pbPinData, vs->hwndParent);
+		vs->reader->capabilities & SC_READER_CAP_PIN_PAD
+		|| vs->p15card->card->caps & SC_CARD_CAP_PROTECTED_AUTHENTICATION_PATH
+		? "yes" : "no", pbPinData, vs->hwndParent);
 
-	/* check if the pin is the session pin generated by a previous authentication with a pinpad */
-	if (pbPinData != NULL && cbPinData == sizeof(MAGIC_SESSION_PIN) && memcmp(MAGIC_SESSION_PIN, pbPinData, sizeof(MAGIC_SESSION_PIN)) == 0) {
-		pbPinData = NULL;
-		cbPinData = 0;
+	if (dwFlags & CARD_AUTHENTICATE_SESSION_PIN) {
+		/* check if the pin is the session pin generated by a previous authentication with a pinpad */
+		if (pbPinData != NULL && cbPinData == sizeof(MAGIC_SESSION_PIN) && memcmp(MAGIC_SESSION_PIN, pbPinData, sizeof(MAGIC_SESSION_PIN)) == 0) {
+			logprintf(pCardData, 2, "use magic session pin");
+			pbPinData = NULL;
+			cbPinData = 0;
+		} else {
+			/* seems we have a real session pin, set the pin type accordingly */
+			logprintf(pCardData, 2,
+				  "use real session pin with %lu bytes",
+				  (unsigned long)cbPinData);
+			auth_info->auth_method = SC_AC_SESSION;
+		}
 	}
 
-	r = md_dialog_perform_pin_operation(pCardData, SC_PIN_CMD_VERIFY, vs->p15card, pin_obj, (const u8 *) pbPinData, cbPinData, NULL, 0, DisplayPinpadUI);
+	/* set the session pin according to the minidriver specification */
+	if (dwFlags & CARD_AUTHENTICATE_GENERATE_SESSION_PIN) {
+		size_t session_pin_len = SC_MAX_PIN_SIZE;
+
+		logprintf(pCardData, 2, "generating session pin");
+		*ppbSessionPin = pCardData->pfnCspAlloc(SC_MAX_PIN_SIZE);
+		r = md_dialog_perform_pin_operation(pCardData,
+						    SC_PIN_CMD_GET_SESSION_PIN,
+						    vs->p15card, pin_obj,
+						    (const u8 *) pbPinData,
+						    cbPinData,
+						    *ppbSessionPin,
+						    *ppbSessionPin != NULL ?
+						    &session_pin_len : NULL,
+						    DisplayPinpadUI, PinId);
+		if (r) {
+			if (*ppbSessionPin != NULL) {
+				pCardData->pfnCspFree(*ppbSessionPin);
+				*ppbSessionPin = NULL;
+			}
+			*pcbSessionPin = 0;
+			logprintf(pCardData, 2, "generating session pin failed");
+		} else {
+			if (*ppbSessionPin != NULL && session_pin_len > 0) {
+				logprintf(pCardData, 2,
+					  "generated session pin with %"SC_FORMAT_LEN_SIZE_T"u bytes",
+					  session_pin_len);
+
+				*pcbSessionPin = session_pin_len;
+			} else {
+				logprintf(pCardData, 2, "session pin not supported");
+				if (*ppbSessionPin != NULL) {
+					pCardData->pfnCspFree(*ppbSessionPin);
+					*ppbSessionPin = NULL;
+				}
+				*pcbSessionPin = 0;
+			}
+		}
+	} else {
+		if (pcbSessionPin) *pcbSessionPin = 0;
+		if (ppbSessionPin) *ppbSessionPin = NULL;
+		logprintf(pCardData, 2, "standard pin verification");
+		r = md_dialog_perform_pin_operation(pCardData, SC_PIN_CMD_VERIFY, vs->p15card, pin_obj, (const u8 *) pbPinData, cbPinData, NULL, NULL, DisplayPinpadUI, PinId);
+	}
+
+	/* restore the pin type */
+	auth_info->auth_method = auth_method;
 
 	if (r)   {
 		logprintf(pCardData, 1, "PIN code verification failed: %s; tries left %i\n", sc_strerror(r), auth_info->tries_left);
@@ -4836,16 +5800,17 @@ DWORD WINAPI CardAuthenticateEx(__in PCARD_DATA pCardData,
 	logprintf(pCardData, 2, "Pin code correct.\n");
 
 	/* set the session pin according to the minidriver specification */
-	if (dwFlags == CARD_AUTHENTICATE_GENERATE_SESSION_PIN && (vs->reader->capabilities & SC_READER_CAP_PIN_PAD)) {
-		/* we set it to a special value for pinpad authentication to force a new pinpad authentication */
-		if (pcbSessionPin) *pcbSessionPin = sizeof(MAGIC_SESSION_PIN);
-		if (ppbSessionPin) {
-			*ppbSessionPin = pCardData->pfnCspAlloc(sizeof(MAGIC_SESSION_PIN));
-			if (ppbSessionPin) memcpy(*ppbSessionPin, MAGIC_SESSION_PIN, sizeof(MAGIC_SESSION_PIN));
+	if (dwFlags & CARD_AUTHENTICATE_GENERATE_SESSION_PIN
+			&& *pcbSessionPin == 0
+			&& (vs->reader->capabilities & SC_READER_CAP_PIN_PAD
+				|| vs->p15card->card->caps & SC_CARD_CAP_PROTECTED_AUTHENTICATION_PATH)) {
+		/* If we could not generate a real session PIN, set it to a special
+		 * value for pinpad authentication to force a new pinpad authentication */
+		*ppbSessionPin = pCardData->pfnCspAlloc(sizeof(MAGIC_SESSION_PIN));
+		if (*ppbSessionPin != NULL) {
+			memcpy(*ppbSessionPin, MAGIC_SESSION_PIN, sizeof(MAGIC_SESSION_PIN));
+			*pcbSessionPin = sizeof(MAGIC_SESSION_PIN);
 		}
-	} else {
-		if (pcbSessionPin) *pcbSessionPin = 0;
-		if (ppbSessionPin) *ppbSessionPin = NULL;
 	}
 
 	return SCARD_S_SUCCESS;
@@ -4863,12 +5828,13 @@ DWORD WINAPI CardChangeAuthenticatorEx(__in PCARD_DATA pCardData,
 	__in   DWORD cRetryCount,
 	__out_opt PDWORD pcAttemptsRemaining)
 {
+	DWORD dwret;
 	VENDOR_SPECIFIC *vs = NULL;
-	DWORD dw_rv;
 	struct sc_pkcs15_object *pin_obj = NULL;
 	int rv;
 	struct sc_pkcs15_auth_info *auth_info;
 	BOOL DisplayPinpadUI = FALSE;
+	size_t target_len = cbTargetData;
 
 	logprintf(pCardData, 1, "\nP:%lu T:%lu pCardData:%p ",
 		  (unsigned long)GetCurrentProcessId(),
@@ -4877,6 +5843,15 @@ DWORD WINAPI CardChangeAuthenticatorEx(__in PCARD_DATA pCardData,
 
 	if (!pCardData)
 		return SCARD_E_INVALID_PARAMETER;
+
+	dwret = check_card_reader_status(pCardData, "CardChangeAuthenticatorEx");
+	if (dwret != SCARD_S_SUCCESS)
+		return dwret;
+
+	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
 	if (!(dwFlags & PIN_CHANGE_FLAG_UNBLOCK) && !(dwFlags & PIN_CHANGE_FLAG_CHANGEPIN)){
 		logprintf(pCardData, 1, "Unknown flag\n");
 		return SCARD_E_INVALID_PARAMETER;
@@ -4885,12 +5860,11 @@ DWORD WINAPI CardChangeAuthenticatorEx(__in PCARD_DATA pCardData,
 		return SCARD_E_INVALID_PARAMETER;
 	if (dwFlags & PIN_CHANGE_FLAG_UNBLOCK && dwAuthenticatingPinId == dwTargetPinId)
 		return SCARD_E_INVALID_PARAMETER;
-	if (dwAuthenticatingPinId != ROLE_USER && dwAuthenticatingPinId != ROLE_ADMIN)
+	if (dwAuthenticatingPinId >= MD_MAX_PINS || dwTargetPinId >= MD_MAX_PINS)
 		return SCARD_E_INVALID_PARAMETER;
-	if (dwTargetPinId != ROLE_USER && dwTargetPinId != ROLE_ADMIN) {
-		logprintf(pCardData, 1, "Only ROLE_USER or ROLE_ADMIN is supported\n");
+	if (!vs->pin_objs[dwAuthenticatingPinId] || !vs->pin_objs[dwTargetPinId])
 		return SCARD_E_INVALID_PARAMETER;
-	}
+
 	/* according to the spec: cRetryCount MUST be zero */
 	if (cRetryCount)
 		return SCARD_E_INVALID_PARAMETER;
@@ -4902,12 +5876,8 @@ DWORD WINAPI CardChangeAuthenticatorEx(__in PCARD_DATA pCardData,
 		  (unsigned int)dwTargetPinId, (unsigned long)cbTargetData,
 		  pcAttemptsRemaining ? "YES" : "NO");
 
-
-	check_reader_status(pCardData);
-
-	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
-
-	if (!(vs->reader->capabilities & SC_READER_CAP_PIN_PAD)) {
+	if (!(vs->reader->capabilities & SC_READER_CAP_PIN_PAD
+				|| vs->p15card->card->caps & SC_CARD_CAP_PROTECTED_AUTHENTICATION_PATH)) {
 		if (pbAuthenticatingPinData == NULL  || cbAuthenticatingPinData == 0)    {
 			logprintf(pCardData, 1, "Invalid current PIN data\n");
 			return SCARD_E_INVALID_PARAMETER;
@@ -4926,20 +5896,22 @@ DWORD WINAPI CardChangeAuthenticatorEx(__in PCARD_DATA pCardData,
 		}
 	}
 
-	dw_rv = md_get_pin_by_role(pCardData, dwTargetPinId, &pin_obj);
-	if (dw_rv != SCARD_S_SUCCESS)   {
-		logprintf(pCardData, 2, "Cannot get User PIN object %s", (dwTargetPinId==ROLE_ADMIN?"admin":"user"));
-		return dw_rv;
-	}
-	if (!pin_obj)
-		return SCARD_F_INTERNAL_ERROR;
+	pin_obj = vs->pin_objs[dwTargetPinId];
 
 	if(pcAttemptsRemaining)
 		(*pcAttemptsRemaining) = (DWORD) -1;
 
-	rv = md_dialog_perform_pin_operation(pCardData, (dwFlags & PIN_CHANGE_FLAG_UNBLOCK ? SC_PIN_CMD_UNBLOCK:SC_PIN_CMD_CHANGE), 
-		vs->p15card, pin_obj, (const u8 *) pbAuthenticatingPinData, cbAuthenticatingPinData, pbTargetData, cbTargetData, DisplayPinpadUI);
-	
+	/* FIXME: this does not enforce dwAuthenticatingPinId */
+	rv = md_dialog_perform_pin_operation(pCardData,
+					     (dwFlags & PIN_CHANGE_FLAG_UNBLOCK ?
+					      SC_PIN_CMD_UNBLOCK :
+					      SC_PIN_CMD_CHANGE),
+					     vs->p15card, pin_obj,
+					     (const u8 *) pbAuthenticatingPinData,
+					     cbAuthenticatingPinData,
+					     pbTargetData, &target_len,
+					     DisplayPinpadUI, dwTargetPinId);
+
 	if (rv)   {
 		logprintf(pCardData, 2, "Failed to %s %s PIN: '%s' (%i)\n",
 																(dwFlags & PIN_CHANGE_FLAG_CHANGEPIN?"change":"unblock"),
@@ -4983,6 +5955,7 @@ DWORD WINAPI CardGetContainerProperty(__in PCARD_DATA pCardData,
 	__out PDWORD pdwDataLen,
 	__in DWORD dwFlags)
 {
+	DWORD dwret;
 	VENDOR_SPECIFIC *vs = NULL;
 	struct md_pkcs15_container *cont = NULL;
 
@@ -4991,9 +5964,13 @@ DWORD WINAPI CardGetContainerProperty(__in PCARD_DATA pCardData,
 		  (unsigned long)GetCurrentThreadId(), pCardData);
 	logprintf(pCardData, 1, "CardGetContainerProperty\n");
 
-	check_reader_status(pCardData);
+	if (!pCardData)
+		return SCARD_E_INVALID_PARAMETER;
 
-	if (!pCardData) return SCARD_E_INVALID_PARAMETER;
+	dwret = check_card_status(pCardData, "CardGetContainerProperty");
+	if (dwret != SCARD_S_SUCCESS)
+		return dwret;
+
 	logprintf(pCardData, 2,
 		  "CardGetContainerProperty bContainerIndex=%u, wszProperty=%S, cbData=%lu, dwFlags=0x%08X\n",
 		  (unsigned int)bContainerIndex, NULLWSTR(wszProperty),
@@ -5007,8 +5984,11 @@ DWORD WINAPI CardGetContainerProperty(__in PCARD_DATA pCardData,
 	if (bContainerIndex >= MD_MAX_KEY_CONTAINERS)
 		return SCARD_E_NO_KEY_CONTAINER;
 
-	/* the test for the existence of containers is redondant with the one made in CardGetContainerInfo but CCP_PIN_IDENTIFIER does not do it */
+	/* the test for the existence of containers is redundant with the one made in CardGetContainerInfo but CCP_PIN_IDENTIFIER does not do it */
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
 	cont = &vs->p15_containers[bContainerIndex];
 
 	if (!cont->prkey_obj)   {
@@ -5034,7 +6014,34 @@ DWORD WINAPI CardGetContainerProperty(__in PCARD_DATA pCardData,
 			*pdwDataLen = sizeof(*p);
 		if (cbData < sizeof(*p))
 			return ERROR_INSUFFICIENT_BUFFER;
-		*p = ROLE_USER;
+
+		if (cont->prkey_obj->auth_id.len == 0)
+			*p = ROLE_EVERYONE;
+		else {
+			size_t pinidx;
+			for (pinidx = 0; pinidx < MD_MAX_PINS; pinidx++) {
+				struct sc_pkcs15_auth_info *pin_info;
+
+				if (!vs->pin_objs[pinidx])
+					continue;
+
+				pin_info =
+					(struct sc_pkcs15_auth_info *)vs->pin_objs[pinidx]->data;
+
+				if (sc_pkcs15_compare_id(&cont->prkey_obj->auth_id,
+							 &pin_info->auth_id))
+					break;
+			}
+
+			if (pinidx >= MD_MAX_PINS) {
+				logprintf(pCardData, 2,
+					  "Could not find container %i PIN, returning no PIN needed, might not work properly\n",
+					  bContainerIndex);
+				*p = ROLE_EVERYONE;
+			} else
+				*p = (PIN_ID)pinidx;
+		}
+
 		logprintf(pCardData, 2, "Return Pin id %u\n",
 			  (unsigned int)*p);
 		return SCARD_S_SUCCESS;
@@ -5081,9 +6088,13 @@ DWORD WINAPI CardGetProperty(__in PCARD_DATA pCardData,
 	if (!pbData || !pdwDataLen)
 		return SCARD_E_INVALID_PARAMETER;
 
-	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	dwret = check_card_reader_status(pCardData, "CardGetProperty");
+	if (dwret != SCARD_S_SUCCESS)
+		return dwret;
 
-	check_reader_status(pCardData);
+	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
 
 	if (wcscmp(CP_CARD_FREE_SPACE,wszProperty) == 0)   {
 		PCARD_FREE_SPACE_INFO pCardFreeSpaceInfo = (PCARD_FREE_SPACE_INFO )pbData;
@@ -5192,20 +6203,17 @@ DWORD WINAPI CardGetProperty(__in PCARD_DATA pCardData,
 		if (p->dwVersion != PIN_INFO_CURRENT_VERSION)
 			return ERROR_REVISION_MISMATCH;
 
-		p->PinType = vs->reader->capabilities & SC_READER_CAP_PIN_PAD ? ExternalPinType : AlphaNumericPinType;
+		if (dwFlags >= MD_MAX_PINS)
+			return SCARD_E_INVALID_PARAMETER;
+
+		if (!vs->pin_objs[dwFlags])
+			return SCARD_E_INVALID_PARAMETER;
+
+		p->PinType = vs->reader->capabilities & SC_READER_CAP_PIN_PAD
+			|| vs->p15card->card->caps & SC_CARD_CAP_PROTECTED_AUTHENTICATION_PATH
+			? ExternalPinType : AlphaNumericPinType;
 		p->dwFlags = 0;
 		switch (dwFlags)   {
-			case ROLE_USER:
-				logprintf(pCardData, 2,
-					  "returning info on PIN ROLE_USER ( Auth ) [%lu]\n",
-					  (unsigned long)dwFlags);
-				p->PinPurpose = DigitalSignaturePin;
-				p->PinCachePolicy.dwVersion = PIN_CACHE_POLICY_CURRENT_VERSION;
-				p->PinCachePolicy.dwPinCachePolicyInfo = 0;
-				p->PinCachePolicy.PinCachePolicyType = PinCacheNormal;
-				p->dwChangePermission = CREATE_PIN_SET(ROLE_USER);
-				p->dwUnblockPermission = CREATE_PIN_SET(ROLE_ADMIN);
-				break;
 			case ROLE_ADMIN:
 				logprintf(pCardData, 2,
 					  "returning info on PIN ROLE_ADMIN ( Unblock ) [%lu]\n",
@@ -5218,19 +6226,40 @@ DWORD WINAPI CardGetProperty(__in PCARD_DATA pCardData,
 				p->dwUnblockPermission = 0;
 				break;
 			default:
-				logprintf(pCardData, 0,
-					  "Invalid Pin number %lu requested\n",
+				logprintf(pCardData, 2,
+					  "returning info on normal PIN [%lu]\n",
 					  (unsigned long)dwFlags);
-				return SCARD_E_INVALID_PARAMETER;
+
+				if (dwFlags == ROLE_USER)
+					p->PinPurpose = PrimaryCardPin;
+				else if (dwFlags == MD_ROLE_USER_SIGN)
+					p->PinPurpose = DigitalSignaturePin;
+				else
+					p->PinPurpose = AuthenticationPin;
+
+				p->PinCachePolicy.dwVersion = PIN_CACHE_POLICY_CURRENT_VERSION;
+				p->PinCachePolicy.dwPinCachePolicyInfo = 0;
+				p->PinCachePolicy.PinCachePolicyType = PinCacheNormal;
+				p->dwChangePermission = CREATE_PIN_SET(dwFlags);
+				p->dwUnblockPermission = CREATE_PIN_SET(ROLE_ADMIN);
+				break;
 		}
 	}
 	else if (wcscmp(CP_CARD_LIST_PINS,wszProperty) == 0)   {
 		PPIN_SET p = (PPIN_SET) pbData;
+		size_t pinidx;
 		if (pdwDataLen)
 			*pdwDataLen = sizeof(*p);
 		if (cbData < sizeof(*p))
 			return ERROR_INSUFFICIENT_BUFFER;
-		SET_PIN(*p, ROLE_USER);
+
+		memset(p, 0, sizeof(*p));
+		for (pinidx = 0; pinidx < MD_MAX_PINS; pinidx++) {
+			if (!vs->pin_objs[pinidx])
+				continue;
+
+			SET_PIN(*p, (PIN_ID)pinidx);
+		}
 	}
 	else if (wcscmp(CP_CARD_AUTHENTICATED_STATE,wszProperty) == 0)   {
 		PPIN_SET p = (PPIN_SET) pbData;
@@ -5245,13 +6274,20 @@ DWORD WINAPI CardGetProperty(__in PCARD_DATA pCardData,
 	else if (wcscmp(CP_CARD_PIN_STRENGTH_VERIFY,wszProperty) == 0)   {
 		DWORD *p = (DWORD *)pbData;
 
-		if (dwFlags != ROLE_USER)
+		if (dwFlags >= MD_MAX_PINS)
 			return SCARD_E_INVALID_PARAMETER;
+
+		if (!vs->pin_objs[dwFlags])
+			return SCARD_E_INVALID_PARAMETER;
+
 		if (pdwDataLen)
 			*pdwDataLen = sizeof(*p);
 		if (cbData < sizeof(*p))
 			return ERROR_INSUFFICIENT_BUFFER;
 		*p = CARD_PIN_STRENGTH_PLAINTEXT;
+		if (vs->p15card->card->caps & SC_CARD_CAP_SESSION_PIN) {
+			*p |= CARD_PIN_STRENGTH_SESSION_PIN;
+		}
 	}
 	else if (wcscmp(CP_KEY_IMPORT_SUPPORT, wszProperty) == 0)   {
 		DWORD *p = (DWORD *)pbData;
@@ -5309,6 +6345,8 @@ DWORD WINAPI CardSetProperty(__in   PCARD_DATA pCardData,
 		  (unsigned long)dwFlags);
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
 
 	if (!wszProperty)
 		return SCARD_E_INVALID_PARAMETER;
@@ -5616,51 +6654,23 @@ DWORD WINAPI CardProcessEncryptedData(
 	return SCARD_E_UNSUPPORTED_FEATURE;
 }
 
-/** The CardCreateContainerEx function creates a new key container that the
-container index identifies and the bContainerIndex parameter specifies. The function
-associates the key container with the PIN that the PinId parameter specified.
-This function is useful if the card-edge does not allow for changing the key attributes
-after the key container is created. This function replaces the need to call
-CardSetContainerProperty to set the CCP_PIN_IDENTIFIER property CardCreateContainer
-is called.
-The caller of this function can provide the key material that the card imports.
-This is useful in those situations in which the card either does not support internal
-key generation or the caller requests that the key be archived in the card.*/
-
-DWORD WINAPI CardCreateContainerEx(
-    __in PCARD_DATA  pCardData,
-    __in BYTE  bContainerIndex,
-    __in DWORD  dwFlags,
-    __in DWORD  dwKeySpec,
-    __in DWORD  dwKeySize,
-    __in PBYTE  pbKeyData,
-    __in PIN_ID  PinId
-)
-{
-	if (PinId == ROLE_ADMIN)
-		return SCARD_W_SECURITY_VIOLATION;
-	if (PinId != ROLE_USER)
-		return SCARD_E_INVALID_PARAMETER;
-	/* basically CardCreateContainerEx is CardCreateContainer + the PinId */
-	return CardCreateContainer(pCardData, bContainerIndex, dwFlags, dwKeySpec, dwKeySize, pbKeyData);
-}
-
 DWORD WINAPI CardAcquireContext(__inout PCARD_DATA pCardData, __in DWORD dwFlags)
 {
 	VENDOR_SPECIFIC *vs;
 	DWORD dwret, suppliedVersion = 0;
+	CRITICAL_SECTION hScard_lock;
 
 	if (!pCardData)
 		return SCARD_E_INVALID_PARAMETER;
-	if (dwFlags)
+	if (dwFlags & ~CARD_SECURE_KEY_INJECTION_NO_CARD_MODE)
 		return SCARD_E_INVALID_PARAMETER;
 	if (!(dwFlags & CARD_SECURE_KEY_INJECTION_NO_CARD_MODE)) {
 		if( pCardData->hSCardCtx == 0)   {
-			logprintf(pCardData, 0, "Invalide handle.\n");
+			logprintf(pCardData, 0, "Invalid handle.\n");
 			return SCARD_E_INVALID_HANDLE;
 		}
 		if( pCardData->hScard == 0)   {
-			logprintf(pCardData, 0, "Invalide handle.\n");
+			logprintf(pCardData, 0, "Invalid handle.\n");
 			return SCARD_E_INVALID_HANDLE;
 		}
 	}
@@ -5674,7 +6684,7 @@ DWORD WINAPI CardAcquireContext(__inout PCARD_DATA pCardData, __in DWORD dwFlags
 		return SCARD_E_INVALID_PARAMETER;
 	if ( pCardData->pwszCardName == NULL )
 		return SCARD_E_INVALID_PARAMETER;
-	/* <2 lenght or >=0x22 are not ISO compliant */
+	/* <2 length or >=0x22 are not ISO compliant */
 	if (pCardData->cbAtr >= 0x22 || pCardData->cbAtr <= 0x2)
 		return SCARD_E_INVALID_PARAMETER;
 	/* ATR beginning by 0x00 or 0xFF are not ISO compliant */
@@ -5698,6 +6708,9 @@ DWORD WINAPI CardAcquireContext(__inout PCARD_DATA pCardData, __in DWORD dwFlags
 		return SCARD_E_NO_MEMORY;
 	memset(vs, 0, sizeof(VENDOR_SPECIFIC));
 
+	InitializeCriticalSection(&vs->hScard_lock);
+	lock(pCardData);
+
 	logprintf(pCardData, 1, "==================================================================\n");
 	logprintf(pCardData, 1, "\nP:%lu T:%lu pCardData:%p ",
 		  (unsigned long)GetCurrentProcessId(),
@@ -5719,12 +6732,8 @@ DWORD WINAPI CardAcquireContext(__inout PCARD_DATA pCardData, __in DWORD dwFlags
 		  (unsigned long)pCardData->dwVersion);
 
 	dwret = md_create_context(pCardData, vs);
-	if (dwret != SCARD_S_SUCCESS) {
-		pCardData->pfnCspFree(pCardData->pvVendorSpecific);
-		pCardData->pvVendorSpecific = NULL;
-		return dwret;
-	}
-	md_static_data.flags &= ~MD_STATIC_FLAG_CONTEXT_DELETED;
+	if (dwret != SCARD_S_SUCCESS)
+		goto ret_free;
 
 	pCardData->pfnCardDeleteContext = CardDeleteContext;
 	pCardData->pfnCardQueryCapabilities = CardQueryCapabilities;
@@ -5754,18 +6763,12 @@ DWORD WINAPI CardAcquireContext(__inout PCARD_DATA pCardData, __in DWORD dwFlags
 	pCardData->pfnCardConstructDHAgreement = CardConstructDHAgreement;
 
 	dwret = associate_card(pCardData);
-	if (dwret != SCARD_S_SUCCESS) {
-		pCardData->pfnCspFree(pCardData->pvVendorSpecific);
-		pCardData->pvVendorSpecific = NULL;
-		return dwret;
-	}
+	if (dwret != SCARD_S_SUCCESS)
+		goto ret_release;
 
 	dwret = md_fs_init(pCardData);
-	if (dwret != SCARD_S_SUCCESS) {
-		pCardData->pfnCspFree(pCardData->pvVendorSpecific);
-		pCardData->pvVendorSpecific = NULL;
-		return dwret;
-	}
+	if (dwret != SCARD_S_SUCCESS)
+		goto ret_disassoc;
 
 	logprintf(pCardData, 1, "OpenSC init done.\n");
 	logprintf(pCardData, 1, "Supplied version %lu - version used %lu.\n",
@@ -5802,20 +6805,40 @@ DWORD WINAPI CardAcquireContext(__inout PCARD_DATA pCardData, __in DWORD dwFlags
 		}
 	}
 
+	unlock(pCardData);
+
 	return SCARD_S_SUCCESS;
+
+ret_disassoc:
+	disassociate_card(pCardData);
+
+ret_release:
+	sc_release_context(vs->ctx);
+
+ret_free:
+	hScard_lock = vs->hScard_lock;
+	pCardData->pfnCspFree(pCardData->pvVendorSpecific);
+	pCardData->pvVendorSpecific = NULL;
+	LeaveCriticalSection(&hScard_lock);
+	DeleteCriticalSection(&hScard_lock);
+	return dwret;
 }
 
-static int associate_card(PCARD_DATA pCardData)
+static DWORD associate_card(PCARD_DATA pCardData)
 {
 	VENDOR_SPECIFIC *vs;
-	DWORD dw;
 	int  r;
+	struct sc_app_info *app_generic;
+	struct sc_aid *aid;
 
 	logprintf(pCardData, 1, "associate_card\n");
 	if (!pCardData)
 		return SCARD_E_INVALID_PARAMETER;
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs)
+		return SCARD_E_INVALID_PARAMETER;
+
 	/*
 	 * set the addresses of the reader and card handles
 	 * Our pcsc code will use these  when we call sc_ctx_use_reader
@@ -5824,75 +6847,66 @@ static int associate_card(PCARD_DATA pCardData)
 	vs->hSCardCtx = pCardData->hSCardCtx;
 	vs->hScard = pCardData->hScard;
 
-	/**
-	 * Check if a linked context has been deleted - if so, repair shared data.
-	 * Multithreaded issue - TODO: proper multithreaded handling
-	 */
-	if (md_static_data.flags & MD_STATIC_FLAG_CONTEXT_DELETED)
-	{
-		r = sc_context_repair(&(vs->ctx));
-		logprintf(pCardData, 2, "sc_context_repair called - result = %d, %s\n", r, sc_strerror(r));
-		md_static_data.flags &= ~MD_STATIC_FLAG_CONTEXT_DELETED;
-	}
-
 	/* set the provided reader and card handles into ctx */
-	logprintf(pCardData, 5, "sc_ctx_use_reader %d\n", sc_ctx_use_reader(vs->ctx, &vs->hSCardCtx, &vs->hScard));
+	r = sc_ctx_use_reader(vs->ctx, &vs->hSCardCtx, &vs->hScard);
+	if (r != SC_SUCCESS) {
+		logprintf(pCardData, 0, "sc_ctx_use_reader() failed with %d\n", r);
+		return SCARD_E_COMM_DATA_LOST;
+	}
 
 	/* should be only one reader */
 	logprintf(pCardData, 5, "sc_ctx_get_reader_count(ctx): %d\n", sc_ctx_get_reader_count(vs->ctx));
 
 	vs->reader = sc_ctx_get_reader(vs->ctx, 0);
-	if(vs->reader)   {
-		struct sc_app_info *app_generic = NULL;
-		struct sc_aid *aid = NULL;
+	if (!vs->reader)
+		return SCARD_E_COMM_DATA_LOST;
 
-		r = sc_connect_card(vs->reader, &(vs->card));
-		if(r)   {
-			logprintf(pCardData, 0, "Cannot connect card in reader '%s'\n", NULLSTR(vs->reader->name));
-			return SCARD_E_UNKNOWN_CARD;
-                }
-		logprintf(pCardData, 3, "Connected card in '%s'\n", NULLSTR(vs->reader->name));
-
-		app_generic = sc_pkcs15_get_application_by_type(vs->card, "generic");
-		if (app_generic)
-			logprintf(pCardData, 3, "Use generic application '%s'\n", app_generic->label);
-		aid = app_generic ? &app_generic->aid : NULL;
-
-		r = sc_pkcs15_bind(vs->card, aid, &(vs->p15card));
-		logprintf(pCardData, 2, "PKCS#15 initialization result: %d, %s\n", r, sc_strerror(r));
+	r = sc_connect_card(vs->reader, &(vs->card));
+	if (r != SC_SUCCESS) {
+		logprintf(pCardData, 0, "Cannot connect card in reader '%s'\n", NULLSTR(vs->reader->name));
+		return SCARD_E_UNKNOWN_CARD;
 	}
+	logprintf(pCardData, 3, "Connected card in '%s'\n", NULLSTR(vs->reader->name));
 
-	if(vs->card == NULL || vs->p15card == NULL)   {
-		logprintf(pCardData, 0, "Card unknown.\n");
+	app_generic = sc_pkcs15_get_application_by_type(vs->card, "generic");
+	if (app_generic)
+		logprintf(pCardData, 3, "Use generic application '%s'\n", app_generic->label);
+	aid = app_generic ? &app_generic->aid : NULL;
+
+	r = sc_pkcs15_bind(vs->card, aid, &(vs->p15card));
+	logprintf(pCardData, 2, "PKCS#15 initialization result: %d, %s\n", r, sc_strerror(r));
+	if (r != SC_SUCCESS) {
+		logprintf(pCardData, 0, "PKCS#15 init failed.\n");
+		sc_disconnect_card(vs->card);
 		return SCARD_E_UNKNOWN_CARD;
 	}
 
-	dw = md_get_pin_by_role(pCardData, ROLE_USER, &vs->obj_user_pin);
-	if (dw != SCARD_S_SUCCESS)   {
-		logprintf(pCardData, 2, "Cannot get User PIN object");
-		return dw;
-	}
-
-	dw = md_get_pin_by_role(pCardData, ROLE_USER, &vs->obj_sopin);
-	if (dw != SCARD_S_SUCCESS)
-		logprintf(pCardData, 2, "Cannot get ADMIN PIN object -- ignored");
+	vs->initialized = TRUE;
 
 	return SCARD_S_SUCCESS;
-
 }
 
-static int disassociate_card(PCARD_DATA pCardData)
+static void disassociate_card(PCARD_DATA pCardData)
 {
 	VENDOR_SPECIFIC *vs;
 
+	if (!pCardData) {
+		logprintf(pCardData, 1,
+			  "disassociate_card called without card data\n");
+		return;
+	}
+
 	logprintf(pCardData, 1, "disassociate_card\n");
-	if (!pCardData)
-		return SCARD_E_INVALID_PARAMETER;
 
 	vs = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
+	if (!vs) {
+		logprintf(pCardData, 1,
+			  "disassociate_card called without vendor specific data\n");
+		return;
+	}
 
-	vs->obj_user_pin = NULL;
-	vs->obj_sopin = NULL;
+	memset(vs->pin_objs, 0, sizeof(vs->pin_objs));
+	memset(vs->p15_containers, 0, sizeof(vs->p15_containers));
 
 	if(vs->p15card)   {
 		logprintf(pCardData, 6, "sc_pkcs15_unbind\n");
@@ -5910,8 +6924,7 @@ static int disassociate_card(PCARD_DATA pCardData)
 
 	vs->hSCardCtx = -1;
 	vs->hScard = -1;
-
-	return SCARD_S_SUCCESS;
+	vs->initialized = FALSE;
 }
 
 
@@ -5949,10 +6962,11 @@ BOOL APIENTRY DllMain( HINSTANCE hinstDLL,
 	{
 	case DLL_PROCESS_ATTACH:
 		g_inst = hinstDLL;
-		md_static_data.attach_check = MD_STATIC_PROCESS_ATTACHED;
+		sc_notify_instance = hinstDLL;
+		sc_notify_init();
 		break;
 	case DLL_PROCESS_DETACH:
-		md_static_data.attach_check = 0;
+		sc_notify_close();
 		break;
 	}
 	return TRUE;
@@ -5962,4 +6976,3 @@ BOOL APIENTRY DllMain( HINSTANCE hinstDLL,
 #pragma managed(pop)
 #endif
 #endif
-

@@ -84,7 +84,7 @@ static struct sc_card_driver rutoken_drv = {
 	NULL, 0, NULL
 };
 
-static struct sc_atr_table rutoken_atrs[] = {
+static const struct sc_atr_table rutoken_atrs[] = {
 	{ "3b:6f:00:ff:00:56:72:75:54:6f:6b:6e:73:30:20:00:00:90:00", NULL, NULL, SC_CARD_TYPE_GENERIC_BASE, 0, NULL }, /* Aktiv Rutoken S */
 	{ "3b:6f:00:ff:00:56:75:61:54:6f:6b:6e:73:30:20:00:00:90:00", NULL, NULL, SC_CARD_TYPE_GENERIC_BASE, 0, NULL }, /* Aktiv uaToken S */
 	{ NULL, NULL, NULL, 0, 0, NULL }
@@ -132,6 +132,10 @@ static int rutoken_init(sc_card_t *card)
 		ret = token_init(card, "uaToken S card");
 	else
 		ret = token_init(card, "Rutoken S card");
+
+	if (ret != SC_SUCCESS) {
+		ret = SC_ERROR_INVALID_CARD;
+	}
 	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, ret);
 }
 
@@ -358,7 +362,6 @@ static int rutoken_select_file(sc_card_t *card,
 	u8 buf[SC_MAX_APDU_BUFFER_SIZE], pathbuf[SC_MAX_PATH_SIZE], *path = pathbuf;
 	sc_file_t *file = NULL;
 	size_t pathlen;
-	u8 t0, t1;
 	int ret;
 
 	assert(card && card->ctx);
@@ -428,15 +431,6 @@ static int rutoken_select_file(sc_card_t *card,
 	if (apdu.resplen > 1  &&  apdu.resplen >= (size_t)apdu.resp[1] + 2)
 	{
 		ret = card->ops->process_fci(card, file, apdu.resp+2, apdu.resp[1]);
-		if (ret == SC_SUCCESS)
-		{
-			t0 = file->id & 0xFF;
-			t1 = (file->id >> 8) & 0xFF;
-			file->id = (t0 << 8) | t1;
-			t0 = file->size & 0xFF;
-			t1 = (file->size >> 8) & 0xFF;
-			file->size = (t0 << 8) | t1;
-		}
 	}
 	if (file->sec_attr && file->sec_attr_len == sizeof(sc_SecAttrV2_t))
 		set_acl_from_sec_attr(card, file);
@@ -448,6 +442,33 @@ static int rutoken_select_file(sc_card_t *card,
 	{
 		assert(file_out);
 		*file_out = file;
+	}
+	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, ret);
+}
+
+static int rutoken_process_fci(struct sc_card *card, sc_file_t *file,
+			const unsigned char *buf, size_t buflen)
+{
+	size_t taglen;
+	int ret;
+	const unsigned char *tag;
+
+	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+	ret = iso_ops->process_fci(card, file, buf, buflen);
+	if (ret == SC_SUCCESS)
+	{
+		/* Rutoken S returns buffers in little-endian. */
+		/* Set correct file id. */
+		file->id = ((file->id & 0xFF) << 8) | ((file->id >> 8) & 0xFF);
+		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "  file identifier: 0x%04X", file->id);
+		/* Determine file size. */
+		tag = sc_asn1_find_tag(card->ctx, buf, buflen, 0x80, &taglen);
+		/* Rutoken S always returns 2 bytes. */
+		if (tag != NULL && taglen == 2)
+		{
+			file->size = (tag[1] << 8) | tag[0];
+			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "  bytes in file: %"SC_FORMAT_LEN_SIZE_T"u", file->size);
+		}
 	}
 	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, ret);
 }
@@ -925,7 +946,8 @@ static int rutoken_get_do_info(sc_card_t *card, sc_DO_INFO_t * pInfo)
 			apdu.cse = SC_APDU_CASE_2_SHORT;
 			break;
 		case select_next:
-			apdu.p2  = 0x02;
+			apdu.p2 = 0x02;
+			/* fall through */
 		case select_by_id:
 			data[0] = pInfo->DoId;
 			apdu.data = data;
@@ -1115,33 +1137,25 @@ static int rutoken_compute_signature(struct sc_card *card,
 	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, ret);
 }
 
-static int rutoken_get_challenge(sc_card_t *card, u8 *rnd, size_t count)
+static int rutoken_get_challenge(sc_card_t *card, u8 *rnd, size_t len)
 {
-	sc_apdu_t apdu;
-	u8 rbuf[32];
-	size_t n;
-	int ret = SC_SUCCESS; /* if count == 0 */
+	unsigned char rbuf[32];
+	size_t out_len;
+	int r;
 
-	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0x84, 0x00, 0x00);
-	apdu.le = sizeof(rbuf);
-	apdu.resp = rbuf;
-	apdu.resplen = sizeof(rbuf);
+	LOG_FUNC_CALLED(card->ctx);
 
-	while (count > 0)
-	{
-		ret = sc_transmit_apdu(card, &apdu);
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, ret, "APDU transmit failed");
-		ret = sc_check_sw(card, apdu.sw1, apdu.sw2);
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, ret, "Get challenge failed");
-		if (apdu.resplen != sizeof(rbuf))
-			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_UNKNOWN);
-		n = count < sizeof(rbuf) ? count : sizeof(rbuf);
-		memcpy(rnd, rbuf, n);
-		count -= n;
-		rnd += n;
+	r = iso_ops->get_challenge(card, rbuf, sizeof rbuf);
+	LOG_TEST_RET(card->ctx, r, "GET CHALLENGE cmd failed");
+
+	if (len < (size_t) r) {
+		out_len = len;
+	} else {
+		out_len = (size_t) r;
 	}
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, ret);
+	memcpy(rnd, rbuf, out_len);
+
+	LOG_FUNC_RETURN(card->ctx, out_len);
 }
 
 static int rutoken_get_serial(sc_card_t *card, sc_serial_number_t *serial)
@@ -1285,7 +1299,7 @@ static struct sc_card_driver* get_rutoken_driver(void)
 	rutoken_ops.list_files = rutoken_list_files;
 	rutoken_ops.check_sw = rutoken_check_sw;
 	rutoken_ops.card_ctl = rutoken_card_ctl;
-	/* process_fci */
+	rutoken_ops.process_fci = rutoken_process_fci;
 	rutoken_ops.construct_fci = rutoken_construct_fci;
 	rutoken_ops.pin_cmd = NULL;
 

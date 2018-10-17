@@ -80,7 +80,7 @@ sm_oberthur_diversify_keyset(struct sc_context *ctx, struct sm_info *sm_info,
 			sc_log(ctx, "key_buf:%s", sc_dump_hex(key_buff, 16));
 
 			rv = sm_encrypt_des_ecb3(master_key, key_buff, sizeof(key_buff), &tmp, &tmp_len);
-			LOG_TEST_RET(ctx, rv, "GP init session: cannot derivate key");
+			LOG_TEST_RET(ctx, rv, "GP init session: cannot derive key");
 
 			memcpy(keys[ii], tmp, sizeof(gp_keyset->enc));
 			free(tmp);
@@ -91,24 +91,11 @@ sm_oberthur_diversify_keyset(struct sc_context *ctx, struct sm_info *sm_info,
 	}
 
 	if (!rv && ctx)   {
-		char dump_buf[2048];
-
-		sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL,
-				gp_session->card_challenge, sizeof(gp_session->card_challenge), dump_buf, sizeof(dump_buf));
-		sc_log(ctx, "Card challenge: %s", dump_buf);
-
-		sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL,
-				gp_session->host_challenge, sizeof(gp_session->host_challenge), dump_buf, sizeof(dump_buf));
-		sc_log(ctx, "Host challenge: %s", dump_buf);
-
-		sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL, gp_keyset->enc, sizeof(gp_keyset->enc), dump_buf, sizeof(dump_buf));
-		sc_log(ctx, "ENC: %s", dump_buf);
-
-		sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL, gp_keyset->mac, sizeof(gp_keyset->mac), dump_buf, sizeof(dump_buf));
-		sc_log(ctx, "MAC: %s", dump_buf);
-
-		sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL, gp_keyset->kek, sizeof(gp_keyset->kek), dump_buf, sizeof(dump_buf));
-		sc_log(ctx, "KEK: %s", dump_buf);
+		sc_log_hex(ctx, "Card challenge", gp_session->card_challenge, sizeof(gp_session->card_challenge));
+		sc_log_hex(ctx, "Host challenge", gp_session->host_challenge, sizeof(gp_session->host_challenge));
+		sc_log_hex(ctx, "ENC", gp_keyset->enc, sizeof(gp_keyset->enc));
+		sc_log_hex(ctx, "MAC", gp_keyset->mac, sizeof(gp_keyset->mac));
+		sc_log_hex(ctx, "KEK", gp_keyset->kek, sizeof(gp_keyset->kek));
 	}
 
 	return rv;

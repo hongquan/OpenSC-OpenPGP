@@ -200,7 +200,7 @@ sc_pkcs15_decode_pubkey_direct_value(struct sc_pkcs15_card *p15card, struct sc_p
 		LOG_TEST_RET(ctx, rv, "Failed to decode 'SPKI' direct value");
 
 		rv = sc_pkcs15_encode_pubkey(ctx, pubkey, &info->direct.raw.value, &info->direct.raw.len);
-		LOG_TEST_RET(ctx, rv, "Failed to endode 'RAW' direct value");
+		LOG_TEST_RET(ctx, rv, "Failed to encode 'RAW' direct value");
 		sc_pkcs15_free_pubkey(pubkey);
 	}
 
@@ -903,16 +903,19 @@ int
 sc_pkcs15_read_pubkey(struct sc_pkcs15_card *p15card, const struct sc_pkcs15_object *obj,
 		struct sc_pkcs15_pubkey **out)
 {
-	struct sc_context *ctx = p15card->card->ctx;
+	struct sc_context *ctx;
 	const struct sc_pkcs15_pubkey_info *info = NULL;
 	struct sc_pkcs15_pubkey *pubkey = NULL;
 	unsigned char *data = NULL;
 	size_t	len;
 	int	algorithm, r;
 
-	if (p15card == NULL || obj == NULL || out == NULL) {
+	if (p15card == NULL || p15card->card == NULL || p15card->card->ops == NULL
+			|| obj == NULL || out == NULL) {
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
+	ctx = p15card->card->ctx;
+
 	LOG_FUNC_CALLED(ctx);
 	sc_log(ctx, "Public key type 0x%X", obj->type);
 
@@ -936,7 +939,6 @@ sc_pkcs15_read_pubkey(struct sc_pkcs15_card *p15card, const struct sc_pkcs15_obj
 
 	pubkey = calloc(1, sizeof(struct sc_pkcs15_pubkey));
 	if (pubkey == NULL) {
-		free(data);
 		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
 	}
 	pubkey->algorithm = algorithm;
@@ -987,10 +989,11 @@ sc_pkcs15_read_pubkey(struct sc_pkcs15_card *p15card, const struct sc_pkcs15_obj
 	}
 
 err:
-	if (r)
+	if (r) {
 		sc_pkcs15_free_pubkey(pubkey);
-	else
+	} else
 		*out = pubkey;
+	free(data);
 
 	LOG_FUNC_RETURN(ctx, r);
 }
@@ -1095,8 +1098,10 @@ sc_pkcs15_dup_pubkey(struct sc_context *ctx, struct sc_pkcs15_pubkey *key, struc
 		rv = sc_asn1_encode_algorithm_id(ctx, &alg, &alglen,key->alg_id, 0);
 		if (rv == SC_SUCCESS) {
 			pubkey->alg_id = (struct sc_algorithm_id *)calloc(1, sizeof(struct sc_algorithm_id));
-			if (pubkey->alg_id == NULL)
+			if (pubkey->alg_id == NULL) {
+				free(pubkey);
 				LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+			}
 			rv = sc_asn1_decode_algorithm_id(ctx, alg, alglen, pubkey->alg_id, 0);
 			free(alg);
 		}
@@ -1261,16 +1266,16 @@ sc_pkcs15_read_der_file(sc_context_t *ctx, char * filename,
 
 	body = tagbuf;
 	r = sc_asn1_read_tag(&body, len, &cla_out, &tag_out, &bodylen);
-	if (r != SC_SUCCESS)
+	if (r != SC_SUCCESS && r != SC_ERROR_ASN1_END_OF_CONTENTS)
 		goto out;
 
-	if (tag_out == SC_ASN1_TAG_EOC || body == NULL)   {
+	if (body == NULL)   {
 		r = SC_SUCCESS;
 		goto out;
 	}
 
 	offs = body - tagbuf;
-	if (offs > len || offs < 2)   {
+	if (offs > len || offs < 2 || offs > offs + bodylen)   {
 		r = SC_ERROR_INVALID_ASN1_OBJECT;
 		goto out;
 	}
@@ -1386,8 +1391,10 @@ sc_pkcs15_pubkey_from_spki_fields(struct sc_context *ctx, struct sc_pkcs15_pubke
 		}
 
 		pubkey->u.ec.ecpointQ.value = malloc(pk.len);
-		if (pubkey->u.ec.ecpointQ.value == NULL)
-			LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+		if (pubkey->u.ec.ecpointQ.value == NULL) {
+			r = SC_ERROR_OUT_OF_MEMORY;
+			LOG_TEST_GOTO_ERR(ctx, r, "failed to malloc() memory");
+		}
 		memcpy(pubkey->u.ec.ecpointQ.value, pk.value, pk.len);
 		pubkey->u.ec.ecpointQ.len = pk.len;
 	}
@@ -1483,6 +1490,8 @@ static struct ec_curve_info {
 		{"brainpoolP224r1",	"1.3.36.3.3.2.8.1.1.5", "06092B2403030208010105", 224},
 		{"brainpoolP256r1",	"1.3.36.3.3.2.8.1.1.7", "06092B2403030208010107", 256},
 		{"brainpoolP320r1",	"1.3.36.3.3.2.8.1.1.9", "06092B2403030208010109", 320},
+		{"brainpoolP384r1",	"1.3.36.3.3.2.8.1.1.11", "06092B240303020801010B", 384},
+		{"brainpoolP512r1",	"1.3.36.3.3.2.8.1.1.13", "06092B240303020801010D", 512},
 
 		{"secp192k1",		"1.3.132.0.31", "06052B8104001F", 192},
 		{"secp256k1",		"1.3.132.0.10", "06052B8104000A", 256},

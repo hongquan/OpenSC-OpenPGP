@@ -23,6 +23,8 @@
 #include <stdio.h>
 #ifndef _WIN32
 #include <unistd.h>
+#else
+#include <process.h>
 #endif
 #include <stdlib.h>
 #include <string.h>
@@ -156,6 +158,8 @@ static void do_esteid(sc_card_t *card)
 		/* print the counters */
 		for (i = 1; i <= 4; i++) {
 			r = sc_read_record(card, i, buff, 128, SC_RECORD_BY_REC_NR);
+			if (r < 0)
+				goto out;
 			key_used[i - 1] = 0xffffff - ((unsigned char) buff[0xc] * 65536
 									+ (unsigned char) buff[0xd] * 256
 									+ (unsigned char) buff[0xe]);
@@ -404,7 +408,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Check card type */
-	if (card->type == SC_CARD_TYPE_MCRD_ESTEID_V10 || card->type == SC_CARD_TYPE_MCRD_ESTEID_V11 || card->type == SC_CARD_TYPE_MCRD_ESTEID_V30)
+	if (card->type == SC_CARD_TYPE_MCRD_ESTEID_V30)
 		do_esteid(card);
 	else if (card->type == SC_CARD_TYPE_BELPIC_EID)
 		do_belpic(card);

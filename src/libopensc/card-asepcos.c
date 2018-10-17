@@ -37,7 +37,7 @@ static struct sc_card_driver asepcos_drv = {
 	NULL, 0, NULL
 };
 
-static struct sc_atr_table asepcos_atrs[] = {
+static const struct sc_atr_table asepcos_atrs[] = {
 	{ "3b:d6:18:00:81:b1:80:7d:1f:03:80:51:00:61:10:30:8f", NULL, NULL, SC_CARD_TYPE_ASEPCOS_GENERIC, 0, NULL},
 	{ "3b:d6:18:00:81:b1:fe:7d:1f:03:41:53:45:37:35:35:01", NULL, NULL, SC_CARD_TYPE_ASEPCOS_JAVA, 0, NULL},
 	{ NULL, NULL, NULL, 0, 0, NULL }
@@ -83,7 +83,7 @@ static int asepcos_init(sc_card_t *card)
 	if (card->type == SC_CARD_TYPE_ASEPCOS_JAVA) {
 		int r = asepcos_select_asepcos_applet(card);
 		if (r != SC_SUCCESS)
-			return r;
+			return SC_ERROR_INVALID_CARD;
 	}
 
 	/* Set up algorithm info. */
@@ -140,7 +140,7 @@ static int set_sec_attr(sc_file_t *file, unsigned int am, unsigned int ac,
 {
 	const amode_entry_t *table;
 
-        /* CHV with reference '0' is the trasport PIN
+        /* CHV with reference '0' is the transport PIN
 	 * and is presented as 'AUT' key with reference '0'*/
 	if (meth == SC_AC_CHV && ac == 0)
 		meth = SC_AC_AUT;
@@ -169,7 +169,7 @@ static int asepcos_parse_sec_attr(sc_card_t *card, sc_file_t *file, const u8 *bu
 
 	while (len != 0) {
 		unsigned int amode, tlen = 3;
-		if (len < 5 && p[0] != 0x80 && p[1] != 0x01) {
+		if (len < 5 || p[0] != 0x80 || p[1] != 0x01) {
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "invalid access mode encoding");
 			return SC_ERROR_INTERNAL;
 		}
@@ -377,7 +377,7 @@ static int asepcos_set_security_attributes(sc_card_t *card, sc_file_t *file)
 	u8     buf[64], *p;
 	int    r = SC_SUCCESS;
 
-	/* first check wether the security attributes in encoded form
+	/* first check whether the security attributes in encoded form
 	 * are already set. If present use these */
 	if (file->sec_attr != NULL && file->sec_attr_len != 0)
 		return asepcos_set_sec_attributes(card, file->sec_attr,
@@ -420,7 +420,7 @@ static int asepcos_set_security_attributes(sc_card_t *card, sc_file_t *file)
 			*p++ = (st.fileid >> 8 ) & 0xff;
 			*p++ = st.fileid & 0xff;
 		} else {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "unknow auth method: '%d'", ent->method);
+			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "unknown auth method: '%d'", ent->method);
 			return SC_ERROR_INTERNAL;
 		} 
 	}
@@ -746,7 +746,7 @@ static int asepcos_delete_file(sc_card_t *card, const sc_path_t *path)
 		buf[0] = path->value[path->len-2]; 
 		buf[1] = path->value[path->len-1];
 	} else {
-		/* presumedly a DF */
+		/* presumably a DF */
 		atype = SC_APDU_CASE_1;
 		ftype = 0x00;
 	}
@@ -971,7 +971,6 @@ static int asepcos_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *pdata,
 		}
 		if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00) {
 			/* unable to verify the old PIN */
-			r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 			break;
 		}
 		/* 2, step: use CHANGE KEY to update the PIN */
@@ -981,7 +980,6 @@ static int asepcos_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *pdata,
 		r = sc_transmit_apdu(card, &apdu);
 		if (r != SC_SUCCESS)
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "APDU transmit failed");
-		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 		break;
 	case SC_PIN_CMD_UNBLOCK:
 		if (pdata->pin_type != SC_AC_CHV)
@@ -1008,21 +1006,39 @@ static int asepcos_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *pdata,
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "APDU transmit failed");
 			break;
 		}
-		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 		break;
 	default:
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "error: unknow cmd type");
+		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "error: unknown cmd type");
 		return SC_ERROR_INTERNAL;
 	}
 	/* Clear the buffer - it may contain pins */
 	sc_mem_clear(sbuf, sizeof(sbuf));
 	/* check for remaining tries if verification failed */
-	if (apdu.sw1 == 0x63) {
-		if ((apdu.sw2 & 0xF0) == 0xC0 && tries_left != NULL)
-			*tries_left = apdu.sw2 & 0x0F;
-		return SC_ERROR_PIN_CODE_INCORRECT;
+	if (r == SC_SUCCESS) {
+		if (apdu.sw1 == 0x63) {
+			if ((apdu.sw2 & 0xF0) == 0xC0 && tries_left != NULL)
+				*tries_left = apdu.sw2 & 0x0F;
+			r = SC_ERROR_PIN_CODE_INCORRECT;
+			return r;
+		}
+		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 	}
-	return sc_check_sw(card, apdu.sw1, apdu.sw2);
+
+	return r;
+}
+
+static int asepcos_card_reader_lock_obtained(sc_card_t *card, int was_reset)
+{
+	int r = SC_SUCCESS;
+
+	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	if (was_reset > 0 && card->type == SC_CARD_TYPE_ASEPCOS_JAVA) {
+		/* in case of a Java card try to select the ASEPCOS applet */
+		r = asepcos_select_asepcos_applet(card);
+	}
+
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 static struct sc_card_driver * sc_get_driver(void)
@@ -1041,6 +1057,7 @@ static struct sc_card_driver * sc_get_driver(void)
 	asepcos_ops.list_files        = asepcos_list_files;
 	asepcos_ops.card_ctl          = asepcos_card_ctl;
 	asepcos_ops.pin_cmd           = asepcos_pin_cmd;
+	asepcos_ops.card_reader_lock_obtained = asepcos_card_reader_lock_obtained;
 
 	return &asepcos_drv;
 }

@@ -42,7 +42,7 @@ static struct sc_card_driver cardos_drv = {
 	NULL, 0, NULL
 };
 
-static struct sc_atr_table cardos_atrs[] = {
+static const struct sc_atr_table cardos_atrs[] = {
 	/* 4.0 */
 	{ "3b:e2:00:ff:c1:10:31:fe:55:c8:02:9c", NULL, NULL, SC_CARD_TYPE_CARDOS_GENERIC, 0, NULL },
 	/* Italian eID card, postecert */
@@ -59,7 +59,8 @@ static struct sc_atr_table cardos_atrs[] = {
 	/* CardOS v5.0 */
 	{ "3b:d2:18:00:81:31:fe:58:c9:01:14", NULL, NULL, SC_CARD_TYPE_CARDOS_V5_0, 0, NULL},
 	/* CardOS v5.3 */
-	{ "3b:d2:18:00:81:31:fe:58:c9:03:16", NULL, NULL, SC_CARD_TYPE_CARDOS_V5_3, 0, NULL},
+	{ "3b:d2:18:00:81:31:fe:58:c9:02:17", NULL, NULL, SC_CARD_TYPE_CARDOS_V5_0, 0, NULL},
+	{ "3b:d2:18:00:81:31:fe:58:c9:03:16", NULL, NULL, SC_CARD_TYPE_CARDOS_V5_0, 0, NULL},
 	{ NULL, NULL, NULL, 0, 0, NULL }
 };
 
@@ -83,8 +84,6 @@ static int cardos_match_card(sc_card_t *card)
 	if (card->type == SC_CARD_TYPE_CARDOS_M4_4)
 		return 1;
 	if (card->type == SC_CARD_TYPE_CARDOS_V5_0)
-		return 1;
-	if (card->type == SC_CARD_TYPE_CARDOS_V5_3)
 		return 1;
 	if (card->type == SC_CARD_TYPE_CARDOS_M4_2) {
 		int rv;
@@ -172,28 +171,27 @@ static int cardos_init(sc_card_t *card)
 	size_t data_field_length;
 	sc_apdu_t apdu;
 	u8 rbuf[2];
+	int r;
 
-	card->name = "CardOS M4";
+	card->name = "Atos CardOS";
 	card->cla = 0x00;
 
 	/* Set up algorithm info. */
-	flags = SC_ALGORITHM_RSA_HASH_NONE
+	flags = SC_ALGORITHM_RSA_RAW
+		| SC_ALGORITHM_RSA_HASH_NONE
 		| SC_ALGORITHM_ONBOARD_KEY_GEN
 		;
-	if (card->type != SC_CARD_TYPE_CARDOS_V5_3)
-		flags |= SC_ALGORITHM_RSA_RAW
-			| SC_ALGORITHM_NEED_USAGE;
-	else
-		flags |= SC_ALGORITHM_RSA_PAD_PKCS1;
+	if (card->type != SC_CARD_TYPE_CARDOS_V5_0)
+		flags |= SC_ALGORITHM_NEED_USAGE;
 
 	_sc_card_add_rsa_alg(card,  512, flags, 0);
 	_sc_card_add_rsa_alg(card,  768, flags, 0);
 	_sc_card_add_rsa_alg(card, 1024, flags, 0);
 
 	if (card->type == SC_CARD_TYPE_CARDOS_M4_2) {
-		int r = cardos_have_2048bit_package(card);
+		r = cardos_have_2048bit_package(card);
 		if (r < 0)
-			return r;
+			return SC_ERROR_INVALID_CARD;
 		if (r == 1)
 			rsa_2048 = 1;
 		card->caps |= SC_CARD_CAP_APDU_EXT;
@@ -201,8 +199,7 @@ static int cardos_init(sc_card_t *card)
 		|| card->type == SC_CARD_TYPE_CARDOS_M4_2B
 		|| card->type == SC_CARD_TYPE_CARDOS_M4_2C
 		|| card->type == SC_CARD_TYPE_CARDOS_M4_4
-		|| card->type == SC_CARD_TYPE_CARDOS_V5_0
-		|| card->type == SC_CARD_TYPE_CARDOS_V5_3) {
+		|| card->type == SC_CARD_TYPE_CARDOS_V5_0) {
 		rsa_2048 = 1;
 		card->caps |= SC_CARD_CAP_APDU_EXT;
 	}
@@ -212,14 +209,18 @@ static int cardos_init(sc_card_t *card)
 	apdu.le = sizeof rbuf;
 	apdu.resp = rbuf;
 	apdu.resplen = sizeof(rbuf);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL,
-			sc_transmit_apdu(card, &apdu),
-			"APDU transmit failed");
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL,
-			sc_check_sw(card, apdu.sw1, apdu.sw2),
-			"GET DATA command returned error");
+	r = sc_transmit_apdu(card, &apdu);
+	if (r < 0)
+		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL,
+				SC_ERROR_INVALID_CARD,
+				"APDU transmit failed");
+	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	if (r < 0)
+		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL,
+				SC_ERROR_INVALID_CARD,
+				"GET DATA command returned error");
 	if (apdu.resplen != 2)
-		return SC_ERROR_WRONG_LENGTH;
+		return SC_ERROR_INVALID_CARD;
 	data_field_length = ((rbuf[0] << 8) | rbuf[1]);
 
 	/* strip the length of possible Lc and Le bytes */
@@ -237,8 +238,7 @@ static int cardos_init(sc_card_t *card)
 		_sc_card_add_rsa_alg(card, 2048, flags, 0);
 	}
 
-	if (card->type == SC_CARD_TYPE_CARDOS_V5_0
-		|| card->type == SC_CARD_TYPE_CARDOS_V5_3) {
+	if (card->type == SC_CARD_TYPE_CARDOS_V5_0) {
 		/* Starting with CardOS 5, the card supports PIN query commands */
 		card->caps |= SC_CARD_CAP_ISO7816_PIN_INFO;
 	}
@@ -304,7 +304,7 @@ static const struct sc_card_error cardos_errors[] = {
 /* no error, maybe a note */
 { 0x9000, SC_SUCCESS,		NULL}, 
 { 0x9001, SC_SUCCESS,		"success, but eeprom weakness detected"}, 
-{ 0x9850, SC_SUCCESS,		"over/underflow useing in/decrease"}
+{ 0x9850, SC_SUCCESS,		"over/underflow using in/decrease"}
 };
 
 static int cardos_check_sw(sc_card_t *card, unsigned int sw1, unsigned int sw2)
@@ -357,7 +357,7 @@ get_next_part:
 	len = apdu.resplen;
 	while (len != 0) {
 		size_t   tlen = 0, ilen = 0;
-		/* is there a file informatin block (0x6f) ? */
+		/* is there a file information block (0x6f) ? */
 		p = sc_asn1_find_tag(card->ctx, p, len, 0x6f, &tlen);
 		if (p == NULL) {
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "directory tag missing");
@@ -377,7 +377,7 @@ get_next_part:
 			buf[fids++] = q[1];
 			buflen -= 2;
 		} else
-			/* not enought space left in buffer => break */
+			/* not enough space left in buffer => break */
 			break;
 		/* extract next offset */
 		q = sc_asn1_find_tag(card->ctx, p, tlen, 0x8a, &ilen);
@@ -564,8 +564,8 @@ static int cardos_set_file_attributes(sc_card_t *card, sc_file_t *file)
 
 		status[0] = 0x01;
 		if (file->type == SC_FILE_TYPE_DF) {
-			status[1] = file->size >> 8;
-			status[2] = file->size;
+			status[1] = (file->size >> 8) & 0xFF;
+			status[2] = file->size & 0xFF;
 		} else {
 			status[1] = status[2] = 0x00; /* not used */
 		}
@@ -603,6 +603,8 @@ static int cardos_construct_fcp(sc_card_t *card, const sc_file_t *file,
 	*p++ = 0x62;
 	/* we will add the length later  */
 	p++;
+
+	memset(buf, 0, sizeof(buf));
 
 	/* set the length */
 	buf[0] = (file->size >> 8) & 0xff;
@@ -789,10 +791,8 @@ cardos_set_security_env(sc_card_t *card,
 	if (card->type == SC_CARD_TYPE_CARDOS_CIE_V1) {
 		cardos_restore_security_env(card, 0x30);
 		apdu.p1 = 0xF1;
-	} else if (card->type == SC_CARD_TYPE_CARDOS_V5_3) {
-		apdu.p1 = 0x41;
 	} else {
-		apdu.p1 = 0x01;
+		apdu.p1 = 0x41;
 	}
 	switch (env->operation) {
 	case SC_SEC_OPERATION_DECIPHER:
@@ -898,7 +898,7 @@ cardos_compute_signature(sc_card_t *card, const u8 *data, size_t datalen,
 	/* There are two ways to create a signature, depending on the way,
 	 * the key was created: RSA_SIG and RSA_PURE_SIG.
 	 * We can use the following reasoning, to determine the correct operation:
-	 * 1. We check for several caps flags (as set in card->caps), to pervent generating
+	 * 1. We check for several caps flags (as set in card->caps), to prevent generating
 	 *    invalid signatures with duplicated hash prefixes with some cards
 	 * 2. Use the information from AlgorithmInfo of the TokenInfo file.
 	 *    This information is parsed in set_security_env and stored in a static variable.
@@ -931,8 +931,9 @@ cardos_compute_signature(sc_card_t *card, const u8 *data, size_t datalen,
 	}
 
 	/* check if any operation was selected */
-	if(do_rsa_sig == 0 && do_rsa_pure_sig == 0)  {
-		/* no operation selected. we just have to try both, for the lack of any better reasoning */
+	if (do_rsa_sig == 0 && do_rsa_pure_sig == 0) {
+		/* no operation selected. we just have to try both,
+		 * for the lack of any better reasoning */
 		sc_log(ctx, "I was unable to determine, whether this key can be used with RSA_SIG or RSA_PURE_SIG. I will just try both.");
 		do_rsa_sig = 1;
 		do_rsa_pure_sig = 1;
@@ -979,6 +980,32 @@ cardos_compute_signature(sc_card_t *card, const u8 *data, size_t datalen,
 	}
 
 	LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
+}
+
+static int
+cardos_decipher(struct sc_card *card,
+		const u8 * crgram, size_t crgram_len,
+		u8 * out, size_t outlen)
+{
+	int r;
+	size_t card_max_send_size = card->max_send_size;
+	size_t reader_max_send_size = card->reader->max_send_size;
+
+	if (sc_get_max_send_size(card) < crgram_len + 1) {
+		/* CardOS doesn't support chaining for PSO:DEC, so we just _hope_
+		 * that both, the reader and the card are able to send enough data.
+		 * (data is prefixed with 1 byte padding content indicator) */
+		card->max_send_size = crgram_len + 1;
+		card->reader->max_send_size = crgram_len + 1;
+	}
+
+	r = iso_ops->decipher(card, crgram, crgram_len, out, outlen);
+
+	/* reset whatever we've modified above */
+	card->max_send_size = card_max_send_size;
+	card->reader->max_send_size = reader_max_send_size;
+
+	return r;
 }
 
 static int
@@ -1249,8 +1276,7 @@ cardos_logout(sc_card_t *card)
 		   	|| card->type == SC_CARD_TYPE_CARDOS_M4_2C
 		   	|| card->type == SC_CARD_TYPE_CARDOS_M4_3
 		   	|| card->type == SC_CARD_TYPE_CARDOS_M4_4
-			|| card->type == SC_CARD_TYPE_CARDOS_V5_0
-			|| card->type == SC_CARD_TYPE_CARDOS_V5_3) {
+			|| card->type == SC_CARD_TYPE_CARDOS_V5_0) {
 		sc_apdu_t apdu;
 		int       r;
 		sc_path_t path;
@@ -1285,6 +1311,7 @@ static struct sc_card_driver * sc_get_driver(void)
 	cardos_ops.set_security_env = cardos_set_security_env;
 	cardos_ops.restore_security_env = cardos_restore_security_env;
 	cardos_ops.compute_signature = cardos_compute_signature;
+	cardos_ops.decipher = cardos_decipher;
 
 	cardos_ops.list_files = cardos_list_files;
 	cardos_ops.check_sw = cardos_check_sw;

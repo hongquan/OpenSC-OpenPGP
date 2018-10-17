@@ -106,18 +106,25 @@ typedef struct _pgp_manuf_map {
 } pgp_manuf_map_t;
 
 static const pgp_manuf_map_t manuf_map[] = {
-	{ 0x0001, "PPC Card Systems" },
-	{ 0x0002, "Prism"            },
-	{ 0x0003, "OpenFortress"     },
-	{ 0x0004, "Wewid AB"         },
-	{ 0x0005, "ZeitControl"      },
-	{ 0x0006, "Yubico"           },
-	{ 0x0007, "OpenKMS"          },
-	{ 0x0008, "LogoEmail"        },
-	{ 0x002A, "Magrathea"        },
-	{ 0xF517, "FSIJ"             },
-	{ 0x0000, "test card"        },
-	{ 0xffff, "test card"        },
+	{ 0x0001, "PPC Card Systems"   },
+	{ 0x0002, "Prism"              },
+	{ 0x0003, "OpenFortress"       },
+	{ 0x0004, "Wewid AB"           },
+	{ 0x0005, "ZeitControl"        },
+	{ 0x0006, "Yubico"             },
+	{ 0x0007, "OpenKMS"            },
+	{ 0x0008, "LogoEmail"          },
+	{ 0x0009, "Fidesmo"            },
+	{ 0x000A, "Dangerous Things"   },
+	{ 0x002A, "Magrathea"          },
+	{ 0x0042, "GnuPG e.V."         },
+	{ 0x1337, "Warsaw Hackerspace" },
+	{ 0x2342, "warpzone"           },
+	{ 0x63AF, "Trustica"           },
+	{ 0xBD0E, "Paranoidlabs"       },
+	{ 0xF517, "FSIJ"               },
+	{ 0x0000, "test card"          },
+	{ 0xffff, "test card"          },
 	{ 0, NULL }
 };
 
@@ -147,6 +154,9 @@ read_file(sc_card_t *card, const char *path_name, void *buf, size_t len)
 
 	if (file->size < len)
 		len = file->size;
+
+	sc_file_free(file);
+
 	return sc_read_binary(card, 0, (u8 *) buf, len, 0);
 }
 
@@ -159,10 +169,10 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 	u8		c4data[10];
 	u8		c5data[70];
 	int		r, i;
-	const pgp_pin_cfg_t *pin_cfg = (card->type == SC_CARD_TYPE_OPENPGP_V2 || card->type == SC_CARD_TYPE_OPENPGP_GNUK)
-	                               ? pin_cfg_v2 : pin_cfg_v1;
+	const pgp_pin_cfg_t *pin_cfg = (card->type == SC_CARD_TYPE_OPENPGP_V1)
+	                               ? pin_cfg_v1 : pin_cfg_v2;
 	sc_path_t path;
-	sc_file_t *file;
+	sc_file_t *file = NULL;
 
 	set_string(&p15card->tokeninfo->label, "OpenPGP card");
 	set_string(&p15card->tokeninfo->manufacturer_id, "OpenPGP project");
@@ -368,13 +378,19 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 			goto failed;
 	}
 
-	/* PKCS#15 DATA object from OpenPGP private DOs */
-	r = sc_pkcs15emu_openpgp_add_data(p15card);
+	/* Add PKCS#15 DATA objects from other OpenPGP card DOs. The return
+	 * value is ignored, so this will not cause initialization to fail.
+	 */
+	sc_pkcs15emu_openpgp_add_data(p15card);
 
-	return 0;
+failed:
+	if (r < 0) {
+		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+				"Failed to initialize OpenPGP emulation: %s\n",
+				sc_strerror(r));
+	}
+	sc_file_free(file);
 
-failed:	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Failed to initialize OpenPGP emulation: %s\n",
-			sc_strerror(r));
 	return r;
 }
 
@@ -385,7 +401,7 @@ sc_pkcs15emu_openpgp_add_data(sc_pkcs15_card_t *p15card)
 	int i, r;
 
 	LOG_FUNC_CALLED(ctx);
-	/* There is 4 private DO from 0101 to 0104 */
+	/* Optional private use DOs 0101 to 0104 */
 	for (i = 1; i <= PGP_NUM_PRIVDO; i++) {
 		sc_pkcs15_data_info_t dat_info;
 		sc_pkcs15_object_t dat_obj;
@@ -398,8 +414,8 @@ sc_pkcs15emu_openpgp_add_data(sc_pkcs15_card_t *p15card)
 		snprintf(name, 8, "PrivDO%d", i);
 		snprintf(path, 9, "3F00010%d", i);
 
-		/* Check if the DO can be read.
-		 * We won't expose pkcs15 DATA object if DO is empty.
+		/* Check if the DO can be read and is not empty. Otherwise we
+		 * won't expose a PKCS#15 DATA object.
 		 */
 		r = read_file(p15card->card, path, content, sizeof(content));
 		if (r <= 0 ) {
@@ -421,14 +437,18 @@ sc_pkcs15emu_openpgp_add_data(sc_pkcs15_card_t *p15card)
 
 		sc_log(ctx, "Add %s data object", name);
 		r = sc_pkcs15emu_add_data_object(p15card, &dat_obj, &dat_info);
+		LOG_TEST_RET(ctx, r, "Could not add data object to framework");
 	}
-	LOG_FUNC_RETURN(ctx, r);
+	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 }
 
 static int openpgp_detect_card(sc_pkcs15_card_t *p15card)
 {
-	if (p15card->card->type == SC_CARD_TYPE_OPENPGP_V1 || p15card->card->type == SC_CARD_TYPE_OPENPGP_V2
-	    || p15card->card->type == SC_CARD_TYPE_OPENPGP_GNUK)
+	if (p15card->card->type == SC_CARD_TYPE_OPENPGP_BASE
+			|| p15card->card->type == SC_CARD_TYPE_OPENPGP_V1
+			|| p15card->card->type == SC_CARD_TYPE_OPENPGP_V2
+			|| p15card->card->type == SC_CARD_TYPE_OPENPGP_GNUK
+			|| p15card->card->type == SC_CARD_TYPE_OPENPGP_V3)
 		return SC_SUCCESS;
 	else
 		return SC_ERROR_WRONG_CARD;

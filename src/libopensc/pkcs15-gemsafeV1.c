@@ -208,7 +208,7 @@ static int gemsafe_get_cert_len(sc_card_t *card)
 	 * the private key.
 	 */
 	ind = 2; /* skip length */
-	while (ibuf[ind] == 0x01) {
+	while (ibuf[ind] == 0x01 && i < gemsafe_cert_max) {
 		if (ibuf[ind+1] == 0xFE) {
 			gemsafe_prkeys[i].ref = ibuf[ind+4];
 			sc_log(card->ctx, "Key container %d is allocated and uses key_ref %d",
@@ -225,7 +225,7 @@ static int gemsafe_get_cert_len(sc_card_t *card)
 	}
 
 	/* Delete additional key containers from the data structures if
-	 * this card can't accomodate them.
+	 * this card can't accommodate them.
 	 */
 	for (; i < gemsafe_cert_max; i++) {
 		gemsafe_prkeys[i].label = NULL;
@@ -325,7 +325,7 @@ static int sc_pkcs15emu_gemsafeV1_init( sc_pkcs15_card_t *p15card)
 	apdu.cla = 0x80;
 	apdu.resp = rbuf;
 	apdu.resplen = sizeof(rbuf);
-	/* Manual says Le=0x05, but should be 0x08 to return full version numer */
+	/* Manual says Le=0x05, but should be 0x08 to return full version number */
 	apdu.le = 0x08;
 	apdu.lc = 0;
 	apdu.datalen = 0;

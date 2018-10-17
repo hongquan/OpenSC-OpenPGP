@@ -139,7 +139,7 @@ cac_alg_flags_from_algorithm(int algorithm)
 
 /* map a cert usage and algorithm to public and private key usages */
 static int
-cac_map_usage(unsigned long long cert_usage, int algorithm, unsigned int *pub_usage_ptr, unsigned int *pr_usage_ptr, int allow_nonrepudiation)
+cac_map_usage(unsigned int cert_usage, int algorithm, unsigned int *pub_usage_ptr, unsigned int *pr_usage_ptr, int allow_nonrepudiation)
 {
 	unsigned int pub_usage = 0, pr_usage = 0;
 	unsigned int alg_flags = cac_alg_flags_from_algorithm(algorithm);
@@ -173,7 +173,7 @@ cac_map_usage(unsigned long long cert_usage, int algorithm, unsigned int *pub_us
 static int sc_pkcs15emu_cac_init(sc_pkcs15_card_t *p15card)
 {
 	static const pindata pins[] = {
-		{ "1", NULL, "", 0x00,
+		{ "1", "PIN", "", 0x00,
 		  SC_PKCS15_PIN_TYPE_ASCII_NUMERIC,
 		  8, 4, 8,
 		  SC_PKCS15_PIN_FLAG_NEEDS_PADDING |
@@ -184,7 +184,7 @@ static int sc_pkcs15emu_cac_init(sc_pkcs15_card_t *p15card)
 	};
 	/* oid for key usage */
 	static const struct sc_object_id usage_type = {{ 2, 5, 29, 15, -1 }};
-	unsigned long long usage;
+	unsigned int usage;
 
 
 	/*
@@ -224,6 +224,9 @@ static int sc_pkcs15emu_cac_init(sc_pkcs15_card_t *p15card)
 	}
 
 	/* set pins */
+	/* TODO we should not create PIN objects if it is not initialized
+	 * (opensc-tool -s 0020000000 returns 0x6A 0x88)
+	 */
 	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "CAC adding pins...");
 	for (i = 0; pins[i].id; i++) {
 		struct sc_pkcs15_auth_info pin_info;
@@ -245,10 +248,16 @@ static int sc_pkcs15emu_cac_init(sc_pkcs15_card_t *p15card)
 		sc_format_path(pins[i].path, &pin_info.path);
 		pin_info.tries_left    = -1;
 
-		label = pins[i].label? pins[i].label : cac_get_name(card->type);
+		label = pins[i].label;
 		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "CAC Adding pin %d label=%s",i, label);
 		strncpy(pin_obj.label, label, SC_PKCS15_MAX_LABEL_SIZE - 1);
 		pin_obj.flags = pins[i].obj_flags;
+
+		/* get the ACA path in case it needs to be selected before PIN verify */
+		r = sc_card_ctl(card, SC_CARDCTL_CAC_GET_ACA_PATH, &pin_info.path);
+		if (r < 0) {
+			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+		}
 
 		r = sc_pkcs15emu_add_pin_obj(p15card, &pin_obj, &pin_info);
 		if (r < 0)
@@ -257,6 +266,8 @@ static int sc_pkcs15emu_cac_init(sc_pkcs15_card_t *p15card)
 
 	/* set other objects */
 	r = (card->ops->card_ctl)(card, SC_CARDCTL_CAC_INIT_GET_GENERIC_OBJECTS, &count);
+	LOG_TEST_RET(card->ctx, r, "Can not initiate generic objects.");
+
 	for (i = 0; i < count; i++) {
 		struct sc_pkcs15_data_info obj_info;
 		struct sc_pkcs15_object    obj_obj;
@@ -273,6 +284,7 @@ static int sc_pkcs15emu_cac_init(sc_pkcs15_card_t *p15card)
 			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
 	}
 	r = (card->ops->card_ctl)(card, SC_CARDCTL_CAC_FINAL_GET_GENERIC_OBJECTS, &count);
+	LOG_TEST_RET(card->ctx, r, "Can not finalize generic objects.");
 
 	/*
 	 * certs, pubkeys and priv keys are related and we assume
@@ -282,6 +294,8 @@ static int sc_pkcs15emu_cac_init(sc_pkcs15_card_t *p15card)
 	 */
 	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "CAC adding certs, pub and priv keys...");
 	r = (card->ops->card_ctl)(card, SC_CARDCTL_CAC_INIT_GET_CERT_OBJECTS, &count);
+	LOG_TEST_RET(card->ctx, r, "Can not initiate cert objects.");
+
 	for (i = 0; i < count; i++) {
 		struct sc_pkcs15_data_info obj_info;
 		struct sc_pkcs15_cert_info cert_info;
@@ -294,6 +308,7 @@ static int sc_pkcs15emu_cac_init(sc_pkcs15_card_t *p15card)
 		sc_pkcs15_cert_t *cert_out = NULL;
 
 		r = (card->ops->card_ctl)(card, SC_CARDCTL_CAC_GET_NEXT_CERT_OBJECT, &obj_info);
+		LOG_TEST_RET(card->ctx, r, "Can not get next object");
 
 		memset(&cert_info, 0, sizeof(cert_info));
 		memset(&pubkey_info, 0, sizeof(pubkey_info));
@@ -317,8 +332,8 @@ static int sc_pkcs15emu_cac_init(sc_pkcs15_card_t *p15card)
 			prkey_info.path.len += 2;
 		}
 		pubkey_info.native        = 1;
-		pubkey_info.key_reference = ((int)obj_info.id.value[0]) << 8 || obj_info.id.value[1];
-		prkey_info.key_reference = ((int)obj_info.id.value[0]) << 8 || obj_info.id.value[1];
+		pubkey_info.key_reference = ((int)obj_info.id.value[0]) << 8 | obj_info.id.value[1];
+		prkey_info.key_reference = ((int)obj_info.id.value[0]) << 8 | obj_info.id.value[1];
 		prkey_info.native        = 1;
 
 		memcpy(cert_obj.label, obj_info.app_label, sizeof(obj_info.app_label));
@@ -373,6 +388,7 @@ static int sc_pkcs15emu_cac_init(sc_pkcs15_card_t *p15card)
 			if (r == SC_SUCCESS) {
 				token_name = malloc (cn_len+1);
 				if (!token_name) {
+					free(cn_name);
 					r = SC_ERROR_OUT_OF_MEMORY;
 					goto fail;
 				}
@@ -395,7 +411,7 @@ static int sc_pkcs15emu_cac_init(sc_pkcs15_card_t *p15card)
 			usage = 0xd9ULL; /* basic default usage */
 		}
 		cac_map_usage(usage, cert_out->key->algorithm, &pubkey_info.usage, &prkey_info.usage, 1);
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,  "cert %s: cert_usage=0x%llx, pub_usage=0x%x priv_usage=0x%x\n",
+		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,  "cert %s: cert_usage=0x%x, pub_usage=0x%x priv_usage=0x%x\n",
 				sc_dump_hex(cert_info.id.value, cert_info.id.len),
 				 usage, pubkey_info.usage, prkey_info.usage);
 		if (cert_out->key->algorithm != SC_ALGORITHM_RSA) {
@@ -421,6 +437,7 @@ fail:
 
 	}
 	r = (card->ops->card_ctl)(card, SC_CARDCTL_CAC_FINAL_GET_CERT_OBJECTS, &count);
+	LOG_TEST_RET(card->ctx, r, "Can not finalize cert objects.");
 
 	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_SUCCESS);
 }

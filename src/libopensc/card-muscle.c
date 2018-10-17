@@ -42,7 +42,7 @@ static struct sc_card_driver muscle_drv = {
 	NULL, 0, NULL
 };
 
-static struct sc_atr_table muscle_atrs[] = {
+static const struct sc_atr_table muscle_atrs[] = {
 	/* Tyfone JCOP 242R2 cards */
 	{ "3b:6d:00:00:ff:54:79:66:6f:6e:65:20:32:34:32:52:32", NULL, NULL, SC_CARD_TYPE_MUSCLE_JCOP242R2_NO_EXT_APDU, 0, NULL },
 	/* Aladdin eToken PRO USB 72K Java */
@@ -94,9 +94,11 @@ static int muscle_match_card(sc_card_t *card)
 		apdu.resp = response;
 		r = sc_transmit_apdu(card, &apdu);
 		if (r == SC_SUCCESS && response[0] == 0x01) {
-				card->type = SC_CARD_TYPE_MUSCLE_V1;
-				return 1;
+			card->type = SC_CARD_TYPE_MUSCLE_V1;
+		} else {
+			card->type = SC_CARD_TYPE_MUSCLE_GENERIC;
 		}
+		return 1;
 	}
 	return 0;
 }
@@ -241,7 +243,7 @@ static int muscle_update_binary(sc_card_t *card, unsigned int idx, const u8* buf
 		if(buffer == NULL) SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
 
 		r = msc_read_object(card, objectId, 0, buffer, file->size);
-		/* TODO: RETREIVE ACLS */
+		/* TODO: RETRIEVE ACLS */
 		if(r < 0) goto update_bin_free_buffer;
 		r = msc_delete_object(card, objectId, 0);
 		if(r < 0) goto update_bin_free_buffer;
@@ -453,6 +455,7 @@ static int _listFile(mscfs_file_t *file, int reset, void *udata)
 static int muscle_init(sc_card_t *card)
 {
 	muscle_private_t *priv;
+	int r;
 
 	card->name = "MuscleApplet";
 	card->drv_data = malloc(sizeof(muscle_private_t));
@@ -476,17 +479,19 @@ static int muscle_init(sc_card_t *card)
 	card->caps |= SC_CARD_CAP_RNG;
 
 	/* Card type detection */
-	if (_sc_match_atr(card, muscle_atrs, &card->type) < 0)   {
-		free(priv->fs);
-		free(card->drv_data);
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_NOT_SUPPORTED);
+	r = _sc_match_atr(card, muscle_atrs, &card->type);
+	if (r < 0) {
+		sc_log(card->ctx, "Failed to match the ATRs");
 	}
-
 	if(card->type == SC_CARD_TYPE_MUSCLE_ETOKEN_72K) {
 		card->caps |= SC_CARD_CAP_APDU_EXT;
 	}
 	if(card->type == SC_CARD_TYPE_MUSCLE_JCOP241) {
 		card->caps |= SC_CARD_CAP_APDU_EXT;
+	}
+	if (!(card->caps & SC_CARD_CAP_APDU_EXT)) {
+		card->max_recv_size = 255;
+		card->max_send_size = 255;
 	}
 	if(card->type == SC_CARD_TYPE_MUSCLE_JCOP242R2_NO_EXT_APDU) {
 	        /* Tyfone JCOP v242R2 card that doesn't support extended APDUs */
@@ -517,7 +522,9 @@ static int muscle_list_files(sc_card_t *card, u8 *buf, size_t bufLen)
 	mscfs_check_cache(priv->fs);
 
 	for(x = 0; x < fs->cache.size; x++) {
-		u8* oid= fs->cache.array[x].objectId.id;
+		u8* oid = fs->cache.array[x].objectId.id;
+		if (bufLen < 2)
+			break;
 		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
 			"FILE: %02X%02X%02X%02X\n",
 			oid[0],oid[1],oid[2],oid[3]);
@@ -526,7 +533,8 @@ static int muscle_list_files(sc_card_t *card, u8 *buf, size_t bufLen)
 			buf[1] = oid[3];
 			if(buf[0] == 0x00 && buf[1] == 0x00) continue; /* No directories/null names outside of root */
 			buf += 2;
-			count+=2;
+			count += 2;
+			bufLen -= 2;
 		}
 	}
 	return count;
@@ -602,7 +610,7 @@ static int muscle_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *cmd,
 
 static int muscle_card_extract_key(sc_card_t *card, sc_cardctl_muscle_key_info_t *info)
 {
-	/* CURRENTLY DONT SUPPOT EXTRACTING PRIVATE KEYS... */
+	/* CURRENTLY DONT SUPPORT EXTRACTING PRIVATE KEYS... */
 	switch(info->keyType) {
 	case 1: /* RSA */
 		return msc_extract_rsa_public_key(card,
@@ -618,7 +626,7 @@ static int muscle_card_extract_key(sc_card_t *card, sc_cardctl_muscle_key_info_t
 
 static int muscle_card_import_key(sc_card_t *card, sc_cardctl_muscle_key_info_t *info)
 {
-	/* CURRENTLY DONT SUPPOT EXTRACTING PRIVATE KEYS... */
+	/* CURRENTLY DONT SUPPORT EXTRACTING PRIVATE KEYS... */
 	switch(info->keyType) {
 	case 0x02: /* RSA_PRIVATE */
 	case 0x03: /* RSA_PRIVATE_CRT */
@@ -721,7 +729,7 @@ static int muscle_decipher(sc_card_t * card,
 	u8 key_id;
 	int r;
 
-	/* saniti check */
+	/* sanity check */
 	if (priv->env.operation != SC_SEC_OPERATION_DECIPHER)
 		return SC_ERROR_INVALID_ARGUMENTS;
 
@@ -774,8 +782,12 @@ static int muscle_get_challenge(sc_card_t *card, u8 *rnd, size_t len)
 {
 	if (len == 0)
 		return SC_SUCCESS;
-	else
-		return msc_get_challenge(card, len, 0, NULL, rnd);
+	else {
+		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL,
+				msc_get_challenge(card, len, 0, NULL, rnd),
+				"GET CHALLENGE cmd failed");
+		return (int) len;
+	}
 }
 
 static int muscle_check_sw(sc_card_t * card, unsigned int sw1, unsigned int sw2) {
@@ -810,6 +822,21 @@ static int muscle_check_sw(sc_card_t * card, unsigned int sw1, unsigned int sw2)
 	return iso_ops->check_sw(card, sw1, sw2);
 }
 
+static int muscle_card_reader_lock_obtained(sc_card_t *card, int was_reset)
+{
+	int r = SC_SUCCESS;
+
+	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	if (was_reset > 0) {
+		if (msc_select_applet(card, muscleAppletId, sizeof muscleAppletId) != 1) {
+			r = SC_ERROR_INVALID_CARD;
+		}
+	}
+
+	LOG_FUNC_RETURN(card->ctx, r);
+}
+
 
 static struct sc_card_driver * sc_get_driver(void)
 {
@@ -837,6 +864,7 @@ static struct sc_card_driver * sc_get_driver(void)
 	muscle_ops.select_file = muscle_select_file;
 	muscle_ops.delete_file = muscle_delete_file;
 	muscle_ops.list_files = muscle_list_files;
+	muscle_ops.card_reader_lock_obtained = muscle_card_reader_lock_obtained;
 
 	return &muscle_drv;
 }

@@ -50,7 +50,7 @@ static void *modhandle = NULL;
 /* Spy module output */
 static FILE *spy_output = NULL;
 
-/* Inits the spy. If successfull, po != NULL */
+/* Inits the spy. If successful, po != NULL */
 static CK_RV
 init_spy(void)
 {
@@ -153,7 +153,7 @@ init_spy(void)
 
 #ifdef _WIN32
 	if (!spy_output) {
-		/* try for the machine version first, as we may be runing
+		/* try for the machine version first, as we may be running
 		 * without a user during login
 		 */
 		rc = RegOpenKeyEx( HKEY_LOCAL_MACHINE, "Software\\OpenSC Project\\PKCS11-Spy", 0, KEY_QUERY_VALUE, &hKey );
@@ -172,7 +172,7 @@ init_spy(void)
 				}
 			}
 
-	                if( (rc == ERROR_SUCCESS) && (temp_len < PATH_MAX) )
+			if( (rc == ERROR_SUCCESS) && (temp_len < PATH_MAX) )
 				output = temp_path;
 			RegCloseKey( hKey );
 		}
@@ -188,7 +188,7 @@ init_spy(void)
 	module = getenv("PKCS11SPY");
 #ifdef _WIN32
 	if (!module) {
-		/* try for the machine version first, as we may be runing
+		/* try for the machine version first, as we may be running
 		 * without a user during login
 		 */
 		rc = RegOpenKeyEx( HKEY_LOCAL_MACHINE, "Software\\OpenSC Project\\PKCS11-Spy",
@@ -844,6 +844,26 @@ C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT
 	enter("C_DecryptInit");
 	spy_dump_ulong_in("hSession", hSession);
 	fprintf(spy_output, "pMechanism->type=%s\n", lookup_enum(MEC_T, pMechanism->mechanism));
+	switch (pMechanism->mechanism) {
+	case CKM_RSA_PKCS_OAEP:
+		if (pMechanism->pParameter != NULL) {
+ 			CK_RSA_PKCS_OAEP_PARAMS *param =
+				(CK_RSA_PKCS_OAEP_PARAMS *) pMechanism->pParameter;
+			fprintf(spy_output, "pMechanism->pParameter->hashAlg=%s\n",
+				lookup_enum(MEC_T, param->hashAlg));
+			fprintf(spy_output, "pMechanism->pParameter->mgf=%s\n",
+				lookup_enum(MGF_T, param->mgf));
+			fprintf(spy_output, "pMechanism->pParameter->source=%lu\n", param->source);
+			spy_dump_string_out("pSourceData[ulSourceDalaLen]", 
+				param->pSourceData, param->ulSourceDataLen);
+		} else {
+			fprintf(spy_output, "Parameters block for %s is empty...\n",
+				lookup_enum(MEC_T, pMechanism->mechanism));
+		}
+		break;
+	default:
+		break;
+	}
 	spy_dump_ulong_in("hKey", hKey);
 	rv = po->C_DecryptInit(hSession, pMechanism, hKey);
 	return retne(rv);
@@ -969,6 +989,27 @@ C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HA
 	enter("C_SignInit");
 	spy_dump_ulong_in("hSession", hSession);
 	fprintf(spy_output, "pMechanism->type=%s\n", lookup_enum(MEC_T, pMechanism->mechanism));
+	switch (pMechanism->mechanism) {
+	case CKM_RSA_PKCS_PSS:
+	case CKM_SHA1_RSA_PKCS_PSS:
+	case CKM_SHA256_RSA_PKCS_PSS:
+	case CKM_SHA384_RSA_PKCS_PSS:
+	case CKM_SHA512_RSA_PKCS_PSS:
+		if (pMechanism->pParameter != NULL) {
+			CK_RSA_PKCS_PSS_PARAMS *param =
+				(CK_RSA_PKCS_PSS_PARAMS *) pMechanism->pParameter;
+			fprintf(spy_output, "pMechanism->pParameter->hashAlg=%s\n",
+				lookup_enum(MEC_T, param->hashAlg));
+			fprintf(spy_output, "pMechanism->pParameter->mgf=%s\n",
+				lookup_enum(MGF_T, param->mgf));
+			fprintf(spy_output, "pMechanism->pParameter->sLen=%lu\n",
+				param->sLen);
+		} else {
+			fprintf(spy_output, "Parameters block for %s is empty...\n",
+				lookup_enum(MEC_T, pMechanism->mechanism));
+		}
+		break;
+	}
 	spy_dump_ulong_in("hKey", hKey);
 	rv = po->C_SignInit(hSession, pMechanism, hKey);
 	return retne(rv);

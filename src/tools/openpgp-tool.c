@@ -79,7 +79,6 @@ static int opt_userinfo = 0;
 static int opt_cardinfo = 0;
 static char *exec_program = NULL;
 static int opt_genkey = 0;
-static int opt_keylen = 0;
 static u8 key_id = 0;
 static unsigned int key_len = 2048;
 static int opt_verify = 0;
@@ -88,8 +87,8 @@ static int opt_pin = 0;
 static const char *pin = NULL;
 static int opt_erase = 0;
 static int opt_delkey = 0;
-static int opt_dump_do = 0;
-static u8 do_dump_idx;
+static size_t opt_dump_do = 0;
+static unsigned int do_dump_idx[200];	/* large enough and checked on input */
 
 static const char *app_name = "openpgp-tool";
 
@@ -131,7 +130,7 @@ static const char *option_help[] = {
 	"Verify PIN (CHV1, CHV2, CHV3...)",
 	"PIN string",
 	"Delete key (1, 2, 3 or all)",
-/* d */ "Dump private data object number <arg> (i.e. PRIVATE-DO-<arg>)",
+/* d */ "Dump private data object number <arg> (i.e. DO <arg>)",
 };
 
 static const struct ef_name_map openpgp_data[] = {
@@ -247,6 +246,8 @@ static void display_data(const struct ef_name_map *mapping, char *value)
 static int decode_options(int argc, char **argv)
 {
 	int c;
+	char *endptr;
+	unsigned long val;
 
 	while ((c = getopt_long(argc, argv,"r:x:CUG:L:EhwvVd:", options, (int *) 0)) != EOF) {
 		switch (c) {
@@ -289,9 +290,7 @@ static int decode_options(int argc, char **argv)
 			actions++;
 			break;
 		case 'L':
-			opt_keylen++;
 			key_len = atoi(optarg);
-			actions++;
 			break;
 		case 'h':
 			util_print_usage_and_die(app_name, options, option_help, NULL);
@@ -316,10 +315,19 @@ static int decode_options(int argc, char **argv)
 				key_id = optarg[0] - '0';
 			else                              /* Arg string is 'all' */
 				key_id = 'a';
+			actions++;
 			break;
 		case 'd':
-			do_dump_idx = optarg[0] - '0';
-			opt_dump_do++;
+			endptr = NULL;
+			val = strtoul(optarg, &endptr, 16);
+			if (endptr == NULL || endptr == optarg || *endptr != '\0') {
+				util_error("Unable to parse DO identifier");
+				exit(EXIT_FAILURE);
+			}
+			if (opt_dump_do < sizeof(do_dump_idx) / sizeof(*do_dump_idx)) {
+				do_dump_idx[opt_dump_do] = (unsigned int) (val | 0x100);
+				opt_dump_do++;
+			}
 			actions++;
 			break;
 		default:
@@ -346,7 +354,7 @@ static int do_userinfo(sc_card_t *card)
 		sc_format_path(openpgp_data[i].ef, &path);
 		r = sc_select_file(card, &path, &file);
 		if (r) {
-			fprintf(stderr, "Failed to select EF %s: %s\n", openpgp_data[i].ef, sc_strerror(r));
+			util_error("failed to select EF %s: %s", openpgp_data[i].ef, sc_strerror(r));
 			return EXIT_FAILURE;
 		}
 
@@ -355,17 +363,17 @@ static int do_userinfo(sc_card_t *card)
 			continue;
 
 		if (count > sizeof(buf) - 1) {
-			fprintf(stderr, "Too small buffer to read the OpenPGP data\n");
+			util_error("too small buffer to read the OpenPGP data");
 			return EXIT_FAILURE;
 		}
 
 		r = sc_read_binary(card, 0, buf, count, 0);
 		if (r < 0) {
-			fprintf(stderr, "%s: read failed - %s\n", openpgp_data[i].ef, sc_strerror(r));
+			util_error("failed to read %s: %s", openpgp_data[i].ef, sc_strerror(r));
 			return EXIT_FAILURE;
 		}
 		if (r != (signed)count) {
-			fprintf(stderr, "%s: expecting %"SC_FORMAT_LEN_SIZE_T"d, got only %d bytes\n",
+			util_error("%s: expecting %"SC_FORMAT_LEN_SIZE_T"d bytes, got only %d",
 				openpgp_data[i].ef, count, r);
 			return EXIT_FAILURE;
 		}
@@ -380,46 +388,54 @@ static int do_userinfo(sc_card_t *card)
 
 static int do_dump_do(sc_card_t *card, unsigned int tag)
 {
-	int r, tmp;
-	FILE *fp;
+	int r;
+	size_t length;
+	unsigned char buffer[254];	// Private DO are specified up to 254 bytes
 
-	// Private DO are specified up to 254 bytes
-	unsigned char buffer[254];
 	memset(buffer, '\0', sizeof(buffer));
+
+	if (tag < 0x101 || tag > 0x104) {
+		util_error("illegal DO identifier %04X", tag);
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	r = sc_get_data(card, tag, buffer, sizeof(buffer));
 	if (r < 0) {
-		printf("Failed to get data object: %s\n", sc_strerror(r));
-		if(SC_ERROR_SECURITY_STATUS_NOT_SATISFIED == r) {
-			printf("Make sure the 'verify' and 'pin' parameters are correct.\n");
+		util_error("failed to get data object DO %04X: %s", tag, sc_strerror(r));
+		if (SC_ERROR_SECURITY_STATUS_NOT_SATISFIED == r) {
+			util_error("make sure the 'verify' and 'pin' parameters are correct");
 		}
 		return r;
 	}
+	length = (size_t) r;	/* r is guaranteed to be non-negative */
 
-	if(opt_raw) {
-		r = 0;
-		#ifndef _WIN32
+	if (opt_raw) {
+		int tmp;
+		FILE *fp;
+
+#ifndef _WIN32
 		tmp = dup(fileno(stdout));
-		#else
+#else
 		tmp = _dup(_fileno(stdout));
-		#endif
+#endif
 		if (tmp < 0)
 			return EXIT_FAILURE;
 		fp = freopen(NULL, "wb", stdout);
 		if (fp) {
-			r = (int)fwrite(buffer, sizeof(char), sizeof(buffer), fp);
+			r = (int) fwrite(buffer, sizeof(char), length, fp);
 		}
-		#ifndef _WIN32
+#ifndef _WIN32
 		dup2(tmp, fileno(stdout));
-		#else
+#else
 		_dup2(tmp, _fileno(stdout));
-		#endif
+#endif
 		clearerr(stdout);
 		close(tmp);
-		if (sizeof(buffer) != r)
+
+		if (length != (size_t) r)	/* fail on write errors */
 			return EXIT_FAILURE;
 	} else {
-		util_hex_dump_asc(stdout, buffer, sizeof(buffer), -1);
+		util_hex_dump_asc(stdout, buffer, length, -1);
 	}
 
 	return EXIT_SUCCESS;
@@ -434,28 +450,33 @@ int do_genkey(sc_card_t *card, u8 key_id, unsigned int key_len)
 	sc_file_t *file;
 
 	if (key_id < 1 || key_id > 3) {
-		printf("Unknown key ID %d.\n", key_id);
-		return 1;
+		util_error("unknown key ID %d", key_id);
+		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 	memset(&key_info, 0, sizeof(sc_cardctl_openpgp_keygen_info_t));
-	key_info.keytype = key_id;
-	key_info.modulus_len = key_len;
-	key_info.modulus = malloc(key_len/8);
+	key_info.key_id = key_id;
+	key_info.algorithm = SC_OPENPGP_KEYALGO_RSA;
+	key_info.rsa.modulus_len = key_len;
+	key_info.rsa.modulus = malloc(key_len/8);
 	r = sc_card_ctl(card, SC_CARDCTL_OPENPGP_GENERATE_KEY, &key_info);
-	free(key_info.modulus);
+	free(key_info.rsa.modulus);
 	if (r < 0) {
-		printf("Failed to generate key. Error %s.\n", sc_strerror(r));
-		return 1;
+		util_error("failed to generate key: %s", sc_strerror(r));
+		return EXIT_FAILURE;
 	}
 	sc_format_path("006E007300C5", &path);
 	r = sc_select_file(card, &path, &file);
+	if (r < 0) {
+		util_error("failed to retrieve fingerprints: %s", sc_strerror(r));
+		return EXIT_FAILURE;
+	}
 	r = sc_read_binary(card, 0, fingerprints, 60, 0);
 	if (r < 0) {
-		printf("Failed to retrieve fingerprints. Error %s.\n", sc_strerror(r));
-		return 1;
+		util_error("failed to retrieve fingerprints: %s", sc_strerror(r));
+		return EXIT_FAILURE;
 	}
 	printf("Fingerprint:\n%s\n", (char *)sc_dump_hex(fingerprints + 20*(key_id - 1), 20));
-	return 0;
+	return EXIT_SUCCESS;
 }
 
 int do_verify(sc_card_t *card, char *type, const char *pin)
@@ -467,12 +488,12 @@ int do_verify(sc_card_t *card, char *type, const char *pin)
 		return SC_ERROR_INVALID_ARGUMENTS;
 
 	if (strncasecmp("CHV", type, 3) != 0) {
-		printf("Invalid PIN type. Please use CHV1, CHV2 or CHV3.\n");
+		util_error("invalid PIN type. Please use CHV1, CHV2 or CHV3");
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
 	if (type[3] < '1' || type[3] > '3' || type[4] != '\0') {
-		printf("Invalid PIN reference. Please use CHV1, CHV2 or CHV3.\n");
+		util_error("invalid PIN reference. Please use CHV1, CHV2 or CHV3");
 		return SC_ERROR_INVALID_PIN_REFERENCE;
 	}
 
@@ -518,7 +539,7 @@ int delete_key_openpgp(sc_card_t *card, u8 key_id)
 		/* Build APDU from binary array */
 		r = sc_bytes2apdu(card->ctx, buf, len0, &apdu);
 		if (r) {
-			fprintf(stderr, "Failed to build APDU: %s\n", sc_strerror(r));
+			util_error("failed to build APDU: %s", sc_strerror(r));
 			return r;
 		}
 		apdu.resp = rbuf;
@@ -527,7 +548,7 @@ int delete_key_openpgp(sc_card_t *card, u8 key_id)
 		/* Send APDU to card */
 		r = sc_transmit_apdu(card, &apdu);
 		if (r) {
-			fprintf(stderr, "Transmiting APDU failed: %s\n", sc_strerror(r));
+			util_error("transmitting APDU failed: %s", sc_strerror(r));
 			return r;
 		}
 	}
@@ -543,14 +564,15 @@ int do_delete_key(sc_card_t *card, u8 key_id)
 
 	/* Currently, only Gnuk supports deleting keys */
 	if (card->type != SC_CARD_TYPE_OPENPGP_GNUK) {
-		printf("Only Gnuk supports deleting keys. General OpenPGP doesn't.");
+		util_error("only Gnuk supports deleting keys. General OpenPGP doesn't");
 		return SC_ERROR_NOT_SUPPORTED;
 	}
 
 	if (key_id < 1 || (key_id > 3 && key_id != 'a')) {
-		printf("Error: Invalid key id %d", key_id);
+		util_error("invalid key id %d", key_id);
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
+
 	if (key_id == 1 || key_id == 'a') {
 		sc_format_path("B601", &path);
 		r |= sc_delete_file(card, &path);
@@ -568,14 +590,8 @@ int do_delete_key(sc_card_t *card, u8 key_id)
 
 int do_erase(sc_card_t *card)
 {
-	int r;
-	/* Check card version */
-	if (card->type != SC_CARD_TYPE_OPENPGP_V2) {
-		printf("Do not erase card which is not OpenPGP v2\n");
-	}
 	printf("Erase card\n");
-	r = sc_card_ctl(card, SC_CARDCTL_ERASE_CARD, NULL);
-	return r;
+	return sc_card_ctl(card, SC_CARDCTL_ERASE_CARD, NULL);
 }
 
 int main(int argc, char **argv)
@@ -597,8 +613,7 @@ int main(int argc, char **argv)
 
 	r = sc_context_create(&ctx, &ctx_param);
 	if (r) {
-		util_fatal("failed to establish context: %s\n",
-			sc_strerror(r));
+		util_fatal("failed to establish context: %s", sc_strerror(r));
 		return EXIT_FAILURE;
 	}
 
@@ -609,17 +624,17 @@ int main(int argc, char **argv)
 
 	r = util_connect_card(ctx, &card, opt_reader, opt_wait, verbose);
 	if (r) {
-		util_fatal("failed to connect to card: %s\n",
-			sc_strerror(r));
+		util_fatal("failed to connect to card: %s", sc_strerror(r));
 		return EXIT_FAILURE;
 	}
 
 	/* check card type */
-	if ((card->type != SC_CARD_TYPE_OPENPGP_V1) &&
-		(card->type != SC_CARD_TYPE_OPENPGP_V2) &&
-		(card->type != SC_CARD_TYPE_OPENPGP_GNUK)) {
-		util_error("not an OpenPGP card");
-		fprintf(stderr, "Card type %X\n", card->type);
+	if ((card->type != SC_CARD_TYPE_OPENPGP_BASE) &&
+			(card->type != SC_CARD_TYPE_OPENPGP_V1) &&
+			(card->type != SC_CARD_TYPE_OPENPGP_V2) &&
+			(card->type != SC_CARD_TYPE_OPENPGP_V3) &&
+			(card->type != SC_CARD_TYPE_OPENPGP_GNUK)) {
+		util_error("card type %X: not an OpenPGP card", card->type);
 		exit_status = EXIT_FAILURE;
 		goto out;
 	}
@@ -640,7 +655,11 @@ int main(int argc, char **argv)
 	}
 
 	if (opt_dump_do) {
-		exit_status |= do_dump_do(card, 0x0100 + do_dump_idx);
+		size_t n;
+
+		for (n = 0; n < opt_dump_do; n++) {
+			exit_status |= do_dump_do(card, do_dump_idx[n]);
+		}
 	}
 
 	if (opt_genkey)

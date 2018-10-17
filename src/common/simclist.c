@@ -119,7 +119,7 @@
 #include "simclist.h"
 
 
-/* minumum number of elements for sorting with quicksort instead of insertion */
+/* minimum number of elements for sorting with quicksort instead of insertion */
 #define SIMCLIST_MINQUICKSORTELS        24
 
 
@@ -199,7 +199,7 @@ static simclist_inline struct list_entry_s *list_findpos(const list_t *simclist_
  * 3. avoid interference with user's RNG
  *
  * Facts pro system RNG:
- * 1. may be more accurate (irrelevant for SimCList randno purposes)
+ * 1. may be more accurate (irrelevant for SimCList random purposes)
  * 2. why reinvent the wheel
  *
  * Default to local RNG for user's ease of use.
@@ -419,7 +419,7 @@ static simclist_inline struct list_entry_s *list_findpos(const list_t *simclist_
     /* accept 1 slot overflow for fetching head and tail sentinels */
     if (posstart < -1 || posstart > (int)l->numels) return NULL;
 
-    x = (float)(posstart+1) / l->numels;
+    x = l->numels ? (float)(posstart+1) / l->numels : 0;
     if (x <= 0.25) {
         /* first quarter: get to posstart from head */
         for (i = -1, ptr = l->head_sentinel; i < posstart; ptr = ptr->next, i++);
@@ -489,6 +489,12 @@ int list_insert_at(list_t *simclist_restrict l, const void *data, unsigned int p
     /* actually append element */
     prec = list_findpos(l, pos-1);
     if (prec == NULL) {
+        if (l->attrs.copy_data) {
+            free(lent->data);
+        }
+        if (!(l->spareelsnum > 0)) {
+            free(lent);
+        }
         return -1;
     }
     succ = prec->next;

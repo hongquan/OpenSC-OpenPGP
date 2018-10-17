@@ -477,7 +477,7 @@ int main(int argc, char *argv[])
 			file = sc_file_new();
 			if(file == NULL)
 			{
-				printf("Not enougth memory.\n");
+				printf("Not enough memory.\n");
 				goto out;
 			}
 
@@ -589,31 +589,18 @@ int main(int argc, char *argv[])
 
 		printf("Generate key of length %d.\n", keylen);
 
-#if OPENSSL_VERSION_NUMBER>=0x00908000L
 		rsa = RSA_new();
 		bn = BN_new();
 		mem = BIO_new(BIO_s_mem());
 
 		if(rsa == NULL || bn == NULL || mem == NULL)
 		{
-			printf("Not enougth memory.\n");
+			printf("Not enough memory.\n");
 			goto out;
 		}
 
 		if(!BN_set_word(bn, RSA_F4) ||
 			!RSA_generate_key_ex(rsa, keylen, bn, NULL))
-#else
-		rsa = RSA_generate_key(keylen, RSA_F4, NULL, NULL);
-		mem = BIO_new(BIO_s_mem());
-
-		if(mem == NULL)
-		{
-			printf("Not enougth memory.\n");
-			goto out;
-		}
-
-		if (!rsa)
-#endif
 		{
 			printf("RSA_generate_key_ex return %ld\n", ERR_get_error());
 			goto out;
@@ -638,7 +625,7 @@ int main(int argc, char *argv[])
 			file = sc_file_new();
 			if(file == NULL)
 			{
-				printf("Not enougth memory.\n");
+				printf("Not enough memory.\n");
 				goto out;
 			}
 
@@ -814,7 +801,7 @@ int main(int argc, char *argv[])
 		b = malloc(file->size);
 		if(b == NULL)
 		{
-				printf("Not enougth memory.\n");
+				printf("Not enough memory.\n");
 				goto out;
 		}
 
@@ -864,14 +851,18 @@ int main(int argc, char *argv[])
 		b = malloc(file->size);
 		if(b == NULL)
 		{
-				printf("Not enougth memory.\n");
-				goto out;
+			printf("Not enough memory.\n");
+			goto out;
 		}
 
 		memset(b, 0, file->size);
 
 		fp = fopen(put_filename, "rb");
-		fread(b, 1, file->size, fp);
+		if (fp == NULL || file->size != fread(b, 1, file->size, fp))
+		{
+			printf("could not read %s.\n", put_filename);
+			goto out;
+		}
 		fclose(fp);
 
 		r = sc_update_binary(card, 0, b, file->size, 0);

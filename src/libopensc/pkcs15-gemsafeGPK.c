@@ -225,9 +225,11 @@ static int sc_pkcs15emu_gemsafeGPK_init(sc_pkcs15_card_t *p15card)
 	p15card->tokeninfo->manufacturer_id = strdup(MANU_ID);
 	/* get serial number */
         r = sc_card_ctl(card, SC_CARDCTL_GET_SERIALNR, &serial);
+		if (r != SC_SUCCESS)
+			return SC_ERROR_INTERNAL;
         r = sc_bin_to_hex(serial.value, serial.len, buf, sizeof(buf), 0);
-        if (r != SC_SUCCESS)
-                return SC_ERROR_INTERNAL;
+		if (r != SC_SUCCESS)
+			return SC_ERROR_INTERNAL;
         p15card->tokeninfo->serial_number = strdup(buf);
 
 	/* test if we have a gemsafe app df */
@@ -291,7 +293,7 @@ static int sc_pkcs15emu_gemsafeGPK_init(sc_pkcs15_card_t *p15card)
 		if (r < 0) 
 			continue;
 			
-		/* need to reverse the modulus skiping the tag */
+		/* need to reverse the modulus skipping the tag */
 		j = kinfo[num_keyinfo].modulus_len;
 		cp = kinfo[num_keyinfo].modulus;
 		while (j--) 
@@ -326,7 +328,7 @@ static int sc_pkcs15emu_gemsafeGPK_init(sc_pkcs15_card_t *p15card)
 	if (!gsdata)
 		return SC_ERROR_OUT_OF_MEMORY;
 
-	/* set indcies of data in gsdata  */
+	/* set indices of data in gsdata  */
 	idx1 = 0; /* start point */
 	idx2 = 0; /* index of last data read so far */
 
@@ -479,7 +481,7 @@ static int sc_pkcs15emu_gemsafeGPK_init(sc_pkcs15_card_t *p15card)
 		prkey_info.modulus_length= prkeys[i].modulus_len;
 		sc_format_path(prkeys[i].path, &prkey_info.path);
 
-		/*DEE need to look for them by reading and checking mudulus vs cert */
+		/*DEE need to look for them by reading and checking modulus vs cert */
 
  		/* will use the default path, unless we found a key with */
 		/* the same modulus as the cert(s) we already added */

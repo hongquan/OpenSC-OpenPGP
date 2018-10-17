@@ -38,10 +38,33 @@
 
 #include "common/libscdl.h"
 #include "internal.h"
+#include "sc-ossl-compat.h"
+
+static int ignored_reader(sc_context_t *ctx, sc_reader_t *reader)
+{
+	if (ctx != NULL && reader != NULL && reader->name != NULL) {
+		size_t i;
+		const scconf_list *list;
+
+		for (i = 0; ctx->conf_blocks[i]; i++) {
+			list = scconf_find_list(ctx->conf_blocks[i], "ignored_readers");
+			while (list != NULL) {
+				if (strstr(reader->name, list->data) != NULL) {
+					sc_log(ctx, "Ignoring reader \'%s\' because of \'%s\'\n",
+							reader->name, list->data);
+					return 1;
+				}
+				list = list->next;
+			}
+		}
+	}
+
+	return 0;
+}
 
 int _sc_add_reader(sc_context_t *ctx, sc_reader_t *reader)
 {
-	if (reader == NULL) {
+	if (reader == NULL || ignored_reader(ctx, reader)) {
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 	reader->ctx = ctx;
@@ -76,11 +99,9 @@ static const struct _sc_driver_entry internal_card_drivers[] = {
 	{ "gpk",	(void *(*)(void)) sc_get_gpk_driver },
 #endif
 	{ "gemsafeV1",	(void *(*)(void)) sc_get_gemsafeV1_driver },
-	{ "miocos",	(void *(*)(void)) sc_get_miocos_driver },
 	{ "asepcos",	(void *(*)(void)) sc_get_asepcos_driver },
 	{ "starcos",	(void *(*)(void)) sc_get_starcos_driver },
 	{ "tcos",	(void *(*)(void)) sc_get_tcos_driver },
-	{ "jcop",	(void *(*)(void)) sc_get_jcop_driver },
 #ifdef ENABLE_OPENSSL
 	{ "oberthur",	(void *(*)(void)) sc_get_oberthur_driver },
 	{ "authentic",	(void *(*)(void)) sc_get_authentic_driver },
@@ -98,20 +119,24 @@ static const struct _sc_driver_entry internal_card_drivers[] = {
 #endif
 	{ "rutoken",	(void *(*)(void)) sc_get_rutoken_driver },
 	{ "rutoken_ecp",(void *(*)(void)) sc_get_rtecp_driver },
-	{ "westcos",	(void *(*)(void)) sc_get_westcos_driver },
 	{ "myeid",      (void *(*)(void)) sc_get_myeid_driver },
-	{ "sc-hsm",		(void *(*)(void)) sc_get_sc_hsm_driver },
 #if defined(ENABLE_OPENSSL) && defined(ENABLE_SM)
 	{ "dnie",       (void *(*)(void)) sc_get_dnie_driver },
 #endif
 	{ "masktech",	(void *(*)(void)) sc_get_masktech_driver },
+	{ "atrust-acos",(void *(*)(void)) sc_get_atrust_acos_driver },
+	{ "westcos",	(void *(*)(void)) sc_get_westcos_driver },
 
-/* Here should be placed drivers that need some APDU transactions to
- * recognise its cards. */
+/* Here should be placed drivers that need some APDU transactions in the
+ * driver's `match_card()` function. */
+	{ "coolkey",	(void *(*)(void)) sc_get_coolkey_driver },
+	/* MUSCLE card applet returns 9000 on whatever AID is selected, see
+	 * https://github.com/JavaCardOS/MuscleCard-Applet/blob/master/musclecard/src/com/musclecard/CardEdge/CardEdge.java#L326
+	 * put the muscle driver first to cope with this bug. */
+	{ "muscle",	(void *(*)(void)) sc_get_muscle_driver },
+	{ "sc-hsm",	(void *(*)(void)) sc_get_sc_hsm_driver },
 	{ "mcrd",	(void *(*)(void)) sc_get_mcrd_driver },
 	{ "setcos",	(void *(*)(void)) sc_get_setcos_driver },
-	{ "muscle",	(void *(*)(void)) sc_get_muscle_driver },
-	{ "atrust-acos",(void *(*)(void)) sc_get_atrust_acos_driver },
 	{ "PIV-II",	(void *(*)(void)) sc_get_piv_driver },
 	{ "cac",	(void *(*)(void)) sc_get_cac_driver },
 	{ "itacns",	(void *(*)(void)) sc_get_itacns_driver },
@@ -121,7 +146,6 @@ static const struct _sc_driver_entry internal_card_drivers[] = {
 #endif
 	{ "openpgp",	(void *(*)(void)) sc_get_openpgp_driver },
 	{ "jpki",	(void *(*)(void)) sc_get_jpki_driver },
-	{ "coolkey",	(void *(*)(void)) sc_get_coolkey_driver },
 	{ "npa",	(void *(*)(void)) sc_get_npa_driver },
 	/* The default driver should be last, as it handles all the
 	 * unrecognized cards. */
@@ -129,21 +153,24 @@ static const struct _sc_driver_entry internal_card_drivers[] = {
 	{ NULL, NULL }
 };
 
+static const struct _sc_driver_entry old_card_drivers[] = {
+	{ "miocos",	(void *(*)(void)) sc_get_miocos_driver },
+	{ "jcop",	(void *(*)(void)) sc_get_jcop_driver },
+	{ NULL, NULL }
+};
+
 struct _sc_ctx_options {
 	struct _sc_driver_entry cdrv[SC_MAX_CARD_DRIVERS];
 	int ccount;
-	char *forced_card_driver;
 };
 
 
 int
-sc_ctx_win32_get_config_value(char *name_env, char *name_reg, char *name_key,
-		char *out, size_t *out_len)
+sc_ctx_win32_get_config_value(const char *name_env,
+	   	const char *name_reg, const char *name_key,
+		void *out, size_t *out_len)
 {
 #ifdef _WIN32
-	char temp[PATH_MAX + 1];
-	char *value = NULL;
-	DWORD temp_len = PATH_MAX;
 	long rc;
 	HKEY hKey;
 
@@ -151,9 +178,14 @@ sc_ctx_win32_get_config_value(char *name_env, char *name_reg, char *name_key,
 		return SC_ERROR_INVALID_ARGUMENTS;
 
 	if (name_env)   {
-		value = getenv(name_env);
-		if (value)
-			goto done;
+		char *value = value = getenv(name_env);
+		if (value) {
+			if (strlen(value) < *out_len)
+				return SC_ERROR_NOT_ENOUGH_MEMORY;
+			memcpy(out, value, strlen(value));
+			*out_len = strlen(value);
+			return SC_SUCCESS;
+		}
 	}
 
 	if (!name_reg)
@@ -164,35 +196,25 @@ sc_ctx_win32_get_config_value(char *name_env, char *name_reg, char *name_key,
 
 	rc = RegOpenKeyExA(HKEY_CURRENT_USER, name_key, 0, KEY_QUERY_VALUE, &hKey);
 	if (rc == ERROR_SUCCESS) {
-		temp_len = PATH_MAX;
-		rc = RegQueryValueEx( hKey, name_reg, NULL, NULL, (LPBYTE) temp, &temp_len);
-		if ((rc == ERROR_SUCCESS) && (temp_len < PATH_MAX))
-			value = temp;
+		DWORD len = *out_len;
+		rc = RegQueryValueEx(hKey, name_reg, NULL, NULL, out, &len);
 		RegCloseKey(hKey);
-	}
-
-	if (!value) {
-		rc = RegOpenKeyExA( HKEY_LOCAL_MACHINE, name_key, 0, KEY_QUERY_VALUE, &hKey );
 		if (rc == ERROR_SUCCESS) {
-			temp_len = PATH_MAX;
-			rc = RegQueryValueEx( hKey, name_reg, NULL, NULL, (LPBYTE) temp, &temp_len);
-			if ((rc == ERROR_SUCCESS) && (temp_len < PATH_MAX))
-				value = temp;
-			RegCloseKey(hKey);
+			*out_len = len;
+			return SC_SUCCESS;
 		}
 	}
 
-done:
-	if (value) {
-		if (strlen(value) >= *out_len)
-			return SC_ERROR_BUFFER_TOO_SMALL;
-		strcpy(out, value);
-		*out_len = strlen(out);
-		return SC_SUCCESS;
+	rc = RegOpenKeyExA(HKEY_LOCAL_MACHINE, name_key, 0, KEY_QUERY_VALUE, &hKey);
+	if (rc == ERROR_SUCCESS) {
+		DWORD len = *out_len;
+		rc = RegQueryValueEx(hKey, name_reg, NULL, NULL, out, &len);
+		RegCloseKey(hKey);
+		if (rc == ERROR_SUCCESS) {
+			*out_len = len;
+			return SC_SUCCESS;
+		}
 	}
-
-	memset(out, 0, *out_len);
-	*out_len = 0;
 
 	return SC_ERROR_OBJECT_NOT_FOUND;
 #else
@@ -256,6 +278,19 @@ static void add_internal_drvs(struct _sc_ctx_options *opts)
 	}
 }
 
+static void add_old_drvs(struct _sc_ctx_options *opts)
+{
+	const struct _sc_driver_entry *lst;
+	int i;
+
+	lst = old_card_drivers;
+	i = 0;
+	while (lst[i].name != NULL) {
+		add_drv(opts, lst[i].name);
+		i++;
+	}
+}
+
 static void set_defaults(sc_context_t *ctx, struct _sc_ctx_options *opts)
 {
 	ctx->debug = 0;
@@ -286,12 +321,10 @@ int sc_ctx_log_to_file(sc_context_t *ctx, const char* filename)
 		ctx->debug_file = NULL;
 	}
 
-	if (ctx->reopen_log_file)   {
-		if (!ctx->debug_filename)   {
-			if (!filename)
-				filename = "stderr";
-			ctx->debug_filename = strdup(filename);
-		}
+	if (!ctx->debug_filename)   {
+		if (!filename)
+			filename = "stderr";
+		ctx->debug_filename = strdup(filename);
 	}
 
 	if (!filename)
@@ -310,23 +343,33 @@ int sc_ctx_log_to_file(sc_context_t *ctx, const char* filename)
 	return SC_SUCCESS;
 }
 
+static void
+set_drivers(struct _sc_ctx_options *opts, const scconf_list *list)
+{
+	const char *s_internal = "internal", *s_old = "old";
+	if (list != NULL)
+		del_drvs(opts);
+	while (list != NULL) {
+		if (strcmp(list->data, s_internal) == 0)
+			add_internal_drvs(opts);
+		else if (strcmp(list->data, s_old) == 0)
+			add_old_drvs(opts);
+		else
+			add_drv(opts, list->data);
+		list = list->next;
+	}
+}
 
 static int
 load_parameters(sc_context_t *ctx, scconf_block *block, struct _sc_ctx_options *opts)
 {
 	int err = 0;
 	const scconf_list *list;
-	const char *val, *s_internal = "internal";
+	const char *val;
 	int debug;
 #ifdef _WIN32
 	char expanded_val[PATH_MAX];
 	DWORD expanded_len;
-#endif
-
-#ifdef _WIN32
-	ctx->reopen_log_file = 1;
-#else
-	ctx->reopen_log_file = scconf_get_bool(block, "reopen_debug_file", 0);
 #endif
 
 	debug = scconf_get_int(block, "debug", ctx->debug);
@@ -338,7 +381,7 @@ load_parameters(sc_context_t *ctx, scconf_block *block, struct _sc_ctx_options *
 #ifdef _WIN32
 		expanded_len = PATH_MAX;
 		expanded_len = ExpandEnvironmentStringsA(val, expanded_val, expanded_len);
-		if (expanded_len > 0)
+		if (0 < expanded_len && expanded_len < sizeof expanded_val)
 			val = expanded_val;
 #endif
 		sc_ctx_log_to_file(ctx, val);
@@ -346,10 +389,6 @@ load_parameters(sc_context_t *ctx, scconf_block *block, struct _sc_ctx_options *
 	else if (ctx->debug)   {
 		sc_ctx_log_to_file(ctx, NULL);
 	}
-
-	if (scconf_get_bool (block, "paranoid-memory",
-				ctx->flags & SC_CTX_FLAG_PARANOID_MEMORY))
-		ctx->flags |= SC_CTX_FLAG_PARANOID_MEMORY;
 
 	if (scconf_get_bool (block, "disable_popups",
 				ctx->flags & SC_CTX_FLAG_DISABLE_POPUPS))
@@ -359,23 +398,8 @@ load_parameters(sc_context_t *ctx, scconf_block *block, struct _sc_ctx_options *
 				ctx->flags & SC_CTX_FLAG_ENABLE_DEFAULT_DRIVER))
 		ctx->flags |= SC_CTX_FLAG_ENABLE_DEFAULT_DRIVER;
 
-	val = scconf_get_str(block, "force_card_driver", NULL);
-	if (val) {
-		if (opts->forced_card_driver)
-			free(opts->forced_card_driver);
-		opts->forced_card_driver = strdup(val);
-	}
-
 	list = scconf_find_list(block, "card_drivers");
-	if (list != NULL)
-		del_drvs(opts);
-	while (list != NULL) {
-		if (strcmp(list->data, s_internal) == 0)
-			add_internal_drvs(opts);
-		else
-			add_drv(opts, list->data);
-		list = list->next;
-	}
+	set_drivers(opts, list);
 
 	return err;
 }
@@ -429,7 +453,11 @@ static void *load_dynamic_driver(sc_context_t *ctx, void **dll, const char *name
 	const char *(*modversion)(void) = NULL;
 	const char *(**tmodv)(void) = &modversion;
 
-	if (name == NULL) { /* should not occurr, but... */
+	if (dll == NULL) {
+		sc_log(ctx, "No dll parameter specified");
+		return NULL;
+	}
+	if (name == NULL) { /* should not occur, but... */
 		sc_log(ctx, "No module specified");
 		return NULL;
 	}
@@ -458,8 +486,8 @@ static void *load_dynamic_driver(sc_context_t *ctx, void **dll, const char *name
 		sc_dlclose(handle);
 		return NULL;
 	}
-	if (dll)
-		*dll = handle;
+
+	*dll = handle;
 	sc_log(ctx, "successfully loaded card driver '%s'", name);
 	return modinit(name);
 }
@@ -507,11 +535,20 @@ static int load_card_drivers(sc_context_t *ctx, struct _sc_ctx_options *opts)
 		}
 
 		ent = &opts->cdrv[i];
-		for (j = 0; internal_card_drivers[j].name != NULL; j++)
+		for (j = 0; internal_card_drivers[j].name != NULL; j++) {
 			if (strcmp(ent->name, internal_card_drivers[j].name) == 0) {
 				func = (struct sc_card_driver *(*)(void)) internal_card_drivers[j].func;
 				break;
 			}
+		}
+		if (func == NULL) {
+			for (j = 0; old_card_drivers[j].name != NULL; j++) {
+				if (strcmp(ent->name, old_card_drivers[j].name) == 0) {
+					func = (struct sc_card_driver *(*)(void)) old_card_drivers[j].func;
+					break;
+				}
+			}
+		}
 		/* if not initialized assume external module */
 		if (func == NULL)
 			*(void **)(tfunc) = load_dynamic_driver(ctx, &dll, ent->name);
@@ -603,6 +640,8 @@ static int load_card_atrs(sc_context_t *ctx)
 
 				if (!strcmp(list->data, "rng"))
 					flags = SC_CARD_FLAG_RNG;
+				else if (!strcmp(list->data, "keep_alive"))
+					flags = SC_CARD_FLAG_KEEP_ALIVE;
 				else if (sscanf(list->data, "%x", &flags) != 1)
 					flags = 0;
 
@@ -635,13 +674,14 @@ static void process_config_file(sc_context_t *ctx, struct _sc_ctx_options *opts)
 
 	memset(ctx->conf_blocks, 0, sizeof(ctx->conf_blocks));
 #ifdef _WIN32
-	temp_len = PATH_MAX;
+	temp_len = PATH_MAX-1;
 	r = sc_ctx_win32_get_config_value("OPENSC_CONF", "ConfigFile", "Software\\OpenSC Project\\OpenSC",
 		temp_path, &temp_len);
 	if (r)   {
 		sc_log(ctx, "process_config_file doesn't find opensc config file. Please set the registry key.");
 		return;
 	}
+	temp_path[temp_len] = '\0';
 	conf_path = temp_path;
 #else
 	conf_path = getenv("OPENSC_CONF");
@@ -669,6 +709,8 @@ static void process_config_file(sc_context_t *ctx, struct _sc_ctx_options *opts)
 		ctx->conf = NULL;
 		return;
 	}
+	/* needs to be after the log file is known */
+	sc_log(ctx, "Used configuration file '%s'", conf_path);
 	blocks = scconf_find_blocks(ctx->conf, NULL, "app", ctx->app_name);
 	if (blocks && blocks[0])
 		ctx->conf_blocks[count++] = blocks[0];
@@ -753,6 +795,7 @@ int sc_context_create(sc_context_t **ctx_out, const sc_context_param_t *parm)
 	sc_context_t		*ctx;
 	struct _sc_ctx_options	opts;
 	int			r;
+	char			*driver;
 
 	if (ctx_out == NULL || parm == NULL)
 		return SC_ERROR_INVALID_ARGUMENTS;
@@ -776,6 +819,7 @@ int sc_context_create(sc_context_t **ctx_out, const sc_context_param_t *parm)
 	set_defaults(ctx, &opts);
 
 	if (0 != list_init(&ctx->readers)) {
+		sc_release_context(ctx);
 		return SC_ERROR_OUT_OF_MEMORY;
 	}
 	list_attributes_seeker(&ctx->readers, reader_list_seeker);
@@ -787,6 +831,13 @@ int sc_context_create(sc_context_t **ctx_out, const sc_context_param_t *parm)
 		sc_release_context(ctx);
 		return r;
 	}
+
+#ifdef ENABLE_OPENSSL
+	if (!CRYPTO_secure_malloc_initialized()) {
+		/* XXX What's a reasonable amount of secure heap? */
+		CRYPTO_secure_malloc_init(4096, 32);
+	}
+#endif
 
 	process_config_file(ctx, &opts);
 	sc_log(ctx, "==================================="); /* first thing in the log */
@@ -808,20 +859,17 @@ int sc_context_create(sc_context_t **ctx_out, const sc_context_param_t *parm)
 		return r;
 	}
 
+	driver = getenv("OPENSC_DRIVER");
+	if (driver) {
+		scconf_list *list = NULL;
+		scconf_list_add(&list, driver);
+		set_drivers(&opts, list);
+		scconf_list_destroy(list);
+	}
+
 	load_card_drivers(ctx, &opts);
 	load_card_atrs(ctx);
 
-	if (!opts.forced_card_driver) {
-		char *driver = getenv("OPENSC_DRIVER");
-		if(driver) {
-			opts.forced_card_driver = strdup(driver);
-		}
-	}
-	if (opts.forced_card_driver) {
-		if (SC_SUCCESS != sc_set_card_driver(ctx, opts.forced_card_driver))
-			sc_log(ctx, "Warning: Could not load %s.", opts.forced_card_driver);
-		free(opts.forced_card_driver);
-	}
 	del_drvs(&opts);
 	sc_ctx_detect_readers(ctx);
 	*ctx_out = ctx;

@@ -5,8 +5,9 @@ AC_PREREQ(2.60)
 define([PRODUCT_NAME], [OpenSC])
 define([PRODUCT_TARNAME], [opensc])
 define([PRODUCT_BUGREPORT], [https://github.com/OpenSC/OpenSC/issues])
+define([PRODUCT_URL], [https://github.com/OpenSC/OpenSC])
 define([PACKAGE_VERSION_MAJOR], [0])
-define([PACKAGE_VERSION_MINOR], [16])
+define([PACKAGE_VERSION_MINOR], [19])
 define([PACKAGE_VERSION_FIX], [0])
 define([PACKAGE_SUFFIX], [])
 
@@ -18,10 +19,11 @@ define([VS_FF_PRODUCT_NAME], [OpenSC smartcard framework])
 define([VS_FF_PRODUCT_UPDATES], [https://github.com/OpenSC/OpenSC/releases])
 define([VS_FF_PRODUCT_URL], [https://github.com/OpenSC/OpenSC])
 
-m4_include(version.m4)
 m4_sinclude(version.m4.ci)
 
-AC_INIT([PRODUCT_NAME],[PACKAGE_VERSION_MAJOR.PACKAGE_VERSION_MINOR.PACKAGE_VERSION_FIX[]PACKAGE_SUFFIX],[PRODUCT_BUGREPORT],[PRODUCT_TARNAME])
+m4_define([openssl_minimum_version], [0.9.8])
+
+AC_INIT([PRODUCT_NAME],[PACKAGE_VERSION_MAJOR.PACKAGE_VERSION_MINOR.PACKAGE_VERSION_FIX[]PACKAGE_SUFFIX],[PRODUCT_BUGREPORT],[PRODUCT_TARNAME],[PRODUCT_URL])
 AC_CONFIG_AUX_DIR([.])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
@@ -43,8 +45,8 @@ OPENSC_VS_FF_PRODUCT_URL="VS_FF_PRODUCT_URL"
 #   (Code changed:                      REVISION++)
 #   (Oldest interface removed:          OLDEST++)
 #   (Interfaces added:                  CURRENT++, REVISION=0)
-OPENSC_LT_CURRENT="4"
-OPENSC_LT_OLDEST="4"
+OPENSC_LT_CURRENT="6"
+OPENSC_LT_OLDEST="6"
 OPENSC_LT_REVISION="0"
 OPENSC_LT_AGE="0"
 OPENSC_LT_AGE="$((${OPENSC_LT_CURRENT}-${OPENSC_LT_OLDEST}))"
@@ -123,9 +125,6 @@ case "${host}" in
 		PROFILE_DIR_DEFAULT="\$(pkgdatadir)"
 	;;
 esac
-AC_DEFINE_UNQUOTED([DEBUG_FILE], ["${DEBUG_FILE}"], [Debug file])
-AC_DEFINE_UNQUOTED([PROFILE_DIR], ["${PROFILE_DIR}"], [Directory of profiles])
-AC_DEFINE_UNQUOTED([PROFILE_DIR_DEFAULT], ["${PROFILE_DIR_DEFAULT}"], [Default directory of profiles])
 
 case "${host}" in
 	*-mingw*)
@@ -133,9 +132,12 @@ case "${host}" in
 	;;
 esac
 
+AX_CHECK_COMPILE_FLAG(-Wunknown-warning-option, [have_unknown_warning_option="yes"], [have_unknown_warning_option="no"], [-Werror])
+AM_CONDITIONAL([HAVE_UNKNOWN_WARNING_OPTION], [test "${have_unknown_warning_option}" = "yes"])
+
 AC_ARG_ENABLE(
 	[strict],
-	[AS_HELP_STRING([--disable-strict],[disable strict compile mode @<:@disabled@:>@])],
+	[AS_HELP_STRING([--disable-strict],[disable strict compile mode @<:@enabled@:>@])],
 	,
 	[enable_strict="yes"]
 )
@@ -246,10 +248,17 @@ AC_ARG_ENABLE(
 )
 
 AC_ARG_ENABLE(
-	[werror-declaration-after-statement],
-	[AS_HELP_STRING([--disable-werror-declaration-after-statement],[disable -Werror 'declaration-after-statement' @<:@enabled@:>@])],
+	[notify],
+	[AS_HELP_STRING([--enable-notify],[enable notifications @<:@detect@:>@])],
 	,
-	[werror_declaration_after_statement="yes"]
+	[enable_notify="detect"]
+)
+
+AC_ARG_ENABLE(
+	[tests],
+	[AS_HELP_STRING([--enable-tests],[Build tests in src/tests/ directory @<:@detect@:>@])],
+	,
+	[enable_tests="detect"]
 )
 
 AC_ARG_WITH(
@@ -257,6 +266,13 @@ AC_ARG_WITH(
 	[AS_HELP_STRING([--with-xsl-stylesheetsdir=PATH],[docbook xsl-stylesheets for svn build @<:@detect@:>@])],
 	[xslstylesheetsdir="${withval}"],
 	[xslstylesheetsdir="detect"]
+)
+
+AC_ARG_WITH(
+	[completiondir],
+	[AS_HELP_STRING([--with-completiondir=PATH],[Directory of Bash completion @<:@detect@:>@])],
+	[completiondir="${withval}"],
+	[completiondir="detect"]
 )
 
 AC_ARG_WITH(
@@ -330,7 +346,6 @@ AC_MSG_RESULT([${xslstylesheetsdir}])
 AC_MSG_CHECKING([git checkout])
 GIT_CHECKOUT="no"
 if test -n "${GIT}" -a -d "${srcdir}/.git"; then
-	AC_DEFINE([HAVE_CONFIG_VERSION_H], [1], [extra version available in config-version.h])
 	GIT_CHECKOUT="yes"
 fi
 AC_MSG_RESULT([${GIT_CHECKOUT}])
@@ -377,7 +392,7 @@ AC_FUNC_VPRINTF
 AC_CHECK_FUNCS([ \
 	getpass gettimeofday getline memset mkdir \
 	strdup strerror getopt_long getopt_long_only \
-	strlcpy strlcat strnlen
+	strlcpy strlcat strnlen sigaction
 ])
 AC_CHECK_SIZEOF(void *)
 if test "${ac_cv_sizeof_void_p}" = 8; then
@@ -443,13 +458,79 @@ if test "${enable_dnie_ui}" = "yes"; then
 	AC_DEFINE([ENABLE_DNIE_UI], [1], [Enable the use of external user interface program to request DNIe user pin])
 
 	case "${host}" in
+		*-*-darwin*)
+			LDFLAGS="${LDFLAGS} -framework Carbon"
+		;;
+	esac
+	case "${host}" in
 		*-apple-*)
-			if test "${enable_dnie_ui}" = "yes"; then
-				LDFLAGS="${LDFLAGS} -framework Carbon"
-			fi
+			LDFLAGS="${LDFLAGS} -framework CoreFoundation"
 		;;
 	esac
 fi
+
+case "${host}" in
+	*-*-darwin*)
+			have_notify="yes"
+		;;
+	*)
+			PKG_CHECK_MODULES( [GIO2], [gio-2.0],
+							  [ have_notify="yes"
+								have_gio2="yes" ],
+							  [ have_notify="no"
+								have_gio2="no" ])
+			saved_CFLAGS="${CFLAGS}"
+			CFLAGS="${CFLAGS} ${GIO2_CFLAGS}"
+			AC_CHECK_HEADERS(gio/gio.h, [],
+							 [ AC_MSG_WARN([glib2 headers not found])
+							   have_notify="no"
+							   have_gio2="no" ])
+			CFLAGS="${saved_CFLAGS}"
+			saved_LIBS="$LIBS"
+			LIBS="$LIBS  ${GIO2_LIBS}"
+			AC_MSG_CHECKING([for g_application_send_notification])
+			AC_TRY_LINK_FUNC(g_application_send_notification, [ AC_MSG_RESULT([yes]) ],
+							 [ AC_MSG_WARN([Cannot link against glib2])
+							   have_notify="no"
+							   have_gio2="no"  ])
+			LIBS="$saved_LIBS"
+		;;
+esac
+
+case "${enable_notify}" in
+	no)
+		have_notify="no"
+	;;
+	detect)
+		if test "${have_notify}" = "yes"; then
+			enable_notify="yes"
+		else
+			enable_notify="no"
+		fi
+	;;
+esac
+
+if test "${enable_notify}" = "yes"; then
+	if test "${have_notify}" = "yes"; then
+		AC_DEFINE([ENABLE_NOTIFY], [1], [Use notification libraries and header files])
+		if test "${have_gio2}" = "yes"; then
+			AC_DEFINE([ENABLE_GIO2], [1], [Use glib2 libraries and header files])
+			OPTIONAL_NOTIFY_CFLAGS="${GIO2_CFLAGS}"
+			OPTIONAL_NOTIFY_LIBS="${GIO2_LIBS}"
+		fi
+	else
+		AC_MSG_ERROR([notification linkage required, but no notification provider was found])
+	fi
+fi
+
+have_cmocka="yes"
+PKG_CHECK_MODULES([CMOCKA], [cmocka >= 1.0.1],,[have_cmocka="no"])
+AC_CHECK_HEADER([setjmp.h])
+AC_CHECK_HEADER([cmocka.h],, [have_cmocka="no"],
+[#include <stdarg.h>
+#include <stddef.h>
+#include <setjmp.h>
+])
 
 AC_ARG_VAR([ZLIB_CFLAGS], [C compiler flags for zlib])
 AC_ARG_VAR([ZLIB_LIBS], [linker flags for zlib])
@@ -531,21 +612,19 @@ fi
 
 PKG_CHECK_MODULES(
 	[OPENSSL],
-	[libcrypto >= 0.9.7],
+	[
+		libcrypto >= openssl_minimum_version
+		openssl >= openssl_minimum_version
+	],
 	[have_openssl="yes"],
-	[PKG_CHECK_MODULES(
-		[OPENSSL],
-		[openssl >= 0.9.7],
-		[have_openssl="yes"],
-		[AC_CHECK_LIB(
-			[crypto],
-			[RSA_version],
-			[
-				have_openssl="yes"
-				OPENSSL_LIBS="-lcrypto"
-			],
-			[have_openssl="no"]
-		)]
+	[AC_CHECK_LIB(
+		[crypto],
+		[RSA_version],
+		[
+			have_openssl="yes"
+			OPENSSL_LIBS="-lcrypto"
+		],
+		[have_openssl="no"]
 	)]
 )
 
@@ -575,6 +654,23 @@ if test "${enable_openssl}" = "yes"; then
 else
 	OPENSSL_CFLAGS=""
 	OPENSSL_LIBS=""
+fi
+
+if test "${enable_tests}" = "detect"; then
+	if test "${have_cmocka}" = "yes" -a "${have_openssl}" = "yes"; then
+		enable_tests="yes"
+	else
+		enable_tests="no"
+	fi
+fi
+
+if test "${enable_tests}" = "yes"; then
+	if test "${have_cmocka}" != "yes"; then
+		AC_MSG_ERROR([Tests required, but cmocka is not available])
+	fi
+	if test "${have_openssl}" != "yes"; then
+		AC_MSG_ERROR([Tests required, but openssl is not available])
+	fi
 fi
 
 
@@ -609,10 +705,18 @@ if test "${cvcdir}" = false ; then
     cvcdir="`$PKG_CONFIG libeac --variable=cvcdir`"
 fi
 if test "${cvcdir}" = "" ; then
-    AC_MSG_WARN([use --enable-cvcdir=DIR])
+	case "${host}" in
+		*-mingw*|*-winnt*|*-cygwin*)
+			cvcdir="%PROGRAMFILES%\\\OpenSC Project\\\OpenSC\\\cvc"
+			;;
+		*)
+			AC_MSG_WARN([use --enable-cvcdir=DIR])
+			;;
+	esac
 fi
 CVCDIR="${cvcdir}"
 AC_SUBST(CVCDIR)
+AC_DEFINE_UNQUOTED([CVCDIR], ["${CVCDIR}"], [CVC directory])
 
 AC_ARG_ENABLE(x509dir,
               AC_HELP_STRING([--enable-x509dir=DIR],
@@ -628,10 +732,18 @@ then
 fi
 if test -z "${x509dir}"
 then
-    AC_MSG_WARN([use --enable-x509dir=DIR])
+	case "${host}" in
+		*-mingw*|*-winnt*|*-cygwin*)
+			x509dir="%PROGRAMFILES%\\\OpenSC Project\\\OpenSC\\\x509"
+			;;
+		*)
+			AC_MSG_WARN([use --enable-x509dir=DIR])
+			;;
+	esac
 fi
 X509DIR="${x509dir}"
 AC_SUBST(X509DIR)
+AC_DEFINE_UNQUOTED([X509DIR], ["${X509DIR}"], [CVC directory])
 
 case "${enable_openpace}" in
 	no)
@@ -674,7 +786,7 @@ if test "${enable_pcsc}" = "yes"; then
 	if test "${WIN32}" != "yes"; then
 		PKG_CHECK_EXISTS(
 			[libpcsclite],
-			[PKG_CHECK_MODULES([PCSC], [libpcsclite >= 1.6.5],
+			[PKG_CHECK_MODULES([PCSC], [libpcsclite >= 1.8.22],
 				[AC_DEFINE([PCSCLITE_GOOD], [1], [Sufficient version of PCSC-Lite with all the required features])],
 				[:]
 			)]
@@ -734,6 +846,14 @@ if test "${enable_cryptotokenkit}" = "yes"; then
 	AC_DEFINE([ENABLE_CRYPTOTOKENKIT], [1], [Define if CryptoTokenKit is to be enabled])
 fi
 
+if test "${completiondir}" = "detect"; then
+	echo completion ${completiondir}
+	PKG_CHECK_MODULES([BASH_COMPLETION], [bash-completion >= 2.0],
+		[completiondir="`pkg-config --variable=completionsdir bash-completion`"],
+		[completiondir="${sysconfdir}/bash_completion.d"])
+fi
+AC_SUBST([completiondir])
+
 
 AC_SUBST(DYN_LIB_EXT)
 AC_SUBST(LIBDIR)
@@ -757,23 +877,23 @@ if test "${enable_sm}" = "yes"; then
 	DEFAULT_SM_MODULE="${LIB_PRE}smm-local${DYN_LIB_EXT}"
 	case "${host}" in
 		*-mingw*|*-winnt*|*-cygwin*)
-			DEFAULT_SM_MODULE_PATH="\# module_path = \"\";"
+			DEFAULT_SM_MODULE_PATH="%PROGRAMFILES%\\\OpenSC Project\\\OpenSC\\\tools"
 		;;
 		*)
-			DEFAULT_SM_MODULE="libsmm-local.so"
-			DEFAULT_SM_MODULE_PATH="module_path = \$(libdir);"
+			DEFAULT_SM_MODULE_PATH="${libdir}"
 		;;
 	esac
-	AC_DEFINE_UNQUOTED([DEFAULT_SM_MODULE], ["${DEFAULT_SM_MODULE}"], [Default SM module])
-	AC_DEFINE_UNQUOTED([DEFAULT_SM_MODULE_PATH], ["${DEFAULT_SM_MODULE_PATH}"], [Default SM module path])
 fi
 
 if test "${with_pkcs11_provider}" = "detect"; then
-	DEFAULT_PKCS11_PROVIDER="opensc-pkcs11${DYN_LIB_EXT}"
+	if test "${WIN32}" != "yes"; then
+		DEFAULT_PKCS11_PROVIDER="${libdir}/opensc-pkcs11${DYN_LIB_EXT}"
+	else
+		DEFAULT_PKCS11_PROVIDER="%PROGRAMFILES%\\\OpenSC Project\\\OpenSC\\\pkcs11\\\opensc-pkcs11.dll"
+	fi
 else
 	DEFAULT_PKCS11_PROVIDER="${with_pkcs11_provider}"
 fi
-AC_DEFINE_UNQUOTED([DEFAULT_PKCS11_PROVIDER], ["${DEFAULT_PKCS11_PROVIDER}"], [Default PKCS11 provider])
 
 if test "${enable_man}" = "detect"; then
 	if test "${WIN32}" = "yes"; then
@@ -792,9 +912,6 @@ if test "${enable_man}" = "yes" -o "${enable_doc}" = "yes"; then
 	AC_MSG_RESULT([ok])
 fi
 
-AC_ARG_VAR([HELP2MAN],
-           [absolute path to help2man used for man page generation of npa-tool])
-AC_PATH_PROG(HELP2MAN, help2man, not found)
 AC_ARG_VAR([GENGETOPT],
            [absolute path to gengetopt used for command line parsing of npa-tool])
 AC_PATH_PROG(GENGETOPT, gengetopt, not found)
@@ -899,13 +1016,17 @@ AC_SUBST([DEFAULT_SM_MODULE_PATH])
 AC_SUBST([DEBUG_FILE])
 AC_SUBST([PROFILE_DIR])
 AC_SUBST([PROFILE_DIR_DEFAULT])
+AC_SUBST([OPTIONAL_NOTIFY_CFLAGS])
+AC_SUBST([OPTIONAL_NOTIFY_LIBS])
 
 AM_CONDITIONAL([ENABLE_MAN], [test "${enable_man}" = "yes"])
 AM_CONDITIONAL([ENABLE_THREAD_LOCKING], [test "${enable_thread_locking}" = "yes"])
 AM_CONDITIONAL([ENABLE_ZLIB], [test "${enable_zlib}" = "yes"])
 AM_CONDITIONAL([ENABLE_READLINE], [test "${enable_readline}" = "yes"])
 AM_CONDITIONAL([ENABLE_OPENSSL], [test "${enable_openssl}" = "yes"])
+AM_CONDITIONAL([ENABLE_OPENPACE], [test "${enable_openpace}" = "yes"])
 AM_CONDITIONAL([ENABLE_CRYPTOTOKENKIT], [test "${enable_cryptotokenkit}" = "yes"])
+AM_CONDITIONAL([ENABLE_OPENCT], [test "${enable_openct}" = "yes"])
 AM_CONDITIONAL([ENABLE_DOC], [test "${enable_doc}" = "yes"])
 AM_CONDITIONAL([WIN32], [test "${WIN32}" = "yes"])
 AM_CONDITIONAL([CYGWIN], [test "${CYGWIN}" = "yes"])
@@ -914,31 +1035,26 @@ AM_CONDITIONAL([ENABLE_MINIDRIVER_SETUP_CUSTOMACTION], [test "${enable_minidrive
 AM_CONDITIONAL([ENABLE_SM], [test "${enable_sm}" = "yes"])
 AM_CONDITIONAL([ENABLE_DNIE_UI], [test "${enable_dnie_ui}" = "yes"])
 AM_CONDITIONAL([ENABLE_NPATOOL], [test "${ENABLE_NPATOOL}" = "yes"])
+AM_CONDITIONAL([ENABLE_TESTS], [test "${enable_tests}" = "yes"])
 AM_CONDITIONAL([GIT_CHECKOUT], [test "${GIT_CHECKOUT}" = "yes"])
 
 if test "${enable_pedantic}" = "yes"; then
 	enable_strict="yes";
-	CFLAGS="${CFLAGS} -pedantic -Wextra"
+	CFLAGS="${CFLAGS} -pedantic"
 fi
 if test "${enable_strict}" = "yes"; then
-	CFLAGS="${CFLAGS} -Wall -Wextra -Wno-unused-parameter"
-fi
-if test "$GCC" = "yes"; then
-	# This should be resolved not ignored.
-	CFLAGS="-fno-strict-aliasing ${CFLAGS}"
-fi
-
-if test "${werror_declaration_after_statement}" = "yes"; then
-	CFLAGS="${CFLAGS} -Werror=declaration-after-statement"
+	CFLAGS="${CFLAGS} -Wall -Wextra -Wno-unused-parameter -Werror"
 fi
 
 AC_CONFIG_FILES([
 	Makefile
 	doc/Makefile
 	doc/tools/Makefile
+	doc/files/Makefile
 	etc/Makefile
 	src/Makefile
 	src/common/Makefile
+	src/ui/Makefile
 	src/libopensc/Makefile
 	src/sm/Makefile
 	src/pkcs11/Makefile
@@ -949,8 +1065,10 @@ AC_CONFIG_FILES([
 	src/scconf/Makefile
 	src/tests/Makefile
 	src/tests/regression/Makefile
+	src/tests/p11test/Makefile
 	src/tools/Makefile
 	src/tools/versioninfo-tools.rc
+	src/tools/versioninfo-opensc-notify.rc
 	src/smm/Makefile
 	src/minidriver/Makefile
 	src/minidriver/versioninfo-minidriver.rc
@@ -988,6 +1106,7 @@ Product URL:             ${OPENSC_VS_FF_PRODUCT_URL}
 
 User binaries:           $(eval eval eval echo "${bindir}")
 Configuration files:     $(eval eval eval echo "${sysconfdir}")
+Bash completion:         ${completiondir}
 XSL stylesheets:         ${xslstylesheetsdir}
 
 man support:             ${enable_man}
@@ -1003,11 +1122,13 @@ CT-API support:          ${enable_ctapi}
 minidriver support:      ${enable_minidriver}
 SM support:              ${enable_sm}
 SM default module:       ${DEFAULT_SM_MODULE}
+SM default path:         $(eval eval eval echo "${DEFAULT_SM_MODULE_PATH}")
 DNIe UI support:         ${enable_dnie_ui}
-Debug file:              ${DEBUG_FILE}
+Notification support:    ${enable_notify}
+Build tests:             ${enable_tests}
 
 PC/SC default provider:  ${DEFAULT_PCSC_PROVIDER}
-PKCS11 default provider: ${DEFAULT_PKCS11_PROVIDER}
+PKCS11 default provider: $(eval eval eval echo "${DEFAULT_PKCS11_PROVIDER}")
 
 Host:                    ${host}
 Compiler:                ${CC}
@@ -1028,6 +1149,8 @@ OPENCT_CFLAGS:           ${OPENCT_CFLAGS}
 OPENCT_LIBS:             ${OPENCT_LIBS}
 PCSC_CFLAGS:             ${PCSC_CFLAGS}
 CRYPTOTOKENKIT_CFLAGS:   ${CRYPTOTOKENKIT_CFLAGS}
+GIO2_CFLAGS:             ${GIO2_CFLAGS}
+GIO2_LIBS:               ${GIO2_LIBS}
 
 EOF
 

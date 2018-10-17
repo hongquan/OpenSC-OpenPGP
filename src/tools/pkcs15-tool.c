@@ -85,6 +85,7 @@ enum {
 	OPT_CHANGE_PIN = 0x100,
 	OPT_LIST_PINS,
 	OPT_READER,
+	OPT_TEST_SESSION_PIN,
 	OPT_PIN_ID,
 	OPT_NO_CACHE,
 	OPT_CLEAR_CACHE,
@@ -141,6 +142,7 @@ static const struct option options[] = {
 	{ "new-pin",		required_argument, NULL,	OPT_NEWPIN },
 	{ "puk",		required_argument, NULL,	OPT_PUK },
 	{ "verify-pin",		no_argument, NULL,		OPT_VERIFY_PIN },
+	{ "test-session-pin",	no_argument, NULL,		OPT_TEST_SESSION_PIN },
 	{ "output",		required_argument, NULL,	'o' },
 	{ "no-cache",		no_argument, NULL,		OPT_NO_CACHE },
 	{ "clear-cache",	no_argument, NULL,		OPT_CLEAR_CACHE },
@@ -182,6 +184,7 @@ static const char *option_help[] = {
 	"Specify New PIN (when changing or unblocking)",
 	"Specify Unblock PIN",
 	"Verify PIN after card binding (without 'auth-id' the first non-SO, non-Unblock PIN will be verified)",
+	"Equivalent to --verify-pin with additional session PIN generation",
 	"Outputs to file <arg>",
 	"Disable card caching",
 	"Clear card caching",
@@ -567,6 +570,8 @@ static int list_data_objects(void)
 		else {
 			printf("\tAuth ID:         %s\n", sc_pkcs15_print_id(&objs[i]->auth_id));
 		}
+
+		printf("\n");
 	}
 	return 0;
 }
@@ -820,7 +825,7 @@ static int read_public_key(void)
 out:
 	if (cert)
 		sc_pkcs15_free_certificate(cert);
-	else if (pubkey)
+	else
 		sc_pkcs15_free_pubkey(pubkey);
 
 	return r;
@@ -828,12 +833,12 @@ out:
 
 static void print_skey_info(const struct sc_pkcs15_object *obj)
 {
+	static const char *skey_types[] = { "", "Generic", "DES", "2DES", "3DES", "", "", "" };
 	struct sc_pkcs15_skey_info *skey = (struct sc_pkcs15_skey_info *) obj->data;
-	const char *types[] = { "generic", "DES", "2DES", "3DES"};
 	unsigned char guid[40];
 	size_t guid_len;
 
-	printf("Secret %s Key [%.*s]\n", types[3 & obj->type], (int) sizeof obj->label, obj->label);
+	printf("Secret %s Key [%.*s]\n", skey_types[7 & obj->type], (int) sizeof obj->label, obj->label);
 	print_common_flags(obj);
 	printf("\tUsage          : [0x%X]", skey->usage);
 	print_key_usages(skey->usage);
@@ -871,7 +876,7 @@ static int list_skeys(void)
 		return 1;
 	}
 	if (verbose)
-		printf("Card has %d secret key(s).\n\n", r);
+		printf("Card has %d Secret key(s).\n\n", r);
 	for (i = 0; i < r; i++) {
 		print_skey_info(objs[i]);
 		printf("\n");
@@ -915,9 +920,9 @@ static void print_ssh_key(FILE *outf, const char * alg, struct sc_pkcs15_object 
 		}
 
 		if (obj->label[0] != '\0')
-			fprintf(outf,"ssh-%s %s %.*s\n", alg, uu, (int) sizeof obj->label, obj->label);
+			fprintf(outf,"%s %s %.*s\n", alg, uu, (int) sizeof obj->label, obj->label);
 		else
-			fprintf(outf,"ssh-%s %s\n", alg, uu);
+			fprintf(outf,"%s %s\n", alg, uu);
 	}
 	free(uu);
 	return;
@@ -979,6 +984,70 @@ static int read_ssh_key(void)
 		return 1;
 	}
 
+	if (pubkey->algorithm == SC_ALGORITHM_EC) {
+		// support only for NIST
+		// 'ssh-keygen -t ecdsa' allow only field lengths 256/384/521
+
+		static struct supported_ec_curves {
+			char *curve_name;
+			struct sc_object_id curve_oid;
+			size_t size;
+		} ec_curves[] = {
+			{"secp256r1", {{1, 2, 840, 10045, 3, 1, 7, -1}},256},
+			{"secp384r1", {{1, 3, 132, 0, 34, -1}},         384},
+			{"secp521r1", {{1, 3, 132, 0, 35, -1}},         521},
+		        {NULL, {{-1}}, 0},
+		};
+		char alg[20];
+		/* Large enough to fit the following:
+		 * 3 x 4B item length headers
+		 * max 20B algorithm name, 9B curve name, max 256B key data */
+		unsigned char buf[300];
+		unsigned int i, len, tmp, n;
+
+		for (n = 0,i = 0; ec_curves[i].curve_name != NULL; i++) {
+			if(sc_compare_oid (&ec_curves[i].curve_oid,&pubkey->u.ec.params.id))
+				n = ec_curves[i].size;
+		}
+		if (!n) {
+			fprintf(stderr, "Unsupported curve\n");
+			goto fail2;
+		}
+		if (n != pubkey->u.ec.params.field_length) {
+			fprintf(stderr, "Wrong field length\n");
+			goto fail2;
+		}
+
+		buf[0] = 0;
+		buf[1] = 0;
+		buf[2] = 0;
+		len = snprintf((char *) buf+4, 20, "ecdsa-sha2-nistp%d", n);
+		strncpy(alg, (char *) buf+4, 19);
+		buf[3] = len;
+
+		len += 4;
+		buf[len++] = 0;
+		buf[len++] = 0;
+		buf[len++] = 0;
+		tmp = snprintf((char *) buf+len+1, 9, "nistp%d", n);
+		buf[len++] = tmp;
+		len += tmp;
+
+		n = pubkey->u.ec.ecpointQ.len;
+		if(n > 255) {
+			fprintf(stderr, "Wrong public key length\n");
+			goto fail2;
+		}
+		buf[len++] = 0;
+		buf[len++] = 0;
+		buf[len++] = 0;
+		buf[len++] = n & 0xff;
+		memcpy(buf+len,pubkey->u.ec.ecpointQ.value,n);
+		len += n;
+
+		print_ssh_key(outf, alg, obj, buf, len);
+	}
+
 	if (pubkey->algorithm == SC_ALGORITHM_RSA) {
 		unsigned char buf[2048];
 		uint32_t len, n;
@@ -1031,7 +1100,7 @@ static int read_ssh_key(void)
 		memcpy(buf+len,pubkey->u.rsa.modulus.data, pubkey->u.rsa.modulus.len);
 		len += pubkey->u.rsa.modulus.len;
 
-		print_ssh_key(outf, "rsa", obj, buf, len);
+		print_ssh_key(outf, "ssh-rsa", obj, buf, len);
 	}
 
 	if (pubkey->algorithm == SC_ALGORITHM_DSA) {
@@ -1122,14 +1191,14 @@ static int read_ssh_key(void)
 		memcpy(buf+len,pubkey->u.dsa.pub.data, pubkey->u.dsa.pub.len);
 		len += pubkey->u.dsa.pub.len;
 
-		print_ssh_key(outf, "dss", obj, buf, len);
+		print_ssh_key(outf, "ssh-dss", obj, buf, len);
 	}
 
 	if (outf != stdout)
 		fclose(outf);
 	if (cert)
 		sc_pkcs15_free_certificate(cert);
-	else if (pubkey)
+	else
 		sc_pkcs15_free_pubkey(pubkey);
 	return 0;
 fail:
@@ -1139,7 +1208,7 @@ fail2:
 		fclose(outf);
 	if (cert)
 		sc_pkcs15_free_certificate(cert);
-	else if (pubkey)
+	else
 		sc_pkcs15_free_pubkey(pubkey);
 	return SC_ERROR_OUT_OF_MEMORY;
 }
@@ -1328,13 +1397,99 @@ static int verify_pin(void)
 
 
 	r = sc_pkcs15_verify_pin(p15card, pin_obj, pin, pin ? strlen((char *) pin) : 0);
+	if (opt_pin == NULL)
+		free(pin);
 	if (r < 0)   {
 		fprintf(stderr, "Operation failed: %s\n", sc_strerror(r));
 		return -1;
 	}
 
+	return 0;
+}
+
+static int test_session_pin(void)
+{
+	struct sc_pkcs15_object	*pin_obj = NULL;
+	struct sc_pkcs15_auth_info *auth_info = NULL;
+	unsigned int  auth_method;
+	unsigned char		*pin;
+	int r;
+	unsigned char sessionpin[SC_MAX_PIN_SIZE];
+	size_t sessionpinlen = sizeof sessionpin;
+
+	if (!opt_auth_id)   {
+		struct sc_pkcs15_object *objs[32];
+		int ii;
+
+		r = sc_pkcs15_get_objects(p15card, SC_PKCS15_TYPE_AUTH_PIN, objs, 32);
+		if (r < 0) {
+			fprintf(stderr, "PIN code enumeration failed: %s\n", sc_strerror(r));
+			return -1;
+		}
+
+		for (ii=0;ii<r;ii++)   {
+			struct sc_pkcs15_auth_info *pin_info = (struct sc_pkcs15_auth_info *) objs[ii]->data;
+
+			if (pin_info->auth_type != SC_PKCS15_PIN_AUTH_TYPE_PIN)
+				continue;
+			if (pin_info->attrs.pin.flags & SC_PKCS15_PIN_FLAG_SO_PIN)
+				continue;
+			if (pin_info->attrs.pin.flags & SC_PKCS15_PIN_FLAG_UNBLOCKING_PIN)
+				continue;
+
+			pin_obj = objs[ii];
+			break;
+		}
+	}
+	else   {
+		pin_obj = get_pin_info();
+	}
+
+	if (!(card->caps & SC_CARD_CAP_SESSION_PIN)) {
+		fprintf(stderr, "Card does not support session PIN. Will try anyway.\n");
+	}
+
+	if (!pin_obj)   {
+		fprintf(stderr, "PIN object '%s' not found\n", opt_auth_id);
+		return -1;
+	}
+
+	if (opt_pin != NULL)
+		pin = (unsigned char *) opt_pin;
+	else
+		pin = get_pin("Please enter PIN", pin_obj);
+
+	r = sc_pkcs15_verify_pin_with_session_pin(p15card, pin_obj, pin, pin ? strlen((char *) pin) : 0,
+			sessionpin, &sessionpinlen);
 	if (opt_pin == NULL)
 		free(pin);
+	if (r < 0)   {
+		fprintf(stderr, "Operation failed: %s\n", sc_strerror(r));
+		return -1;
+	}
+
+	if (!sessionpinlen)   {
+		fprintf(stderr, "Could not generate session PIN\n");
+		return -1;
+	}
+
+	printf("Generated session PIN (in hexadecimal form): ");
+	util_hex_dump(stdout, sessionpin, sessionpinlen, "");
+	puts("");
+
+	auth_info = (struct sc_pkcs15_auth_info *)pin_obj->data;
+	/* save the pin type */
+	auth_method = auth_info->auth_method;
+	auth_info->auth_method = SC_AC_SESSION;
+	r = sc_pkcs15_verify_pin(p15card, pin_obj, sessionpin, sessionpinlen);
+	/* restore the pin type */
+	auth_info->auth_method = auth_method;
+	if (r < 0)   {
+		fprintf(stderr, "Could not verify session PIN: %s\n", sc_strerror(r));
+		return -1;
+	}
+
+	puts("Verified session PIN");
 
 	return 0;
 }
@@ -1519,7 +1674,7 @@ static void list_info(void)
 			count++;
 		}
 	}
-	printf("\n");
+	printf((compact) ? "\n" : "\n\n");
 }
 
 static int dump(void)
@@ -1528,6 +1683,7 @@ static int dump(void)
 	list_pins();
 	list_private_keys();
 	list_public_keys();
+	list_skeys();
 	list_certificates();
 	list_data_objects();
 
@@ -1541,7 +1697,8 @@ static int unblock_pin(void)
 	u8 *pin, *puk;
 	int r, pinpad_present = 0;
 
-	pinpad_present = p15card->card->reader->capabilities & SC_READER_CAP_PIN_PAD;
+	pinpad_present = p15card->card->reader->capabilities & SC_READER_CAP_PIN_PAD
+	   	|| p15card->card->caps & SC_CARD_CAP_PROTECTED_AUTHENTICATION_PATH;
 
 	if (!(pin_obj = get_pin_info()))
 		return 2;
@@ -1638,7 +1795,8 @@ static int change_pin(void)
 	u8 *pincode, *newpin;
 	int r, pinpad_present = 0;
 
-	pinpad_present = p15card->card->reader->capabilities & SC_READER_CAP_PIN_PAD;
+	pinpad_present = p15card->card->reader->capabilities & SC_READER_CAP_PIN_PAD
+	   	|| p15card->card->caps & SC_CARD_CAP_PROTECTED_AUTHENTICATION_PATH;
 
 	if (!(pin_obj = get_pin_info()))
 		return 2;
@@ -1939,7 +2097,7 @@ end:
 	return 0;
 }
 
-int main(int argc, char * const argv[])
+int main(int argc, char *argv[])
 {
 	int err = 0, r, c, long_optind = 0;
 	int do_read_cert = 0;
@@ -1960,6 +2118,7 @@ int main(int argc, char * const argv[])
 	int do_change_pin = 0;
 	int do_unblock_pin = 0;
 	int do_test_update = 0;
+	int do_test_session_pin = 0;
 	int do_update = 0;
 	int do_print_version = 0;
 	int do_list_info = 0;
@@ -1967,8 +2126,6 @@ int main(int argc, char * const argv[])
 	sc_context_param_t ctx_param;
 
 	assert(sizeof(option_help)/sizeof(char *)==sizeof(options)/sizeof(struct option));
-
-	c = OPT_PUK;
 
 	while (1) {
 		c = getopt_long(argc, argv, "r:cuko:sva:LR:CwDTU", options, &long_optind);
@@ -2055,6 +2212,10 @@ int main(int argc, char * const argv[])
 #endif
 		case 'T':
 			do_test_update = 1;
+			action_count++;
+			break;
+		case OPT_TEST_SESSION_PIN:
+			do_test_session_pin = 1;
 			action_count++;
 			break;
 		case 'U':
@@ -2264,6 +2425,11 @@ int main(int argc, char * const argv[])
 			if ((err = update(card)))
 				goto end;
 		}
+	}
+	if (do_test_session_pin) {
+		if ((err = test_session_pin()))
+			goto end;
+		action_count--;
 	}
 end:
 	if (p15card)

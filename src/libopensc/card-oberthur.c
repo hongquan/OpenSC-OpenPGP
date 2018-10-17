@@ -39,6 +39,7 @@
 #include "internal.h"
 #include "cardctl.h"
 #include "pkcs15.h"
+#include "gp.h"
 
 #define OBERTHUR_PIN_LOCAL	0x80
 #define OBERTHUR_PIN_REFERENCE_USER	0x81
@@ -46,15 +47,7 @@
 #define OBERTHUR_PIN_REFERENCE_SO	0x04
 #define OBERTHUR_PIN_REFERENCE_PUK	0x84
 
-/* keep OpenSSL 0.9.6 users happy ;-) */
-#if OPENSSL_VERSION_NUMBER < 0x00907000L
-#define DES_cblock			des_cblock
-#define DES_key_schedule		des_key_schedule
-#define DES_set_key_unchecked(a,b)	des_set_key_unchecked(a,*b)
-#define DES_ecb_encrypt(a,b,c,d) 	des_ecb_encrypt(a,b,*c,d)
-#endif
-
-static struct sc_atr_table oberthur_atrs[] = {
+static const struct sc_atr_table oberthur_atrs[] = {
 	{ "3B:7D:18:00:00:00:31:80:71:8E:64:77:E3:01:00:82:90:00", NULL,
 			"Oberthur 64k v4/2.1.1", SC_CARD_TYPE_OBERTHUR_64K, 0, NULL },
 	{ "3B:7D:18:00:00:00:31:80:71:8E:64:77:E3:02:00:82:90:00", NULL,
@@ -157,19 +150,10 @@ auth_select_aid(struct sc_card *card)
 	unsigned char apdu_resp[SC_MAX_APDU_BUFFER_SIZE];
 	struct auth_private_data *data =  (struct auth_private_data *) card->drv_data;
 	int rv, ii;
-	unsigned char cm[7] = {0xA0,0x00,0x00,0x00,0x03,0x00,0x00};
 	struct sc_path tmp_path;
 
 	/* Select Card Manager (to deselect previously selected application) */
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0xA4, 0x04, 0x0C);
-	apdu.lc = sizeof(cm);
-	/* apdu.le = sizeof(cm)+4; */
-	apdu.data = cm;
-	apdu.datalen = sizeof(cm);
-	apdu.resplen = sizeof(apdu_resp);
-	apdu.resp = apdu_resp;
-
-	rv = sc_transmit_apdu(card, &apdu);
+	rv = gp_select_card_manager(card);
 	LOG_TEST_RET(card->ctx, rv, "APDU transmit failed");
 
 	/* Get smart card serial number */
@@ -483,6 +467,9 @@ auth_select_file(struct sc_card *card, const struct sc_path *in_path,
 	assert(card != NULL && in_path != NULL);
 
 	memcpy(&path, in_path, sizeof(struct sc_path));
+
+	if (!auth_current_df)
+		return SC_ERROR_OBJECT_NOT_FOUND;
 
 	sc_log(card->ctx, "in_path; type=%d, path=%s, out %p",
 			in_path->type, sc_print_path(in_path), file_out);
@@ -1593,7 +1580,7 @@ auth_pin_verify_pinpad(struct sc_card *card, int pin_reference, int *tries_left)
 	pin_cmd.flags |= SC_PIN_CMD_NEED_PADDING;
 
 	/* For Oberthur card, PIN command data length has to be 0x40.
-	 * In PCSC10 v2.06 the uppler limit of pin.max_length is 8.
+	 * In PCSC10 v2.06 the upper limit of pin.max_length is 8.
 	 *
 	 * The standard sc_build_pin() throws an error when 'pin.len > pin.max_length' .
 	 * So, let's build our own APDU.
@@ -1775,7 +1762,7 @@ auth_pin_change(struct sc_card *card, unsigned int type,
 	else if (!data->pin1.len && !data->pin2.len)   {
 		/* Oberthur unblock style with PIN pad. */
 		rv = auth_pin_change_pinpad(card, data, tries_left);
-		LOG_TEST_RET(card->ctx, rv, "'PIN CHANGE' failedi: SOPIN verify with pinpad failed");
+		LOG_TEST_RET(card->ctx, rv, "'PIN CHANGE' failed: SOPIN verify with pinpad failed");
 	}
 	else   {
 		LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_ARGUMENTS, "'PIN CHANGE' failed");
@@ -2023,16 +2010,10 @@ write_publickey (struct sc_card *card, unsigned int offset,
 	struct sc_pkcs15_pubkey_rsa key;
 	int ii, rv;
 	size_t len = 0, der_size = 0;
-	char debug_buf[2048];
 
 	LOG_FUNC_CALLED(card->ctx);
 
-	debug_buf[0] = 0;
-	sc_hex_dump(card->ctx, SC_LOG_DEBUG_NORMAL,
-		buf, count, debug_buf, sizeof(debug_buf));
-	sc_log(card->ctx,
-	       "write_publickey in %"SC_FORMAT_LEN_SIZE_T"u bytes :\n%s",
-	       count, debug_buf);
+	sc_log_hex(card->ctx, "write_publickey", buf, count);
 
 	if (1+offset > sizeof(rsa_der))
 		LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_ARGUMENTS, "Invalid offset value");
@@ -2121,13 +2102,16 @@ auth_read_binary(struct sc_card *card, unsigned int offset,
 		unsigned char *buf, size_t count, unsigned long flags)
 {
 	int rv;
-	char debug_buf[2048];
 	struct sc_pkcs15_bignum bn[2];
 	unsigned char *out = NULL;
 	bn[0].data = NULL;
 	bn[1].data = NULL;
 
 	LOG_FUNC_CALLED(card->ctx);
+
+	if (!auth_current_ef)
+		LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_ARGUMENTS, "Invalid auth_current_ef");
+
 	sc_log(card->ctx,
 	       "offset %i; size %"SC_FORMAT_LEN_SIZE_T"u; flags 0x%lX",
 	       offset, count, flags);
@@ -2183,12 +2167,7 @@ auth_read_binary(struct sc_card *card, unsigned int offset,
 			rv  = out_len - offset > count ? count : out_len - offset;
 			memcpy(buf, out + offset, rv);
 
-			debug_buf[0] = 0;
-			sc_hex_dump(card->ctx, SC_LOG_DEBUG_NORMAL,
-				buf, rv, debug_buf, sizeof(debug_buf));
-			sc_log(card->ctx,
-			       "write_publickey in %"SC_FORMAT_LEN_SIZE_T"u bytes :\n%s",
-			       count, debug_buf);
+			sc_log_hex(card->ctx, "write_publickey", buf, rv);
 		}
 	}
 	else {

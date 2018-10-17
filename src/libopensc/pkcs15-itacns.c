@@ -401,7 +401,7 @@ static int get_name_from_EF_DatiPersonali(unsigned char *EFdata,
 {
 	/*
 	 * Bytes 0-5 contain the ASCII encoding of the following TLV
-	 * strcture's total size, in base 16.
+	 * structure's total size, in base 16.
 	 */
 
 	const unsigned int EF_personaldata_maxlen = 400;
@@ -473,8 +473,10 @@ static int get_name_from_EF_DatiPersonali(unsigned char *EFdata,
 	if (fields[f_first_name].len + fields[f_last_name].len + 1 >= name_len)
 		return -1;
 
-	snprintf(name, name_len, "%s %s",
-		fields[f_first_name].value, fields[f_last_name].value);
+	/* the lengths are already checked that they will fit in buffer */
+	snprintf(name, name_len, "%.*s %.*s",
+		fields[f_first_name].len, fields[f_first_name].value,
+		fields[f_last_name].len, fields[f_last_name].value);
 	return 0;
 }
 
@@ -548,6 +550,7 @@ static int itacns_add_data_files(sc_pkcs15_card_t *p15card)
 		sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL,
 			"Could not read EF_DatiPersonali: "
 			"keeping generic card name");
+		return SC_SUCCESS;
 	}
 
 	{
@@ -651,7 +654,7 @@ static int itacns_check_and_add_keyset(sc_pkcs15_card_t *p15card,
 	sc_path_t path;
 	sc_pkcs15_id_t cert_id;
 	int ext_info_ok;
-	int ku, xku;
+	int ku = 0, xku = 0;
 	int pubkey_usage_flags = 0, prkey_usage_flags = 0;
 
 	cert_id.len = 1;
@@ -687,7 +690,7 @@ static int itacns_check_and_add_keyset(sc_pkcs15_card_t *p15card,
 			"Could not read certificate file");
 		path.index = cert_offset;
 		path.count = (certlen[1] << 8) + certlen[2];
-		/* If those bytes are 00, then we are probably dealign with an
+		/* If those bytes are 00, then we are probably dealing with an
 		 * empty file. */
 		if (path.count == 0)
 			return 0;

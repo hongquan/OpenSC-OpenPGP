@@ -40,9 +40,7 @@
 #endif
 #include <openssl/opensslv.h>
 #include "libopensc/sc-ossl-compat.h"
-#if OPENSSL_VERSION_NUMBER >= 0x00907000L
 #include <openssl/conf.h>
-#endif
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
@@ -61,6 +59,7 @@
 #endif /* OPENSSL_VERSION_NUMBER >= 0x10000000L */
 
 #include "common/compat_strlcpy.h"
+#include "libopensc/internal.h"
 #include "libopensc/cardctl.h"
 #include "libopensc/pkcs15.h"
 #include "libopensc/log.h"
@@ -88,19 +87,22 @@ static int	do_change_attributes(struct sc_profile *, unsigned int myopt_type);
 static int	do_init_app(struct sc_profile *);
 static int	do_store_pin(struct sc_profile *);
 static int	do_generate_key(struct sc_profile *, const char *);
+static int	do_generate_skey(struct sc_profile *, const char *);
 static int	do_store_private_key(struct sc_profile *);
 static int	do_store_public_key(struct sc_profile *, EVP_PKEY *);
+static int	do_store_secret_key(struct sc_profile *);
 static int	do_store_certificate(struct sc_profile *);
 static int	do_update_certificate(struct sc_profile *);
 static int	do_convert_cert(sc_pkcs15_der_t *, X509 *);
 static int	is_cacert_already_present(struct sc_pkcs15init_certargs *);
 static int	do_finalize_card(sc_card_t *, struct sc_profile *);
 
-static int	do_read_data_object(const char *name, u8 **out, size_t *outlen);
+static int	do_read_data_object(const char *name, u8 **out, size_t *outlen, size_t expected);
 static int	do_store_data_object(struct sc_profile *profile);
 static int	do_sanity_check(struct sc_profile *profile);
 
-static int	init_keyargs(struct sc_pkcs15init_prkeyargs *);
+static int	init_prkeyargs(struct sc_pkcs15init_prkeyargs *);
+static int	init_skeyargs(struct sc_pkcs15init_skeyargs *);
 static void	init_gost_params(struct sc_pkcs15init_keyarg_gost_params *, EVP_PKEY *);
 static int	get_pin_callback(struct sc_profile *profile,
 			int id, const struct sc_pkcs15_auth_info *info,
@@ -123,11 +125,13 @@ enum {
 	OPT_OPTIONS = 0x100,
 	OPT_PASSPHRASE,
 	OPT_PUBKEY,
+	OPT_SECRKEY,
 	OPT_EXTRACTABLE,
 	OPT_INSECURE,
 	OPT_AUTHORITY,
 	OPT_ASSERT_PRISTINE,
 	OPT_SECRET,
+	OPT_SECRKEY_ALGO,
 	OPT_PUBKEY_LABEL,
 	OPT_CERT_LABEL,
 	OPT_APPLICATION_NAME,
@@ -162,6 +166,7 @@ const struct option	options[] = {
 	{ "generate-key",	required_argument, NULL,	'G' },
 	{ "store-private-key",	required_argument, NULL,	'S' },
 	{ "store-public-key",	required_argument, NULL,	OPT_PUBKEY },
+	{ "store-secret-key",	required_argument, NULL,	OPT_SECRKEY },
 	{ "store-certificate",	required_argument, NULL,	'X' },
 	{ "update-certificate",	required_argument, NULL,	'U' },
 	{ "store-data",		required_argument, NULL,	'W' },
@@ -183,6 +188,7 @@ const struct option	options[] = {
 	{ "id",			required_argument, NULL,	'i' },
 	{ "label",		required_argument, NULL,	'l' },
 	{ "puk-label",		required_argument, NULL,	OPT_PUK_LABEL },
+	{ "secret-key-algorithm", required_argument, NULL,	OPT_SECRKEY_ALGO },
 	{ "public-key-label",	required_argument, NULL,	OPT_PUBKEY_LABEL },
 	{ "cert-label",		required_argument, NULL,	OPT_CERT_LABEL },
 	{ "application-name",	required_argument, NULL,	OPT_APPLICATION_NAME },
@@ -226,8 +232,9 @@ static const char *		option_help[] = {
 	"Generate a new key and store it on the card",
 	"Store private key",
 	"Store public key",
+	"Store secret key",
 	"Store an X.509 certificate",
-	"Update an X.509 certificate (carefull with mail decryption certs!!)",
+	"Update an X.509 certificate (careful with mail decryption certs!!)",
 	"Store a data object",
 	"Delete object(s) (use \"help\" for more information)",
 	"Change attribute(s) (use \"help\" for more information)",
@@ -247,6 +254,7 @@ static const char *		option_help[] = {
 	"Specify ID of key/certificate",
 	"Specify label of PIN/key",
 	"Specify label of PUK",
+	"Specify secret key algorithm (use with --store-secret-key)",
 	"Specify public key label (use with --generate-key)",
 	"Specify user cert label (use with --store-private-key)",
 	"Specify application name of data object (use with --store-data-object)",
@@ -258,7 +266,7 @@ static const char *		option_help[] = {
 	"Mark certificate as a CA certificate",
 	"Specify X.509 key usage (use \"--key-usage help\" for more information)",
 	"Finish initialization phase of the smart card",
-	"Update 'lastUpdate' attribut of tokenInfo",
+	"Update 'lastUpdate' attribute of tokenInfo",
 	"When storing PKCS#12 ignore CA certificates",
 	"Store or update existing certificate",
 
@@ -290,6 +298,7 @@ enum {
 	ACTION_GENERATE_KEY,
 	ACTION_STORE_PRIVKEY,
 	ACTION_STORE_PUBKEY,
+	ACTION_STORE_SECRKEY,
 	ACTION_STORE_CERT,
 	ACTION_UPDATE_CERT,
 	ACTION_STORE_DATA,
@@ -312,6 +321,7 @@ static const char *action_names[] = {
 	"generate key",
 	"store private key",
 	"store public key",
+	"store secret key",
 	"store certificate",
 	"update certificate",
 	"store data object",
@@ -338,6 +348,7 @@ struct secret {
 #define SC_PKCS15INIT_TYPE_CERT		4
 #define SC_PKCS15INIT_TYPE_CHAIN	(8 | 4)
 #define SC_PKCS15INIT_TYPE_DATA		16
+#define SC_PKCS15INIT_TYPE_SKEY		32
 
 static sc_context_t *	ctx = NULL;
 static sc_card_t *		card = NULL;
@@ -361,6 +372,7 @@ static char *			opt_objectid = NULL;
 static char *			opt_label = NULL;
 static char *			opt_puk_label = NULL;
 static char *			opt_pubkey_label = NULL;
+static char *			opt_secrkey_algo = NULL;
 static char *			opt_cert_label = NULL;
 static const char *		opt_pins[4];
 static char *			pins[4];
@@ -439,7 +451,7 @@ main(int argc, char **argv)
 	unsigned int		n;
 	int			r = 0;
 
-#if OPENSSL_VERSION_NUMBER >= 0x00907000L && OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
 	OPENSSL_config(NULL);
 #endif
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L && !(defined LIBRESSL_VERSION_NUMBER)
@@ -571,6 +583,9 @@ main(int argc, char **argv)
 		case ACTION_STORE_PUBKEY:
 			r = do_store_public_key(profile, NULL);
 			break;
+		case ACTION_STORE_SECRKEY:
+			r = do_store_secret_key(profile);
+			break;
 		case ACTION_STORE_CERT:
 			r = do_store_certificate(profile);
 			break;
@@ -588,6 +603,8 @@ main(int argc, char **argv)
 			break;
 		case ACTION_GENERATE_KEY:
 			r = do_generate_key(profile, opt_newkey);
+			if (r == SC_ERROR_INVALID_ARGUMENTS)
+				r = do_generate_skey(profile, opt_newkey);
 			break;
 		case ACTION_FINALIZE_CARD:
 			r = do_finalize_card(card, profile);
@@ -699,6 +716,65 @@ end:
 	}
 
 	return ok ? 0 : -1;
+}
+
+/* algorithm spec parsing */
+struct alg_spec {
+	const char *spec;
+	int algorithm;
+	unsigned int keybits;
+};
+
+static const struct alg_spec alg_types_sym[] = {
+	{ "des",	SC_ALGORITHM_DES,	56 },
+	{ "3des",	SC_ALGORITHM_3DES,	192 },
+	{ "aes",	SC_ALGORITHM_AES,	128 },
+	{ NULL, -1, 0 }
+};
+
+static const struct alg_spec alg_types_asym[] = {
+	{ "rsa",	SC_ALGORITHM_RSA,	1024 },
+	{ "dsa",	SC_ALGORITHM_DSA,	1024 },
+	{ "gost2001",	SC_ALGORITHM_GOSTR3410,	SC_PKCS15_GOSTR3410_KEYSIZE },
+	{ "ec",		SC_ALGORITHM_EC,	0 },
+	{ NULL, -1, 0 }
+};
+
+static int
+parse_alg_spec(const struct alg_spec *types, const char *spec, unsigned int *keybits, struct sc_pkcs15_prkey *prkey)
+{
+	int i, algorithm = -1;
+	char *end;
+
+	for (i = 0; types[i].spec; i++) {
+		if (!strncasecmp(spec, types[i].spec, strlen(types[i].spec))) {
+			algorithm = types[i].algorithm;
+			*keybits = types[i].keybits;
+			spec += strlen(types[i].spec);
+			break;
+		}
+	}
+	if (algorithm < 0) {
+		util_error("Unknown algorithm \"%s\"", spec);
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+
+	if (*spec == '/' || *spec == '-' || *spec == ':')
+		spec++;
+
+	if (*spec)   {
+		if (isalpha(*spec) && algorithm == SC_ALGORITHM_EC && prkey) {
+			prkey->u.ec.params.named_curve = strdup(spec);
+		} else {
+			*keybits = strtoul(spec, &end, 10);
+			if (*end) {
+				util_error("Invalid number of key bits \"%s\"", spec);
+				return SC_ERROR_INVALID_ARGUMENTS;
+			}
+		}
+	}
+
+	return algorithm;
 }
 
 /*
@@ -935,7 +1011,7 @@ do_store_private_key(struct sc_profile *profile)
 	X509		*cert[MAX_CERTS];
 	int		r, i, ncerts;
 
-	if ((r = init_keyargs(&args)) < 0)
+	if ((r = init_prkeyargs(&args)) < 0)
 		return r;
 
 	r = do_read_private_key(opt_infile, opt_format, &pkey, cert, MAX_CERTS);
@@ -1129,6 +1205,49 @@ do_store_public_key(struct sc_profile *profile, EVP_PKEY *pkey)
 }
 
 /*
+ * Store a secret key
+ */
+static int
+do_store_secret_key(struct sc_profile *profile)
+{
+	struct sc_pkcs15init_skeyargs args;
+	unsigned int keybits;
+	int r, algorithm = -1;
+
+	if (!opt_secrkey_algo) {
+		util_error("Specify secret key algorithm with --secret-key-algorithm");
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+
+	if ((r = init_skeyargs(&args)) < 0)
+		return r;
+
+	algorithm = parse_alg_spec(alg_types_sym, opt_secrkey_algo, &keybits, 0);
+	if (algorithm < 0) {
+		util_error("Invalid symmetric key spec: \"%s\"", opt_secrkey_algo);
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+
+	r = do_read_data_object(opt_infile, &args.key.data, &args.key.data_len, (keybits+7) / 8);
+	if (r < 0)
+		return r;
+
+	args.algorithm = algorithm;
+	args.value_len = keybits;
+	args.access_flags |=
+		  SC_PKCS15_PRKEY_ACCESS_SENSITIVE
+		| SC_PKCS15_PRKEY_ACCESS_ALWAYSSENSITIVE
+		| SC_PKCS15_PRKEY_ACCESS_NEVEREXTRACTABLE;
+
+	r = sc_lock(p15card->card);
+	if (r < 0)
+		return r;
+	r = sc_pkcs15init_store_secret_key(p15card, profile, &args, NULL);
+	sc_unlock(p15card->card);
+	return r;
+}
+
+/*
  * Download certificate to card
  */
 static int
@@ -1312,7 +1431,7 @@ do_store_data_object(struct sc_profile *profile)
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
-	r = do_read_data_object(opt_infile, &data, &datalen);
+	r = do_read_data_object(opt_infile, &data, &datalen, 0);
 	if (r >= 0) {
 		/* der_encoded contains the plain data, nothing DER encoded */
 		args.der_encoded.value = data;
@@ -1353,7 +1472,7 @@ static int cert_is_root(sc_pkcs15_cert_t *c)
 }
 
 /* Check if the cert has a 'sibling' and return it's parent cert.
- * Should be made more effcicient for long chains by caching the certs.
+ * Should be made more efficient for long chains by caching the certs.
  */
 static int get_cert_info(sc_pkcs15_card_t *myp15card, sc_pkcs15_object_t *certobj,
 	int *has_sibling, int *stop, sc_pkcs15_object_t **issuercert)
@@ -1410,7 +1529,7 @@ done:
 /* Delete object(s) by ID. The 'which' param can be any combination of
  * SC_PKCS15INIT_TYPE_PRKEY, SC_PKCS15INIT_TYPE_PUBKEY, SC_PKCS15INIT_TYPE_CERT
  * and SC_PKCS15INIT_TYPE_CHAIN. In the last case, every cert in the chain is
- * deleted, starting with the cert with ID 'id' and untill a CA cert is
+ * deleted, starting with the cert with ID 'id' and until a CA cert is
  * reached that certified other remaining certs on the card.
  */
 static int do_delete_crypto_objects(sc_pkcs15_card_t *myp15card,
@@ -1452,6 +1571,13 @@ static int do_delete_crypto_objects(sc_pkcs15_card_t *myp15card,
 			count++;
 			del_cert = 1;
 		}
+	}
+
+	if (which & SC_PKCS15INIT_TYPE_SKEY) {
+	    if (sc_pkcs15_find_skey_by_id(myp15card, id, &objs[count]) != 0)
+			fprintf(stderr, "NOTE: couldn't find secrkey %s to delete\n", sc_pkcs15_print_id(id));
+		else
+			count++;
 	}
 
 	if (del_cert && ((which & SC_PKCS15INIT_TYPE_CHAIN) == SC_PKCS15INIT_TYPE_CHAIN)) {
@@ -1518,7 +1644,7 @@ do_delete_objects(struct sc_profile *profile, unsigned int myopt_delete_flags)
 		}
 	}
 
-	if (myopt_delete_flags & (SC_PKCS15INIT_TYPE_PRKEY | SC_PKCS15INIT_TYPE_PUBKEY | SC_PKCS15INIT_TYPE_CHAIN)) {
+	if (myopt_delete_flags & (SC_PKCS15INIT_TYPE_PRKEY | SC_PKCS15INIT_TYPE_PUBKEY | SC_PKCS15INIT_TYPE_CHAIN | SC_PKCS15INIT_TYPE_SKEY)) {
 		sc_pkcs15_id_t id;
 		if (opt_objectid == NULL)
 				util_fatal("Specify the --id for key(s) or cert(s) to be deleted\n");
@@ -1571,6 +1697,10 @@ do_change_attributes(struct sc_profile *profile, unsigned int myopt_type)
 		    if ((r = sc_pkcs15_find_data_object_by_id(p15card, &id, &obj)) != 0)
 				return r;
 			break;
+		case SC_PKCS15INIT_TYPE_SKEY:
+		    if ((r = sc_pkcs15_find_skey_by_id(p15card, &id, &obj)) != 0)
+				return r;
+			break;
 	}
 
 	if (obj == NULL) {
@@ -1598,68 +1728,71 @@ static int
 do_generate_key(struct sc_profile *profile, const char *spec)
 {
 	struct sc_pkcs15init_keygen_args keygen_args;
-	unsigned int keybits = 1024;
-	int		r;
+	unsigned int keybits = 0;
+	int r, algorithm = -1;
 
 	memset(&keygen_args, 0, sizeof(keygen_args));
 	keygen_args.pubkey_label = opt_pubkey_label;
 
-	if ((r = init_keyargs(&keygen_args.prkey_args)) < 0)
+	if ((r = init_prkeyargs(&keygen_args.prkey_args)) < 0)
 		return r;
+
+	algorithm = parse_alg_spec(alg_types_asym, spec, &keybits, &keygen_args.prkey_args.key);
+	if (algorithm < 0) {
+		util_error("Invalid key spec: \"%s\"", spec);
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+
+	keygen_args.prkey_args.key.algorithm = algorithm;
 	keygen_args.prkey_args.access_flags |=
 		  SC_PKCS15_PRKEY_ACCESS_SENSITIVE
 		| SC_PKCS15_PRKEY_ACCESS_ALWAYSSENSITIVE
 		| SC_PKCS15_PRKEY_ACCESS_NEVEREXTRACTABLE
 		| SC_PKCS15_PRKEY_ACCESS_LOCAL;
 
-	/* Parse the key spec given on the command line */
-	if (!strncasecmp(spec, "rsa", 3)) {
-		keygen_args.prkey_args.key.algorithm = SC_ALGORITHM_RSA;
-		spec += 3;
-	} else if (!strncasecmp(spec, "dsa", 3)) {
-		keygen_args.prkey_args.key.algorithm = SC_ALGORITHM_DSA;
-		spec += 3;
-	} else if (!strncasecmp(spec, "gost2001", strlen("gost2001"))) {
-		keygen_args.prkey_args.key.algorithm = SC_ALGORITHM_GOSTR3410;
-		keybits = SC_PKCS15_GOSTR3410_KEYSIZE;
+	switch (algorithm) {
+	case SC_ALGORITHM_GOSTR3410:
 		/* FIXME: now only SC_PKCS15_PARAMSET_GOSTR3410_A */
 		keygen_args.prkey_args.params.gost.gostr3410 = SC_PKCS15_PARAMSET_GOSTR3410_A;
-		spec += strlen("gost2001");
-	} else if (!strncasecmp(spec, "ec", 2)) {
-		keygen_args.prkey_args.key.algorithm = SC_ALGORITHM_EC;
-		spec += 2;
-	} else {
-		util_error("Unknown algorithm \"%s\"", spec);
-		return SC_ERROR_INVALID_ARGUMENTS;
+		break;
 	}
 
-	if (*spec == '/' || *spec == '-' || *spec == ':')
-		spec++;
-
-	if (*spec)   {
-		if (isalpha(*spec) && keygen_args.prkey_args.key.algorithm == SC_ALGORITHM_EC)   {
-			keygen_args.prkey_args.key.u.ec.params.named_curve = strdup(spec);
-			keybits = 0;
-		}
-		else {
-			char	*end;
-
-			keybits = strtoul(spec, &end, 10);
-			if (*end) {
-				util_error("Invalid number of key bits \"%s\"", spec);
-				return SC_ERROR_INVALID_ARGUMENTS;
-			}
-		}
-	}
 	r = sc_lock(p15card->card);
-	if (r < 0)
-		return r;
-	r = sc_pkcs15init_generate_key(p15card, profile, &keygen_args, keybits, NULL);
+	if (r == 0)
+		r = sc_pkcs15init_generate_key(p15card, profile, &keygen_args, keybits, NULL);
 	sc_unlock(p15card->card);
 	return r;
 }
 
-static int init_keyargs(struct sc_pkcs15init_prkeyargs *args)
+/*
+ * Generate a new secret key
+ */
+static int
+do_generate_skey(struct sc_profile *profile, const char *spec)
+{
+	struct sc_pkcs15init_skeyargs skey_args;
+	unsigned int keybits;
+	int r, algorithm = -1;
+
+	if ((r = init_skeyargs(&skey_args)) < 0)
+		return r;
+	skey_args.algorithm = algorithm;
+
+	algorithm = parse_alg_spec(alg_types_sym, spec, &keybits, 0);
+	if (algorithm < 0) {
+		util_error("Invalid symmetric key spec: \"%s\"", spec);
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+	skey_args.value_len = keybits;
+
+	r = sc_lock(p15card->card);
+	if (r == 0)
+		r = sc_pkcs15init_generate_secret_key(p15card, profile, &skey_args, NULL);
+	sc_unlock(p15card->card);
+	return r;
+}
+
+static int init_prkeyargs(struct sc_pkcs15init_prkeyargs *args)
 {
 	memset(args, 0, sizeof(*args));
 	if (opt_objectid)
@@ -1681,6 +1814,26 @@ static int init_keyargs(struct sc_pkcs15init_prkeyargs *args)
 		args->guid = (unsigned char *)opt_md_container_guid;
 		args->guid_len = strlen(opt_md_container_guid);
 	}
+
+	return 0;
+}
+
+static int init_skeyargs(struct sc_pkcs15init_skeyargs *args)
+{
+	memset(args, 0, sizeof(*args));
+	if (opt_objectid)
+		sc_pkcs15_format_id(opt_objectid, &args->id);
+	if (opt_authid) {
+		sc_pkcs15_format_id(opt_authid, &args->auth_id);
+	} else if (!opt_insecure) {
+		util_error("no PIN given for key - either use --insecure or \n"
+				"specify a PIN using --auth-id");
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+	if (opt_extractable) {
+		args->access_flags |= SC_PKCS15_PRKEY_ACCESS_EXTRACTABLE;
+	}
+	args->label = opt_label;
 
 	return 0;
 }
@@ -2298,10 +2451,10 @@ static size_t determine_filesize(const char *filename)
 }
 
 static int
-do_read_data_object(const char *name, u8 **out, size_t *outlen)
+do_read_data_object(const char *name, u8 **out, size_t *outlen, size_t expected)
 {
 	FILE *inf;
-	size_t filesize = determine_filesize(name);
+	size_t filesize = expected ? expected : determine_filesize(name);
 	int c;
 
 	*out = malloc(filesize);
@@ -2382,6 +2535,7 @@ parse_objects(const char *list, unsigned int action)
 		{"cert", SC_PKCS15INIT_TYPE_CERT},
 		{"chain", SC_PKCS15INIT_TYPE_CHAIN},
 		{"data", SC_PKCS15INIT_TYPE_DATA},
+		{"secrkey", SC_PKCS15INIT_TYPE_SKEY},
 		{NULL, 0}
 	};
 
@@ -2396,15 +2550,15 @@ parse_objects(const char *list, unsigned int action)
 		if (len == 4 && !strncasecmp(list, "help", 4)) {
 			if (action == ACTION_DELETE_OBJECTS) {
 				printf("\nDelete arguments: a comma-separated list containing any of the following:\n");
-				printf("  privkey,pubkey,cert,chain,data\n");
+				printf("  privkey,pubkey,secrkey,cert,chain,data\n");
 				printf("When \"data\" is specified, an --application-id must also be specified,\n");
 				printf("  in the other cases an \"--id\" must also be specified\n");
 				printf("When \"chain\" is specified, the certificate chain starting with the cert\n");
-				printf("  with specified ID will be deleted, untill there's a CA cert that certifies\n");
+				printf("  with specified ID will be deleted, until there's a CA cert that certifies\n");
 				printf("  another cert on the card\n");
 			}
 			else {
-				printf("\nChange attribute argument: either privkey, pubkey, cert or data\n");
+				printf("\nChange attribute argument: either privkey, pubkey, secrkey, cert or data\n");
 				printf("You also have to specify the --id of the object\n");
 				printf("For now, you can only change the --label\n");
 				printf("E.g. pkcs15-init -A cert --id 45 -a 1 --label Jim\n");
@@ -2418,7 +2572,7 @@ parse_objects(const char *list, unsigned int action)
 			}
 		}
 		if (del_flags[n].name == NULL) {
-			fprintf(stderr, "Unknown argument for --delete_objects: %.*s\n", len, list);
+			fprintf(stderr, "Unknown argument for --delete-objects: %.*s\n", len, list);
 			exit(0);
 		}
 		list += len;
@@ -2602,6 +2756,10 @@ handle_option(const struct option *opt)
 		this_action = ACTION_STORE_PUBKEY;
 		opt_infile = optarg;
 		break;
+	case OPT_SECRKEY:
+		this_action = ACTION_STORE_SECRKEY;
+		opt_infile = optarg;
+		break;
 	case OPT_INSECURE:
 		opt_insecure = 1;
 		break;
@@ -2634,6 +2792,7 @@ handle_option(const struct option *opt)
 		break;
 	case OPT_USE_PINPAD_DEPRECATED:
 		fprintf(stderr, "'--no-prompt' is deprecated , use '--use-pinpad' instead.\n");
+		/* fall through */
 	case OPT_USE_PINPAD:
 		opt_use_pinpad = 1;
 		break;
@@ -2643,6 +2802,9 @@ handle_option(const struct option *opt)
 	case OPT_SECRET:
 		parse_secret(&opt_secrets[opt_secret_count], optarg);
 		opt_secret_count++;
+		break;
+	case OPT_SECRKEY_ALGO:
+		opt_secrkey_algo = optarg;
 		break;
 	case OPT_PUBKEY_LABEL:
 		opt_pubkey_label = optarg;
@@ -2727,6 +2889,7 @@ parse_commandline(int argc, char **argv)
 		switch (o->has_arg) {
 		case optional_argument:
 			*sp++ = ':';
+			/* fall through */
 		case required_argument:
 			*sp++ = ':';
 		case no_argument:
@@ -2926,7 +3089,7 @@ int get_pin(sc_ui_hints_t *hints, char **out)
 static int verify_pin(struct sc_pkcs15_card *p15card, char *auth_id_str)
 {
 	struct sc_pkcs15_object	*pin_obj = NULL;
-	char pin_label[64];
+	char pin_label[(sizeof pin_obj->label) + 20];
 	char *pin = NULL;
 	int r;
 
@@ -2980,7 +3143,8 @@ static int verify_pin(struct sc_pkcs15_card *p15card, char *auth_id_str)
 			return SC_ERROR_OBJECT_NOT_FOUND;
 
 		if (pin_obj->label[0])
-			snprintf(pin_label, sizeof(pin_label), "User PIN [%s]", pin_obj->label);
+			snprintf(pin_label, sizeof(pin_label), "User PIN [%.*s]",
+				(int) sizeof pin_obj->label, pin_obj->label);
 		else
 			snprintf(pin_label, sizeof(pin_label), "User PIN");
                 memset(&hints, 0, sizeof(hints));

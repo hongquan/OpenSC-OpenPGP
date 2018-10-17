@@ -104,7 +104,7 @@ typedef struct common_key_info_st {
 	int pubkey_from_file;
 	int key_alg;
 	unsigned int pubkey_len;
-	unsigned long long cert_keyUsage; /* x509 key usage as defined in certificate */
+	unsigned int cert_keyUsage; /* x509 key usage as defined in certificate */
 	int cert_keyUsage_present; /* 1 if keyUsage found in certificate */
 	int pub_usage;
 	int priv_usage;
@@ -119,7 +119,7 @@ typedef struct common_key_info_st {
  * We need to return a GUID like value for each object
  * But this needs to be some what unique.
  * So we will use two different methods, depending 
- * on the size of the sereal number.
+ * on the size of the serial number.
  * If it is 25 bytes, then it was from a FASCN. If 16 bytes
  * its from a GUID.
  * If neither, we will uase the default method. 
@@ -153,12 +153,12 @@ static int piv_get_guid(struct sc_pkcs15_card *p15card, const struct sc_pkcs15_o
 	if (id.len == 1 && serialnr.len == 25) {
 
 		/* It is from a FASCN, and we need to shorten it but keep
-		 * as much uniquness as possible.
+		 * as much uniqueness as possible.
 		 * FASC-N is stored like a ISO 7811 Magnetic Strip Card 
 		 * Using the ANSI/ISO BCD Data Format
 		 * 4 data bit + 1 parity bit (odd) least significant bit first. 
 		 * It starts with the Start Sentinel 0x0b ";" 
-		 * Fields are seperated by 0x0d "="
+		 * Fields are separated by 0x0d "="
 		 * Ends with End Sentinel 0x0f "?"
 		 * Its 39 characters + the LRC 
 		 * http://www.dataip.co.uk/Reference/MagneticCardBCD.php
@@ -323,7 +323,7 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 };
 	/* 
 	 * NIST 800-73-1 lifted the restriction on 
-	 * requering pin protected certs. Thus the default is to   
+	 * requiring pin protected certs. Thus the default is to
 	 * not require this.
 	 */
 	/* certs will be pulled out from the cert objects */
@@ -359,7 +359,7 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 	};
 
 	static const pindata pins[] = {
-		{ "01", "PIV Card Holder pin", "", 0x80,
+		{ "01", "PIN", "", 0x80,
 		  /* label, flag  and ref will change if using global pin */
 		  SC_PKCS15_PIN_TYPE_ASCII_NUMERIC,
 		  8, 4, 8, 
@@ -386,7 +386,7 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 	 * but can be derived from the certificates. 
 	 * the cert, pubkey and privkey are a set. 
 	 * Key usages bits taken from pkcs15v1_1 Table 2
-	 * RSA and EC hav differents set of usage 
+	 * RSA and EC have different sets of usage
 	 */
 	static const pubdata pubkeys[PIV_NUM_CERTS_AND_KEYS] = {
 
@@ -528,83 +528,83 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 		{ "05", "Retired KEY MAN 1",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x82, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x82, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "06", "Retired KEY MAN 2",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x83, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x83, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "07", "Retired KEY MAN 3",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x84, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x84, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "08", "Retired KEY MAN 4",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x85, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x85, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "09", "Retired KEY MAN 5",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x86, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x86, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "10", "Retired KEY MAN 6",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x87, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x87, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "11", "Retired KEY MAN 7",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x88, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x88, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "12", "Retired KEY MAN 8",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x89, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x89, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "13", "Retired KEY MAN 9",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x8A, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x8A, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "14", "Retired KEY MAN 10",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x8B, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x8B, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "15", "Retired KEY MAN 11",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x8C, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x8C, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "16", "Retired KEY MAN 12",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x8D, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x8D, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "17", "Retired KEY MAN 13",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x8E, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x8E, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "18", "Retired KEY MAN 14",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x8F, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x8F, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "19", "Retired KEY MAN 15",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x90, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x90, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "20", "Retired KEY MAN 16",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x91, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x91, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "21", "Retired KEY MAN 17",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x92, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x92, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "22", "Retired KEY MAN 18",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x93, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x93, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "23", "Retired KEY MAN 19",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x94, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x94, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
 		{ "24", "Retired KEY MAN 20",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x95, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1}
+			"", 0x95, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0}
 	};
 
 	int    r, i;
@@ -613,7 +613,7 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 	char buf[SC_MAX_SERIALNR * 2 + 1];
 	common_key_info ckis[PIV_NUM_CERTS_AND_KEYS];
 	int follows_nist_fascn = 0;
-
+	char *token_name = NULL;
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 
@@ -658,7 +658,7 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 		sc_format_path(objects[i].path, &obj_info.path);
 
 		/* See if the object can not be present on the card */
-		r = (card->ops->card_ctl)(card, SC_CARDCTL_PIV_OBJECT_PRESENT, &obj_info.path);
+		r = sc_card_ctl(card, SC_CARDCTL_PIV_OBJECT_PRESENT, &obj_info.path);
 		if (r == 1)
 			continue; /* Not on card, do not define the object */
 			
@@ -699,7 +699,7 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 	 * they are in order 
 	 * We need to read the cert, get modulus and keylen 
 	 * We use those for the pubkey, and priv key objects. 
-	 * If no cert, then see if pubkey (i.e. we are initilizing,
+	 * If no cert, then see if pubkey (i.e. we are initializing,
 	 * and the pubkey is in a file,) then add pubkey and privkey
 	 * If no cert and no pubkey, skip adding them. 
  
@@ -734,7 +734,7 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 		cert_obj.flags = certs[i].obj_flags;
 
 		/* See if the cert might be present or not. */
-		r = (card->ops->card_ctl)(card, SC_CARDCTL_PIV_OBJECT_PRESENT, &cert_info.path);
+		r = sc_card_ctl(card, SC_CARDCTL_PIV_OBJECT_PRESENT, &cert_info.path);
 		if (r == 1) {
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Cert can not be present,i=%d", i);
 			continue;
@@ -765,6 +765,30 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 				sc_pkcs15_free_certificate(cert_out);
 			continue;
 		}
+
+		/* set the token name to the name of the CN of the first certificate */
+		if (!token_name) {
+			u8 * cn_name = NULL;
+			size_t cn_len = 0;
+			static const struct sc_object_id cn_oid = {{ 2, 5, 4, 3, -1 }};
+			r = sc_pkcs15_get_name_from_dn(card->ctx, cert_out->subject,
+				cert_out->subject_len, &cn_oid, &cn_name, &cn_len);
+			if (r == SC_SUCCESS) {
+				token_name = malloc (cn_len+1);
+				if (!token_name) {
+					sc_pkcs15_free_certificate(cert_out);
+					free(cn_name);
+					SC_FUNC_RETURN(card->ctx,
+						SC_ERROR_OUT_OF_MEMORY, r);
+				}
+				memcpy(token_name, cn_name, cn_len);
+				free(cn_name);
+				token_name[cn_len] = 0;
+				free(p15card->tokeninfo->label);
+				p15card->tokeninfo->label = token_name;
+			}
+		}
+
 		/* 
 		 * get keyUsage if present save in ckis[i]
 		 * Will only use it if this in a non FED issued card
@@ -773,13 +797,11 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 
 		if (follows_nist_fascn == 0) {
 			struct sc_object_id keyUsage_oid={{2,5,29,15,-1}};
-			unsigned long long *value;
 			int r = 0;
 
-			value = &ckis[i].cert_keyUsage;
 			r = sc_pkcs15_get_bitstring_extension(card->ctx, cert_out,
 				&keyUsage_oid,
-				value, NULL);
+				&ckis[i].cert_keyUsage, NULL);
 			if ( r >= 0)
 				ckis[i].cert_keyUsage_present = 1;
 				/* TODO if no key usage, we could set all uses */
@@ -887,7 +909,7 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 				break;
 
 			default:
-				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Unsuported key.algorithm %d", cert_out->key->algorithm);
+				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Unsupported key.algorithm %d", cert_out->key->algorithm);
 				ckis[i].pubkey_len = 0; /* set some value for now */
 		}
 		ckis[i].pubkey_from_cert = cert_out->key;
@@ -926,13 +948,13 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 
 		label = pins[i].label;
 		if (i == 0 &&
-			(card->ops->card_ctl)(card, SC_CARDCTL_PIV_PIN_PREFERENCE,
+			sc_card_ctl(card, SC_CARDCTL_PIV_PIN_PREFERENCE,
 					&pin_ref) == 0 &&
 				pin_ref == 0x00) { /* must be 80 for PIV pin, or 00 for Global PIN */
 			pin_info.attrs.pin.reference = pin_ref;
 			pin_info.attrs.pin.flags &= ~SC_PKCS15_PIN_FLAG_LOCAL;
 			label = "Global PIN";
-		} 
+		}
 sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 		strncpy(pin_obj.label, label, SC_PKCS15_MAX_LABEL_SIZE - 1);
 		pin_obj.flags = pins[i].obj_flags;
@@ -953,9 +975,9 @@ sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 
 
 	/* set public keys */
-	/* We may only need this during initialzation when genkey
+	/* We may only need this during initialization when genkey
 	 * gets the pubkey, but it can not be read from the card 
-	 * at a later time. The piv-tool can stach  pubkey in file 
+	 * at a later time. The piv-tool can stash  pubkey in file
 	 */ 
 	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "PIV-II adding pub keys...");
 	for (i = 0; i < PIV_NUM_CERTS_AND_KEYS; i++) {
@@ -981,7 +1003,7 @@ sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 		if (pubkeys[i].auth_id)
 			sc_pkcs15_format_id(pubkeys[i].auth_id, &pubkey_obj.auth_id);
 
-		/* If no cert found, piv-tool may have stached the pubkey 
+		/* If no cert found, piv-tool may have stashed the pubkey
 		 * so we can use it when generating a certificate request
 		 * The file is a OpenSSL DER EVP_KEY, which looks like 
 		 * a certificate subjectPublicKeyInfo.
@@ -1120,18 +1142,18 @@ sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 
 		strncpy(prkey_obj.label, prkeys[i].label, SC_PKCS15_MAX_LABEL_SIZE - 1);
 		prkey_obj.flags = prkeys[i].obj_flags;
-		prkey_obj.user_consent = prkeys[i].user_consent;
+		prkey_obj.user_consent = prkeys[i].user_consent; /* only Sign key */
 
 		if (prkeys[i].auth_id)
 			sc_pkcs15_format_id(prkeys[i].auth_id, &prkey_obj.auth_id);
 
 		/*
 		 * When no cert is present and a pubkey in a file was found, 
-		 * means the caller is initilaizeing a card. A sign operation 
+		 * means the caller is initializing a card. A sign operation
 		 * will be required to sign a certificate request even if 
 		 * normal usage would not allow it. Set SC_PKCS15_PRKEY_USAGE_SIGN 
-		 * TODO if code is added to allow key generation and reqest
-		 * sign in the same session, similiar code will be needed. 
+		 * TODO if code is added to allow key generation and request
+		 * sign in the same session, similar code will be needed.
 		 */
 
 		if (ckis[i].pubkey_from_file == 1) {
@@ -1143,6 +1165,10 @@ sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 			case SC_ALGORITHM_RSA:
 				if(ckis[i].cert_keyUsage_present) {
 					prkey_info.usage |= ckis[i].priv_usage;
+					/* If retired key and non gov cert has NONREPUDIATION, treat as user_consent */
+					if (i >= 4 && (ckis[i].priv_usage & SC_PKCS15_PRKEY_USAGE_NONREPUDIATION)) {
+						prkey_obj.user_consent = 1;
+					}
 				} else {
 					prkey_info.usage |= prkeys[i].usage_rsa;
 				}
@@ -1152,6 +1178,10 @@ sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 			case SC_ALGORITHM_EC:
 				if (ckis[i].cert_keyUsage_present) {
 					prkey_info.usage  |= ckis[i].priv_usage;
+					/* If retired key and non gov cert has NONREPUDIATION, treat as user_consent */
+					if (i >= 4 && (ckis[i].priv_usage & SC_PKCS15_PRKEY_USAGE_NONREPUDIATION)) {
+						prkey_obj.user_consent = 1;
+					}
 				} else {
 					prkey_info.usage  |= prkeys[i].usage_ec;
 				}

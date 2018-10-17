@@ -1,4 +1,4 @@
-version: 0.16.0.{build}
+version: 0.19.0.{build}
 
 platform:
   - x86
@@ -6,21 +6,15 @@ platform:
 
 configuration:
   - Release
-  - Debug
-  - Light-Release
-  - Light-Debug
+  - Light
 
 environment:
+  GH_TOKEN:
+    secure: aLu3tFc7lRJbotnmnHLx/QruIHc5rLaGm1RttoEdy4QILlPXzVkCZ6loYMz0sfrY
   matrix:
     - VSVER: 14
     - VSVER: 12
-    - VSVER: 10
-
-matrix:
-  allow_failures:
-    # not included in AppVeyor right now
-    - platform: x64
-      VSVER: 10
+      DO_PUSH_ARTIFACT: yes
 
 install:
   - ps: if ($env:APPVEYOR_PULL_REQUEST_NUMBER -and $env:APPVEYOR_BUILD_NUMBER -ne ((Invoke-RestMethod `
@@ -29,92 +23,96 @@ install:
         throw "There are newer queued builds for this pull request, failing early." }
   - date /T & time /T
   - set PATH=C:\cygwin\bin;%PATH%
-  - set OPENSSL_VER=1_0_2e
-  - set ZLIB_VER_DOT=1.2.8
-  - ps: $env:PACKAGE_NAME=(git describe --tags)
+  - set OPENPACE_VER=1.0.3
+  - set ZLIB_VER_DOT=1.2.11
+  - ps: $env:PACKAGE_NAME=(git describe --tags --abbrev=0)
   - ps: >-
       If ($env:Platform -Match "x86") {
         $env:VCVARS_PLATFORM="x86"
-        $env:ENV_PLATFORM="x86"
         $env:OPENSSL_PF="Win32"
-        $env:NMAKE_ARCH=""
-        $env:ARTIFACT="OpenSC-win32_vs${env:VSVER}-${env:CONFIGURATION}.msi"
+        $env:ARTIFACT="OpenSC-${env:PACKAGE_NAME}_win32"
       } Else {
         $env:VCVARS_PLATFORM="amd64"
-        $env:ENV_PLATFORM="x64"
         $env:OPENSSL_PF="Win64"
-        $env:NMAKE_ARCH="BUILD_ON=WIN64 BUILD_FOR=WIN64"
-        $env:ARTIFACT="OpenSC-win64_vs${env:VSVER}-${env:CONFIGURATION}.msi"
+        $env:ARTIFACT="OpenSC-${env:PACKAGE_NAME}_win64"
       }
   - ps: >-
-      If ($env:Configuration -Like "*Debug*") {
-        $env:NMAKE_EXTRA="DEBUG_DEF=/DDEBUG ${env:NMAKE_EXTRA}"
-      }
-  - ps: >-
-      If (!($env:Configuration -Like "*Light*")) {
-        If (!(Test-Path -Path "C:\OpenSSL-${env:OPENSSL_PF}" )) {
-          Start-FileDownload https://slproweb.com/download/${env:OPENSSL_PF}OpenSSL-${env:OPENSSL_VER}.exe -FileName C:\WinOpenSSL.exe
-          C:\WinOpenSSL.exe /SILENT /VERYSILENT /SP- /SUPPRESSMSGBOXES /NORESTART
-        }
+      If ($env:Configuration -Like "*Light*") {
+        $env:ARTIFACT="${env:ARTIFACT}-Light"
+      } Else {
         $env:NMAKE_EXTRA="OPENSSL_DEF=/DENABLE_OPENSSL ${env:NMAKE_EXTRA}"
-        If (!(Test-Path zlib.zip )) {
-           appveyor DownloadFile "https://github.com/madler/zlib/archive/v${env:ZLIB_VER_DOT}.zip" -FileName zlib.zip
+        If (!(Test-Path C:\zlib )) {
+          appveyor DownloadFile "https://github.com/madler/zlib/archive/v${env:ZLIB_VER_DOT}.zip" -FileName zlib.zip
+          7z x zlib.zip -oC:\
+          Rename-Item -path "c:\zlib-${env:ZLIB_VER_DOT}" -newName "zlib"
         }
-        7z x zlib.zip -oC:\
-        Rename-Item -path "c:\zlib-${env:ZLIB_VER_DOT}" -newName "zlib"
+        If (!(Test-Path C:\openpace )) {
+          appveyor DownloadFile "https://github.com/frankmorgner/openpace/archive/${env:OPENPACE_VER}.zip" -FileName openpace.zip
+          7z x openpace.zip -oC:\
+          Rename-Item -path "c:\openpace-${env:OPENPACE_VER}" -newName "openpace"
+        }
+      }
+      If (!(Test-Path cngsdk.msi )) {
+          appveyor DownloadFile "http://download.microsoft.com/download/2/C/9/2C93059C-0532-42DF-8C24-9AEAFF00768E/cngsdk.msi"
       }
   - ps: $env:VSCOMNTOOLS=(Get-Content ("env:VS" + "$env:VSVER" + "0COMNTOOLS"))
   - echo "Using Visual Studio %VSVER%.0 at %VSCOMNTOOLS%"
   - call "%VSCOMNTOOLS%\..\..\VC\vcvarsall.bat" %VCVARS_PLATFORM%
-  - appveyor DownloadFile "http://download.microsoft.com/download/2/C/9/2C93059C-0532-42DF-8C24-9AEAFF00768E/cngsdk.msi"
   - cngsdk.msi /quiet
   - uname -a
   - set
 
 build_script:
-  # build zlib.lib as a static library
   - ps: >-
       if (!($env:Configuration -Like "*Light*")) {
-          cd C:\zlib
+        If (!(Test-Path -Path "C:\zlib-${env:OPENSSL_PF}" )) {
+          # build zlib.lib as a static library
+          xcopy C:\zlib C:\zlib-${env:OPENSSL_PF} /e /i /y /s
+          cd C:\zlib-${env:OPENSSL_PF}
           (Get-Content win32/Makefile.msc).replace('-MD', '-MT') | Set-Content win32/Makefile.msc
-          If ($env:Platform -Match "x86") {
-             nmake -f win32/Makefile.msc LOC="-DASMV -DASMINF" OBJA="inffas32.obj match686.obj" zlib.lib
-          } Else {
-             nmake -f win32/Makefile.msc AS=ml64 LOC="-DASMV -DASMINF -I." OBJA="inffasx64.obj gvmat64.obj inffas8664.obj" zlib.lib
-          }
-          $env:NMAKE_EXTRA="ZLIBSTATIC_DEF=/DENABLE_ZLIB_STATIC ${env:NMAKE_EXTRA}"
-          cd c:\projects\Opensc
+          nmake -f win32/Makefile.msc zlib.lib
+        }
+        $env:NMAKE_EXTRA="ZLIBSTATIC_DEF=/DENABLE_ZLIB_STATIC ZLIB_INCL_DIR=/IC:\zlib-${env:OPENSSL_PF} ZLIB_LIB=C:\zlib-${env:OPENSSL_PF}\zlib.lib ${env:NMAKE_EXTRA}"
+        If (!(Test-Path -Path "C:\openpace-${env:OPENSSL_PF}" )) {
+          # build libeac.lib as a static library
+          xcopy C:\openpace C:\openpace-${env:OPENSSL_PF} /e /i /y /s
+          cd C:\openpace-${env:OPENSSL_PF}\src
+          # OpenSSL 1.1.0
+          #cl /IC:\OpenSSL-${env:OPENSSL_PF}\include /I. /DX509DIR=\`"/\`" /DCVCDIR=\`"/\`" /W3 /D_CRT_SECURE_NO_DEPRECATE /DWIN32_LEAN_AND_MEAN /GS /MT /DHAVE_ASN1_STRING_GET0_DATA=1 /DHAVE_DECL_OPENSSL_ZALLOC=1 /DHAVE_DH_GET0_KEY=1 /DHAVE_DH_GET0_PQG=1 /DHAVE_DH_SET0_KEY=1 /DHAVE_DH_SET0_PQG=1 /DHAVE_ECDSA_SIG_GET0=1 /DHAVE_ECDSA_SIG_SET0=1 /DHAVE_EC_KEY_METHOD=1 /DHAVE_RSA_GET0_KEY=1 /DHAVE_RSA_SET0_KEY=1 /c ca_lib.c cv_cert.c cvc_lookup.c x509_lookup.c eac_asn1.c eac.c eac_ca.c eac_dh.c eac_ecdh.c eac_kdf.c eac_lib.c eac_print.c eac_util.c misc.c pace.c pace_lib.c pace_mappings.c ri.c ri_lib.c ta.c ta_lib.c objects.c ssl_compat.c
+          # OpenSSL 1.0.2
+          cl /IC:\OpenSSL-${env:OPENSSL_PF}\include /I. /DX509DIR=\`"/\`" /DCVCDIR=\`"/\`" /W3 /D_CRT_SECURE_NO_DEPRECATE /DWIN32_LEAN_AND_MEAN /GS /MT /c ca_lib.c cv_cert.c cvc_lookup.c x509_lookup.c eac_asn1.c eac.c eac_ca.c eac_dh.c eac_ecdh.c eac_kdf.c eac_lib.c eac_print.c eac_util.c misc.c pace.c pace_lib.c pace_mappings.c ri.c ri_lib.c ta.c ta_lib.c objects.c ssl_compat.c
+          lib /out:libeac.lib ca_lib.obj cv_cert.obj cvc_lookup.obj x509_lookup.obj eac_asn1.obj eac.obj eac_ca.obj eac_dh.obj eac_ecdh.obj eac_kdf.obj eac_lib.obj eac_print.obj eac_util.obj misc.obj pace.obj pace_lib.obj pace_mappings.obj ri.obj ri_lib.obj ta.obj ta_lib.obj objects.obj ssl_compat.obj
+          cd C:\projects\OpenSC
+        }
+        $env:NMAKE_EXTRA="OPENPACE_DEF=/DENABLE_OPENPACE OPENPACE_DIR=C:\openpace-${env:OPENSSL_PF} ${env:NMAKE_EXTRA}"
       }
   - bash -c "exec 0</dev/null && ./bootstrap"
   # disable features to speed up the script
-  - bash -c "exec 0</dev/null && ./configure --disable-openssl --disable-readline --disable-zlib || cat config.log"
+  - bash -c "exec 0</dev/null && ./configure --with-cygwin-native --disable-openssl --disable-readline --disable-zlib || cat config.log"
   - bash -c "make -C etc opensc.conf"
   - cp win32/winconfig.h config.h
-  - nmake /f Makefile.mak %NMAKE_ARCH% %NMAKE_EXTRA%
-  - cd win32 && nmake /f Makefile.mak %NMAKE_ARCH% %NMAKE_EXTRA% VSVER=%VSVER% OpenSC.msi
-  - move OpenSC.msi %ARTIFACT%
-  - appveyor PushArtifact %ARTIFACT%
+  - nmake /f Makefile.mak %NMAKE_EXTRA%
+  - cd win32 && nmake /f Makefile.mak %NMAKE_EXTRA% VSVER=%VSVER% OpenSC.msi && cd ..
+  - move win32\OpenSC.msi %ARTIFACT%.msi
+  - appveyor PushArtifact %ARTIFACT%.msi
   # put all pdb files for dump analysis, but this consumes approx 100 MB per build
+  - md %ARTIFACT%-Debug
   - ps: >-
-      If ($env:Configuration -Like "*Debug*") {
-        Get-ChildItem -recurse c:\projects\OpenSC -exclude vc*.pdb *.pdb | % { Push-AppveyorArtifact $_.FullName -FileName $_.Name }
+      Get-ChildItem -recurse C:\projects\OpenSC -exclude vc*.pdb *.pdb | % {
+        7z a -tzip ${env:ARTIFACT}-Debug.zip $_.FullName
       }
+  - appveyor PushArtifact %ARTIFACT%-Debug.zip
+
+  # keep in sync with .travis.yml
+  - bash -c "git config --global user.email 'no-reply@appveyor.com'"
+  - bash -c "git config --global user.name 'AppVeyor'"
+  - bash -c "if [ \"$DO_PUSH_ARTIFACT\" = yes -a -z \"$APPVEYOR_PULL_REQUEST_NUMBER\" ]; then .github/push_artifacts.sh \"AppVeyor build ${APPVEYOR_BUILD_NUMBER}.${APPVEYOR_JOB_NUMBER}\"; fi"
 
 cache:
-  - C:\OpenSSL-Win32 -> appveyor.yml
-  - C:\OpenSSL-Win64 -> appveyor.yml
-  - zlib.zip -> appveyor.yml
-
-deploy:
-  - provider: GitHub
-    tag: $(APPVEYOR_REPO_TAG_NAME)
-    release: OpenSC-$(APPVEYOR_REPO_TAG_NAME)
-    description: 'release OpenSC $(APPVEYOR_REPO_TAG_NAME)'
-    auth_token:
-      secure: NGaTqWohBQa7fgE62rEm2sp9jkv6S9FRc3YEi3T5CpaoyIY6K89FJjqzaoPLr8vj
-    artifact: /OpenSC-.*\.msi/
-    draft: false
-    prerelease: true
-    on:
-      branch: /0.16.0-rc.*/		# here branch is release tag
-      appveyor_repo_tag: true  		# deploy on tag push only
+  - C:\zlib -> appveyor.yml
+  - C:\zlib-Win32 -> appveyor.yml
+  - C:\zlib-Win64 -> appveyor.yml
+  - C:\openpace -> appveyor.yml
+  - C:\openpace-Win32 -> appveyor.yml
+  - C:\openpace-Win64 -> appveyor.yml
+  - cngsdk.msi -> appveyor.yml

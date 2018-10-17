@@ -139,7 +139,7 @@ cardos_create_dir(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file_t *d
 		return r;
 
 	/* Create a default security environment for this DF.
-	 * This SE autometically becomes the current SE when the
+	 * This SE automatically becomes the current SE when the
 	 * DF is selected. */
 	if ((r = cardos_create_sec_env(profile, p15card->card, 0x01, 0x00)) < 0)
 		return r;
@@ -201,7 +201,7 @@ cardos_create_pin(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file_t *d
 	if (auth_info->auth_type != SC_PKCS15_PIN_AUTH_TYPE_PIN)
 		return SC_ERROR_OBJECT_NOT_VALID;
 
-	r = sc_select_file(card, &df->path, NULL);
+	r = sc_select_file(card, auth_info->attrs.pin.reference & 0x80 ? &df->path : sc_get_mf_path(), NULL);
 	if (r < 0)
 		return r;
 
@@ -499,7 +499,7 @@ cardos_store_pin(sc_profile_t *profile, sc_card_t *card,
 	/* object address: class, id */
 	tlv_next(&tlv, 0x83);
 	tlv_add(&tlv, 0x00);		/* class byte: usage TEST, k=0 */
-	tlv_add(&tlv, auth_info->attrs.pin.reference);
+	tlv_add(&tlv, auth_info->attrs.pin.reference & 0x7f);
 
 	/* parameters */
 	tlv_next(&tlv, 0x85);

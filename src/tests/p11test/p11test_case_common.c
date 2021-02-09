@@ -30,13 +30,15 @@ char flag_buffer[11];
 void always_authenticate(test_cert_t *o, token_info_t *info)
 {
 	CK_RV rv;
-	if (!o->always_auth)
+	if (!o->always_auth) {
 		return;
+	}
 
 	rv = info->function_pointer->C_Login(info->session_handle,
 		CKU_CONTEXT_SPECIFIC, info->pin, info->pin_length);
 	if (rv != CKR_OK) {
 		fail_msg(" [ SKIP %s ] Re-authentication failed", o->id_str);
+		exit(1);
 	}
 }
 
@@ -153,7 +155,7 @@ int callback_certificates(test_certs_t *objects,
 	CK_ATTRIBUTE template[], unsigned int template_size, CK_OBJECT_HANDLE object_handle)
 {
 	EVP_PKEY *evp = NULL;
-	const u_char *cp;
+	const u_char *cp = NULL;
 	test_cert_t *o = NULL;
 
 	if (*(CK_CERTIFICATE_TYPE *)template[3].pValue != CKC_X_509)
@@ -166,23 +168,29 @@ int callback_certificates(test_certs_t *objects,
 	cp = template[1].pValue;
 	if (d2i_X509(&(o->x509), &cp, template[1].ulValueLen) == NULL) {
 		fail_msg("d2i_X509");
+		return -1;
 	} else if ((evp = X509_get_pubkey(o->x509)) == NULL) {
 		fail_msg("X509_get_pubkey failed.");
+		return -1;
 	}
 
 	if (EVP_PKEY_base_id(evp) == EVP_PKEY_RSA) {
 		/* Extract public RSA key */
 		RSA *rsa = EVP_PKEY_get0_RSA(evp);
-		if ((o->key.rsa = RSAPublicKey_dup(rsa)) == NULL)
+		if ((o->key.rsa = RSAPublicKey_dup(rsa)) == NULL) {
 			fail_msg("RSAPublicKey_dup failed");
+			return -1;
+		}
 		o->type = EVP_PK_RSA;
 		o->bits = EVP_PKEY_bits(evp);
 
 	} else if (EVP_PKEY_base_id(evp) == EVP_PKEY_EC) {
 		/* Extract public EC key */
 		EC_KEY *ec = EVP_PKEY_get0_EC_KEY(evp);
-		if ((o->key.ec = EC_KEY_dup(ec)) == NULL)
+		if ((o->key.ec = EC_KEY_dup(ec)) == NULL) {
 			fail_msg("EC_KEY_dup failed");
+			return -1;
+		}
 		o->type = EVP_PK_EC;
 		o->bits = EVP_PKEY_bits(evp);
 
@@ -304,7 +312,11 @@ int callback_public_keys(test_certs_t *objects,
 		} else { /* store the public key for future use */
 			o->type = EVP_PK_RSA;
 			o->key.rsa = RSA_new();
-			RSA_set0_key(o->key.rsa, n, e, NULL);
+			if (RSA_set0_key(o->key.rsa, n, e, NULL) != 1) {
+				fail_msg("Unable to set key params");
+				return -1;
+			}
+			o->bits = RSA_bits(o->key.rsa);
 			n = NULL;
 			e = NULL;
 		}
@@ -314,15 +326,30 @@ int callback_public_keys(test_certs_t *objects,
 		const unsigned char *pub, *p;
 		BIGNUM *bn = NULL;
 		EC_POINT *ecpoint;
-		EC_GROUP *ecgroup;
+		EC_GROUP *ecgroup = NULL;
 		int nid, pub_len;
 
 		/* Parse the nid out of the EC_PARAMS */
 		p = template[6].pValue;
 		oid = d2i_ASN1_OBJECT(NULL, &p, template[6].ulValueLen);
+		if (oid == NULL) {
+			debug_print(" [WARN %s ] Failed to convert EC_PARAMS"
+				" to OpenSSL format", o->id_str);
+			return -1;
+		}
 		nid = OBJ_obj2nid(oid);
 		ASN1_OBJECT_free(oid);
+		if (nid == NID_undef) {
+			debug_print(" [WARN %s ] Failed to convert EC_PARAMS"
+				" to NID", o->id_str);
+			return -1;
+		}
 		ecgroup = EC_GROUP_new_by_curve_name(nid);
+		if (ecgroup == NULL) {
+			debug_print(" [WARN %s ] Failed to create new EC_GROUP"
+				" from NID", o->id_str);
+			return -1;
+		}
 		EC_GROUP_set_asn1_flag(ecgroup, OPENSSL_EC_NAMED_CURVE);
 
 		p = template[7].pValue;
@@ -333,7 +360,7 @@ int callback_public_keys(test_certs_t *objects,
 		ASN1_STRING_free(s);
 		if (bn == NULL) {
 			debug_print(" [WARN %s ] Can not convert EC_POINT from"
-				"PKCS#11 to BIGNUM", o->id_str);
+				" PKCS#11 to BIGNUM", o->id_str);
 			EC_GROUP_free(ecgroup);
 			return -1;
 		}
@@ -342,7 +369,7 @@ int callback_public_keys(test_certs_t *objects,
 		BN_free(bn);
 		if (ecpoint == NULL) {
 			debug_print(" [WARN %s ] Can not convert EC_POINT from"
-				"BIGNUM to OpenSSL format", o->id_str);
+				" BIGNUM to OpenSSL format", o->id_str);
 			EC_GROUP_free(ecgroup);
 			return -1;
 		}
@@ -370,6 +397,7 @@ int callback_public_keys(test_certs_t *objects,
 			o->key.ec = EC_KEY_new_by_curve_name(nid);
 			EC_KEY_set_public_key(o->key.ec, ecpoint);
 			EC_KEY_set_group(o->key.ec, ecgroup);
+			o->bits = EC_GROUP_get_degree(ecgroup);
 		}
 	} else {
 		debug_print(" [WARN %s ] non-RSA, non-EC key. Key type: %02lX",
@@ -394,7 +422,7 @@ int search_objects(test_certs_t *objects, token_info_t *info,
 	CK_OBJECT_HANDLE object_handle = CK_INVALID_HANDLE;
 	CK_OBJECT_HANDLE_PTR object_handles = NULL;
 	unsigned long i = 0, objects_length = 0;
-	int j;
+	int j, ret = -1;
 
 	/* FindObjects first
 	 * https://wiki.oasis-open.org/pkcs11/CommonBugs
@@ -411,14 +439,18 @@ int search_objects(test_certs_t *objects, token_info_t *info,
 			break;
 		if (rv != CKR_OK) {
 			fprintf(stderr, "C_FindObjects: rv = 0x%.8lX\n", rv);
-			return -1;
+			goto out;
 		}
 		/* store handle */
 		if (i >= objects_length) {
+			CK_OBJECT_HANDLE_PTR new_object_handles = NULL;
 			objects_length += 4; // do not realloc after each row
-			object_handles = realloc(object_handles, objects_length * sizeof(CK_OBJECT_HANDLE_PTR));
-			if (object_handles == NULL)
+			new_object_handles = realloc(object_handles, objects_length * sizeof(CK_OBJECT_HANDLE));
+			if (new_object_handles == NULL) {
 		 		fail_msg("Realloc failed. Need to store object handles.\n");
+				goto out;
+			}
+			object_handles = new_object_handles;
 		}
 		object_handles[i++] = object_handle;
 	}
@@ -428,6 +460,7 @@ int search_objects(test_certs_t *objects, token_info_t *info,
 	if (rv != CKR_OK) {
 		fprintf(stderr, "C_FindObjectsFinal: rv = 0x%.8lX\n", rv);
  		fail_msg("Could not find certificate.\n");
+		goto out;
 	}
 
 	for (i = 0; i < objects_length; i++) {
@@ -440,24 +473,30 @@ int search_objects(test_certs_t *objects, token_info_t *info,
 
 			rv = fp->C_GetAttributeValue(info->session_handle, object_handles[i],
 				&(template[j]), 1);
-			if (rv == CKR_ATTRIBUTE_TYPE_INVALID)
+			if (rv == CKR_ATTRIBUTE_TYPE_INVALID) {
 				continue;
-			else if (rv != CKR_OK)
+			} else if (rv != CKR_OK) {
 				fail_msg("C_GetAttributeValue: rv = 0x%.8lX\n", rv);
+				goto out;
+			}
 
 			/* Allocate memory to hold the data we want */
 			if (template[j].ulValueLen == 0) {
 				continue;
 			} else {
 				template[j].pValue = malloc(template[j].ulValueLen);
-				if (template[j].pValue == NULL)
+				if (template[j].pValue == NULL) {
 					fail_msg("malloc failed");
+					goto out;
+				}
 			}
 			/* Call again to get actual attribute */
 			rv = fp->C_GetAttributeValue(info->session_handle, object_handles[i],
 				&(template[j]), 1);
-			if (rv != CKR_OK)
+			if (rv != CKR_OK) {
 				fail_msg("C_GetAttributeValue: rv = 0x%.8lX\n", rv);
+				goto out;
+			}
 		}
 
 		callback(objects, template, template_size, object_handles[i]);
@@ -465,8 +504,10 @@ int search_objects(test_certs_t *objects, token_info_t *info,
 		for (j = 0; j < template_size; j++)
 			free(template[j].pValue);
 	}
+	ret = 0;
+out:
 	free(object_handles);
-	return 0;
+	return ret;
 }
 
 void search_for_all_objects(test_certs_t *objects, token_info_t *info)
@@ -565,6 +606,8 @@ const char *get_mechanism_name(int mech_id)
 			return "ECDSA";
 		case CKM_ECDSA_SHA1:
 			return "ECDSA_SHA1";
+		case CKM_ECDSA_SHA224:
+			return "ECDSA_SHA224";
 		case CKM_ECDSA_SHA256:
 			return "ECDSA_SHA256";
 		case CKM_ECDSA_SHA384:
@@ -595,6 +638,8 @@ const char *get_mechanism_name(int mech_id)
 			return "SHA384_RSA_PKCS_PSS";
 		case CKM_SHA512_RSA_PKCS_PSS:
 			return "SHA512_RSA_PKCS_PSS";
+		case CKM_MD5_HMAC:
+			return "MD5_HMAC";
 		case CKM_SHA_1_HMAC:
 			return "SHA_1_HMAC";
 		case CKM_SHA256_HMAC:
@@ -605,6 +650,8 @@ const char *get_mechanism_name(int mech_id)
 			return "SHA512_HMAC";
 		case CKM_RSA_PKCS_OAEP:
 			return "RSA_PKCS_OAEP";
+		case CKM_MD5:
+			return "MD5";
 		case CKM_SHA_1:
 			return "SHA_1";
 		case CKM_SHA224:

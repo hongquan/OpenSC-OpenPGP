@@ -41,9 +41,6 @@
 #include "pkcs15.h"
 #include "../pkcs11/pkcs11.h"
 
-int sc_pkcs15emu_coolkey_init_ex(sc_pkcs15_card_t *, struct sc_aid *, sc_pkcs15emu_opt_t *);
-
-
 typedef struct pdata_st {
 	const char *id;
 	const char *label;
@@ -500,13 +497,13 @@ static int sc_pkcs15emu_coolkey_init(sc_pkcs15_card_t *p15card)
 	r = sc_card_ctl(card, SC_CARDCTL_COOLKEY_GET_TOKEN_INFO, p15card->tokeninfo);
 	if (r < 0) {
 		/* put some defaults in if we didn't succeed */
-		p15card->tokeninfo->label = strdup("Coolkey");
-		p15card->tokeninfo->manufacturer_id = strdup("Unknown");
-		p15card->tokeninfo->serial_number = strdup("00000000");
+		set_string(&p15card->tokeninfo->label, "Coolkey");
+		set_string(&p15card->tokeninfo->manufacturer_id, "Unknown");
+		set_string(&p15card->tokeninfo->serial_number, "00000000");
 	}
 
 	/* set pins */
-	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Coolkey adding pins...");
+	sc_log(card->ctx,  "Coolkey adding pins...");
 	for (i = 0; pins[i].id; i++) {
 		struct sc_pkcs15_auth_info pin_info;
 		struct sc_pkcs15_object   pin_obj;
@@ -528,19 +525,20 @@ static int sc_pkcs15emu_coolkey_init(sc_pkcs15_card_t *p15card)
 		pin_info.tries_left    = -1;
 
 		label = pins[i].label? pins[i].label : p15card->tokeninfo->label;
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Coolkey Adding pin %d label=%s",i, label);
+		sc_log(card->ctx,  "Coolkey Adding pin %d label=%s",i, label);
 		strncpy(pin_obj.label, label, SC_PKCS15_MAX_LABEL_SIZE - 1);
 		pin_obj.flags = pins[i].obj_flags;
 
 		r = sc_pkcs15emu_add_pin_obj(p15card, &pin_obj, &pin_info);
 		if (r < 0)
-			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+			LOG_FUNC_RETURN(card->ctx, r);
 	}
 
 	/* set other objects */
 	r = (card->ops->card_ctl)(card, SC_CARDCTL_COOLKEY_INIT_GET_OBJECTS, &count);
 	LOG_TEST_RET(card->ctx, r, "Can not initiate objects.");
 
+	sc_log(card->ctx,  "Iterating over %d objects", count);
 	for (i = 0; i < count; i++) {
 		struct sc_cardctl_coolkey_object     coolkey_obj;
 		struct sc_pkcs15_object    obj_obj;
@@ -556,9 +554,9 @@ static int sc_pkcs15emu_coolkey_init(sc_pkcs15_card_t *p15card)
 
 		r = (card->ops->card_ctl)(card, SC_CARDCTL_COOLKEY_GET_NEXT_OBJECT, &coolkey_obj);
 		if (r < 0)
-			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+			LOG_FUNC_RETURN(card->ctx, r);
 
-
+		sc_log(card->ctx, "Loading object %d", i);
 		memset(&obj_obj, 0, sizeof(obj_obj));
 		/* coolkey applets have label only on the certificates,
 		 * but we should copy it also to the keys matching the same ID */
@@ -574,6 +572,7 @@ static int sc_pkcs15emu_coolkey_init(sc_pkcs15_card_t *p15card)
 		}
 		switch (obj_class) {
 		case CKO_PRIVATE_KEY:
+			sc_log(card->ctx, "Processing private key object %d", i);
 			r = coolkey_get_attribute_ulong(card, &coolkey_obj, CKA_KEY_TYPE, &key_type);
 			/* default to CKK_RSA */
 			if (r == SC_ERROR_DATA_OBJECT_NOT_FOUND) {
@@ -596,12 +595,12 @@ static int sc_pkcs15emu_coolkey_init(sc_pkcs15_card_t *p15card)
 			if (key_type == CKK_RSA) {
 				obj_type = SC_PKCS15_TYPE_PRKEY_RSA;
 				if (key) {
-					prkey_info.modulus_length =  key->u.rsa.modulus.len*8;
+					prkey_info.modulus_length = key->u.rsa.modulus.len*8;
 				}
 			} else if (key_type == CKK_EC) {
-				obj_type = SC_PKCS15_TYPE_PUBKEY_EC;
+				obj_type = SC_PKCS15_TYPE_PRKEY_EC;
 				if (key) {
-					prkey_info.field_length =  key->u.ec.params.field_length;
+					prkey_info.field_length = key->u.ec.params.field_length;
 				}
 			} else {
 				goto fail;
@@ -609,6 +608,7 @@ static int sc_pkcs15emu_coolkey_init(sc_pkcs15_card_t *p15card)
 			break;
 
 		case CKO_PUBLIC_KEY:
+			sc_log(card->ctx, "Processing public key object %d", i);
 			r = coolkey_get_attribute_ulong(card, &coolkey_obj, CKA_KEY_TYPE, &key_type);
 			/* default to CKK_RSA */
 			if (r == SC_ERROR_DATA_OBJECT_NOT_FOUND) {
@@ -626,21 +626,21 @@ static int sc_pkcs15emu_coolkey_init(sc_pkcs15_card_t *p15card)
 			obj_info = &pubkey_info;
 			memset(&pubkey_info, 0, sizeof(pubkey_info));
 			r = sc_pkcs15_encode_pubkey_as_spki(card->ctx, key, &pubkey_info.direct.spki.value,
-																			&pubkey_info.direct.spki.len);
+				&pubkey_info.direct.spki.len);
 			if (r < 0)
 				goto fail;
 			coolkey_get_id(card, &coolkey_obj, &pubkey_info.id);
 			pubkey_info.path = coolkey_obj.path;
-			pubkey_info.native        = 1;
+			pubkey_info.native = 1;
 			pubkey_info.key_reference = coolkey_obj.id;
 			coolkey_get_usage(card, &coolkey_obj, &pubkey_info.usage);
 			coolkey_get_access(card, &coolkey_obj, &pubkey_info.access_flags);
 			if (key_type == CKK_RSA) {
 				obj_type = SC_PKCS15_TYPE_PUBKEY_RSA;
-				pubkey_info.modulus_length =  key->u.rsa.modulus.len*8;
+				pubkey_info.modulus_length = key->u.rsa.modulus.len*8;
 			} else if (key_type == CKK_EC) {
 				obj_type = SC_PKCS15_TYPE_PUBKEY_EC;
-				pubkey_info.field_length =  key->u.ec.params.field_length;
+				pubkey_info.field_length = key->u.ec.params.field_length;
 			} else {
 				goto fail;
 			}
@@ -650,6 +650,7 @@ static int sc_pkcs15emu_coolkey_init(sc_pkcs15_card_t *p15card)
 			break;
 
 		case CKO_CERTIFICATE:
+			sc_log(card->ctx, "Processing certificate object %d", i);
 			obj_info = &cert_info;
 			memset(&cert_info, 0, sizeof(cert_info));
 			coolkey_get_id(card, &coolkey_obj, &cert_info.id);
@@ -666,9 +667,7 @@ static int sc_pkcs15emu_coolkey_init(sc_pkcs15_card_t *p15card)
 
 		default:
 			/* no other recognized types which are stored 'on card' */
-			break;
-		}
-		if (obj_info == NULL) {
+			sc_log(card->ctx, "Unknown object type %lu, skipping", obj_class);
 			continue;
 		}
 
@@ -716,7 +715,7 @@ fail:
 
 int
 sc_pkcs15emu_coolkey_init_ex(sc_pkcs15_card_t *p15card,
-		struct sc_aid *aid, sc_pkcs15emu_opt_t *opts)
+		struct sc_aid *aid)
 {
 	sc_card_t      *card = p15card->card;
 	sc_context_t    *ctx = card->ctx;
@@ -724,14 +723,10 @@ sc_pkcs15emu_coolkey_init_ex(sc_pkcs15_card_t *p15card,
 
 	LOG_FUNC_CALLED(ctx);
 
-	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)
-		rv = sc_pkcs15emu_coolkey_init(p15card);
-	else {
-		rv = coolkey_detect_card(p15card);
-		if (rv)
-			LOG_FUNC_RETURN(ctx, SC_ERROR_WRONG_CARD);
-		rv = sc_pkcs15emu_coolkey_init(p15card);
-	}
+	rv = coolkey_detect_card(p15card);
+	if (rv)
+		LOG_FUNC_RETURN(ctx, SC_ERROR_WRONG_CARD);
+	rv = sc_pkcs15emu_coolkey_init(p15card);
 
 	LOG_FUNC_RETURN(ctx, rv);
 }

@@ -60,11 +60,12 @@ struct sc_aid sc_hsm_aid = { { 0xE8,0x2B,0x06,0x01,0x04,0x01,0x81,0xC3,0x1F,0x02
 
 
 /* Known ATRs for SmartCard-HSMs */
-static const struct sc_atr_table sc_hsm_atrs[] = {
+const struct sc_atr_table sc_hsm_atrs[] = {
 	/* standard version */
 	{"3B:FE:18:00:00:81:31:FE:45:80:31:81:54:48:53:4D:31:73:80:21:40:81:07:FA", NULL, NULL, SC_CARD_TYPE_SC_HSM, 0, NULL},
 	{"3B:8E:80:01:80:31:81:54:48:53:4D:31:73:80:21:40:81:07:18", NULL, NULL, SC_CARD_TYPE_SC_HSM, 0, NULL},
 	{"3B:DE:18:FF:81:91:FE:1F:C3:80:31:81:54:48:53:4D:31:73:80:21:40:81:07:1C", NULL, NULL, SC_CARD_TYPE_SC_HSM, 0, NULL},
+	{"3B:DE:96:FF:81:91:FE:1F:C3:80:31:81:54:48:53:4D:31:73:80:21:40:81:07:92", NULL, NULL, SC_CARD_TYPE_SC_HSM, 0, NULL},
 
 	{"3B:80:80:01:01", NULL, NULL, SC_CARD_TYPE_SC_HSM_SOC, 0, NULL},	// SoC Sample Card
 	{
@@ -283,7 +284,7 @@ static int sc_hsm_match_card(struct sc_card *card)
 static int sc_hsm_encode_sopin(const u8 *sopin, u8 *sopinbin)
 {
 	int i;
-	char digit;
+	unsigned char digit;
 
 	memset(sopinbin, 0, 8);
 	for (i = 0; i < 16; i++) {
@@ -520,6 +521,10 @@ static int sc_hsm_perform_chip_authentication(sc_card_t *card)
 		r = sc_read_binary(card, 0, all_certs, all_certs_len, 0);
 		if (r < 0)
 			goto err;
+		if (r == 0) {
+			r = SC_ERROR_FILE_NOT_FOUND;
+			goto err;
+		}
 
 		all_certs_len = r;
 
@@ -710,11 +715,10 @@ static int sc_hsm_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data,
 #endif
 
 		data->pin1.offset = 5;
-		data->pin1.length_offset = 4;
 		data->pin2.offset = 5;
-		data->pin2.length_offset = 4;
 
 		r = (*iso_ops->pin_cmd)(card, data, tries_left);
+		data->apdu = NULL;
 	}
 	LOG_TEST_RET(card->ctx, r, "Verification failed");
 
@@ -725,12 +729,12 @@ static int sc_hsm_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data,
 			u8 recvbuf[SC_MAX_APDU_BUFFER_SIZE];
 #ifdef ENABLE_SM
 			if (card->sm_ctx.sm_mode != SM_MODE_TRANSMIT) {
-				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+				sc_log(card->ctx, 
 						"Session PIN generation only supported in SM");
 				LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 			}
 #else
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(card->ctx, 
 					"Session PIN generation only supported in SM");
 			LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 #endif
@@ -741,7 +745,7 @@ static int sc_hsm_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data,
 			apdu.le = 0;
 			if (sc_transmit_apdu(card, &apdu) != SC_SUCCESS
 					|| sc_check_sw(card, apdu.sw1, apdu.sw2) != SC_SUCCESS) {
-				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+				sc_log(card->ctx, 
 						"Generating session PIN failed");
 				LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 			}
@@ -751,12 +755,12 @@ static int sc_hsm_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data,
 							apdu.resplen);
 					data->pin2.len = apdu.resplen;
 				} else {
-					sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+					sc_log(card->ctx, 
 							"Buffer too small for session PIN");
 				}
 			}
 		} else {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(card->ctx, 
 					"Session PIN not supported for this PIN (0x%02X)",
 					data->pin_reference);
 		}
@@ -792,7 +796,7 @@ static int sc_hsm_read_binary(sc_card_t *card,
 	int r;
 
 	if (idx > 0xffff) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "invalid EF offset: 0x%X > 0xFFFF", idx);
+		sc_log(ctx,  "invalid EF offset: 0x%X > 0xFFFF", idx);
 		return SC_ERROR_OFFSET_TOO_LARGE;
 	}
 
@@ -834,7 +838,7 @@ static int sc_hsm_write_ef(sc_card_t *card,
 	int r;
 
 	if (idx > 0xffff) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "invalid EF offset: 0x%X > 0xFFFF", idx);
+		sc_log(ctx,  "invalid EF offset: 0x%X > 0xFFFF", idx);
 		return SC_ERROR_OFFSET_TOO_LARGE;
 	}
 
@@ -946,7 +950,7 @@ static int sc_hsm_delete_file(sc_card_t *card, const sc_path_t *path)
 	int r;
 
 	if ((path->type != SC_PATH_TYPE_FILE_ID) || (path->len != 2)) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "File type has to be SC_PATH_TYPE_FILE_ID");
+		sc_log(card->ctx,  "File type has to be SC_PATH_TYPE_FILE_ID");
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 
@@ -997,7 +1001,9 @@ static int sc_hsm_set_security_env(sc_card_t *card,
 		}
 		break;
 	case SC_ALGORITHM_EC:
-		if (env->algorithm_flags & SC_ALGORITHM_ECDSA_HASH_NONE) {
+		if (env->operation == SC_SEC_OPERATION_DERIVE) {
+			priv->algorithm = ALGO_EC_DH;
+		} else if (env->algorithm_flags & SC_ALGORITHM_ECDSA_HASH_NONE) {
 			priv->algorithm = ALGO_EC_RAW;
 		} else if (env->algorithm_flags & SC_ALGORITHM_ECDSA_HASH_SHA1) {
 			priv->algorithm = ALGO_EC_SHA1;
@@ -1006,11 +1012,7 @@ static int sc_hsm_set_security_env(sc_card_t *card,
 		} else if (env->algorithm_flags & SC_ALGORITHM_ECDSA_HASH_SHA256) {
 			priv->algorithm = ALGO_EC_SHA256;
 		} else if (env->algorithm_flags & SC_ALGORITHM_ECDSA_RAW) {
-			if (env->operation == SC_SEC_OPERATION_DERIVE) {
-				priv->algorithm = ALGO_EC_DH;
-			} else {
-				priv->algorithm = ALGO_EC_RAW;
-			}
+			priv->algorithm = ALGO_EC_RAW;
 		} else {
 			LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 		}
@@ -1233,7 +1235,7 @@ static int sc_hsm_initialize(sc_card_t *card, sc_cardctl_sc_hsm_init_param_t *pa
 	int r;
 	size_t tilen;
 	sc_apdu_t apdu;
-	u8 ibuff[50+0xFF], *p;
+	u8 ibuff[64+0xFF], *p;
 
 	LOG_FUNC_CALLED(card->ctx);
 
@@ -1264,6 +1266,19 @@ static int sc_hsm_initialize(sc_card_t *card, sc_cardctl_sc_hsm_init_param_t *pa
 		*p++ = 0x92;	// Number of DKEK shares
 		*p++ = 0x01;
 		*p++ = (u8)params->dkek_shares;
+	}
+
+	if (params->bio1.len) {
+		*p++ = 0x95;
+		*p++ = params->bio1.len;
+		memcpy(p, params->bio1.value, params->bio1.len);
+		p += params->bio1.len;
+	}
+	if (params->bio2.len) {
+		*p++ = 0x96;
+		*p++ = params->bio2.len;
+		memcpy(p, params->bio2.value, params->bio2.len);
+		p += params->bio2.len;
 	}
 
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x50, 0x00, 0x00);
@@ -1671,8 +1686,19 @@ static int sc_hsm_init(struct sc_card *card)
 	}
 	sc_file_free(file);
 
-	card->max_send_size = 1431;		// 1439 buffer size - 8 byte TLV because of odd ins in UPDATE BINARY
-	if (card->type == SC_CARD_TYPE_SC_HSM_SOC
+	// APDU Buffer limits
+	//   JCOP 2.4.1r3           1462
+	//   JCOP 2.4.2r3           1454
+	//   JCOP 3                 1232
+	//   MicroSD with JCOP 3    478 / 506
+	//   Reiner SCT             1014
+
+	card->max_send_size = 1232 - 17;	// 1232 buffer size - 17 byte header and TLV because of odd ins in UPDATE BINARY
+
+	if (!strncmp("Secure Flash Card", card->reader->name, 17)) {
+		card->max_send_size = 478 - 17;
+		card->max_recv_size = 506 - 2;
+	} else if (card->type == SC_CARD_TYPE_SC_HSM_SOC
 			|| card->type == SC_CARD_TYPE_SC_HSM_GOID) {
 		card->max_recv_size = 0x0630;	// SoC Proxy forces this limit
 	} else {

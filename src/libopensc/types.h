@@ -32,7 +32,11 @@ typedef unsigned char u8;
 #define SC_MAX_CARD_DRIVER_SNAME_SIZE	16
 #define SC_MAX_CARD_APPS		8
 #define SC_MAX_APDU_BUFFER_SIZE		261 /* takes account of: CLA INS P1 P2 Lc [255 byte of data] Le */
+#define SC_MAX_APDU_DATA_SIZE		0xFF
+#define SC_MAX_APDU_RESP_SIZE		(0xFF+1)
 #define SC_MAX_EXT_APDU_BUFFER_SIZE	65538
+#define SC_MAX_EXT_APDU_DATA_SIZE		0xFFFF
+#define SC_MAX_EXT_APDU_RESP_SIZE		(0xFFFF+1)
 #define SC_MAX_PIN_SIZE			256 /* OpenPGP card has 254 max */
 #define SC_MAX_ATR_SIZE			33
 #define SC_MAX_UID_SIZE			10
@@ -48,9 +52,11 @@ typedef unsigned char u8;
 
 /* When changing this value, pay attention to the initialization of the ASN1
  * static variables that use this macro, like, for example,
- * 'c_asn1_supported_algorithms' in src/libopensc/pkcs15.c
+ * 'c_asn1_supported_algorithms' in src/libopensc/pkcs15.c,
+ * src/libopensc/pkcs15-prkey.c and src/libopensc/pkcs15-skey.c
+ * `grep "src/libopensc/types.h SC_MAX_SUPPORTED_ALGORITHMS  defined as"'
  */
-#define SC_MAX_SUPPORTED_ALGORITHMS	8
+#define SC_MAX_SUPPORTED_ALGORITHMS	16
 
 struct sc_lv_data {
 	unsigned char *value;
@@ -198,13 +204,11 @@ struct sc_crt {
 typedef struct sc_acl_entry {
 	unsigned int method;	/* See SC_AC_* */
 	unsigned int key_ref;	/* SC_AC_KEY_REF_NONE or an integer */
-
-	struct sc_crt crts[SC_MAX_CRTS_IN_SE];
-
 	struct sc_acl_entry *next;
 } sc_acl_entry_t;
 
 /* File types */
+#define SC_FILE_TYPE_UNKNOWN		0x00
 #define SC_FILE_TYPE_DF			0x04
 #define SC_FILE_TYPE_INTERNAL_EF	0x03
 #define SC_FILE_TYPE_WORKING_EF		0x01
@@ -221,10 +225,27 @@ typedef struct sc_acl_entry {
 #define SC_FILE_EF_CYCLIC_TLV		0x07
 
 /* File status flags */
-#define SC_FILE_STATUS_ACTIVATED	0x00
-#define SC_FILE_STATUS_INVALIDATED	0x01
-#define SC_FILE_STATUS_CREATION		0x02 /* Full access in this state,
-						(at least for SetCOS 4.4 */
+/* ISO7816-4: Unless otherwise specified, the security attributes are valid for the operational state.*/
+#define SC_FILE_STATUS_ACTIVATED	0x00 /* ISO7816-4: Operational state (activated)   (5, 7) */
+#define SC_FILE_STATUS_INVALIDATED	0x01 /* ISO7816-4: Operational state (deactivated) (4, 6) */
+
+/* Full access in this state, (at least for SetCOS 4.4 ) */
+#define SC_FILE_STATUS_CREATION		0x02 /* ISO7816-4: Creation state, (1) */
+
+#define SC_FILE_STATUS_INITIALISATION	0x03 /* ISO7816-4: Initialisation state, (3) */
+#define SC_FILE_STATUS_NO_INFO		0x04 /* ISO7816-4: No information given, (0) */
+#define SC_FILE_STATUS_TERMINATION	0x0c /* ISO7816-4: Termination state (12,13,14,15) */
+#define SC_FILE_STATUS_PROPRIETARY	0xf0 /* ISO7816-4: codes > 15 */
+
+/* reserved for future use by ISO/IEC */
+#define SC_FILE_STATUS_RFU_2		0x07 /* ISO7816-4: (0x02) */
+#define SC_FILE_STATUS_RFU_8		0x08 /* ISO7816-4: (0x08) */
+#define SC_FILE_STATUS_RFU_9		0x09 /* ISO7816-4: (0x09) */
+#define SC_FILE_STATUS_RFU_10		0x0a /* ISO7816-4: (0x0a) */
+#define SC_FILE_STATUS_RFU_11		0x0b /* ISO7816-4: (0x0b) */
+
+#define SC_FILE_STATUS_UNKNOWN		0xff /* if tag 0x8A is missing, there is no information about LCSB */
+
 typedef struct sc_file {
 	struct sc_path path;
 	unsigned char name[16];	/* DF name */
@@ -237,8 +258,8 @@ typedef struct sc_file {
 	int sid;	/* short EF identifier (1 byte) */
 	struct sc_acl_entry *acl[SC_MAX_AC_OPS]; /* Access Control List */
 
-	int record_length; /* In case of fixed-length or cyclic EF */
-	int record_count;  /* Valid, if not transparent EF or DF */
+	size_t record_length; /* max. length in case of record-oriented EF */
+	size_t record_count;  /* Valid, if not transparent EF or DF */
 
 	unsigned char *sec_attr;	/* security data in proprietary format. tag '86' */
 	size_t sec_attr_len;

@@ -40,8 +40,6 @@
 #define GEMSAFE_READ_QUANTUM    248
 #define GEMSAFE_MAX_OBJLEN      28672
 
-int sc_pkcs15emu_gemsafeV1_init_ex(sc_pkcs15_card_t *, struct sc_aid *,sc_pkcs15emu_opt_t *);
-
 static int
 sc_pkcs15emu_add_cert(sc_pkcs15_card_t *p15card,
 	int type, int authority,
@@ -175,6 +173,7 @@ static int gemsafe_get_cert_len(sc_card_t *card)
 	r = sc_select_file(card, &path, &file);
 	if (r != SC_SUCCESS || !file)
 		return SC_ERROR_INTERNAL;
+	sc_file_free(file);
 
 	/* Initial read */
 	r = sc_read_binary(card, 0, ibuf, GEMSAFE_READ_QUANTUM, 0);
@@ -306,19 +305,15 @@ static int sc_pkcs15emu_gemsafeV1_init( sc_pkcs15_card_t *p15card)
 
 	sc_log(p15card->card->ctx, "Setting pkcs15 parameters");
 
-	if (p15card->tokeninfo->label)
-		free(p15card->tokeninfo->label);
-	p15card->tokeninfo->label = malloc(strlen(APPLET_NAME) + 1);
+	free(p15card->tokeninfo->label);
+	p15card->tokeninfo->label = strdup(APPLET_NAME);
 	if (!p15card->tokeninfo->label)
 		return SC_ERROR_INTERNAL;
-	strcpy(p15card->tokeninfo->label, APPLET_NAME);
 
-	if (p15card->tokeninfo->serial_number)
-		free(p15card->tokeninfo->serial_number);
-	p15card->tokeninfo->serial_number = malloc(strlen(DRIVER_SERIAL_NUMBER) + 1);
+	free(p15card->tokeninfo->serial_number);
+	p15card->tokeninfo->serial_number = strdup(DRIVER_SERIAL_NUMBER);
 	if (!p15card->tokeninfo->serial_number)
 		return SC_ERROR_INTERNAL;
-	strcpy(p15card->tokeninfo->serial_number, DRIVER_SERIAL_NUMBER);
 
 	/* the GemSAFE applet version number */
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0xca, 0xdf, 0x03);
@@ -338,12 +333,10 @@ static int sc_pkcs15emu_gemsafeV1_init( sc_pkcs15_card_t *p15card)
 		return SC_ERROR_INTERNAL;
 
 	/* the manufacturer ID, in this case GemPlus */
-	if (p15card->tokeninfo->manufacturer_id)
-		free(p15card->tokeninfo->manufacturer_id);
-	p15card->tokeninfo->manufacturer_id = malloc(strlen(MANU_ID) + 1);
+	free(p15card->tokeninfo->manufacturer_id);
+	p15card->tokeninfo->manufacturer_id = strdup(MANU_ID);
 	if (!p15card->tokeninfo->manufacturer_id)
 		return SC_ERROR_INTERNAL;
-	strcpy(p15card->tokeninfo->manufacturer_id, MANU_ID);
 
 	/* determine allocated key containers and length of certificates */
 	r = gemsafe_get_cert_len(card);
@@ -411,7 +404,7 @@ static int sc_pkcs15emu_gemsafeV1_init( sc_pkcs15_card_t *p15card)
 		 */
 		if ( p15card->card->flags & 0x0F) {
 			key_ref = p15card->card->flags & 0x0F;
-			sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(p15card->card->ctx, 
 				 "Overriding key_ref %d with %d\n",
 				 gemsafe_prkeys[i].ref, key_ref);
 		} else
@@ -430,25 +423,18 @@ static int sc_pkcs15emu_gemsafeV1_init( sc_pkcs15_card_t *p15card)
 	if (r != SC_SUCCESS || !file)
 		return SC_ERROR_INTERNAL;
 	/* set the application DF */
-	if (p15card->file_app)
-		free(p15card->file_app);
+	sc_file_free(p15card->file_app);
 	p15card->file_app = file;
 
 	return SC_SUCCESS;
 }
 
 int sc_pkcs15emu_gemsafeV1_init_ex( sc_pkcs15_card_t *p15card,
-			struct sc_aid *aid,
-			sc_pkcs15emu_opt_t *opts)
+			struct sc_aid *aid)
 {
-	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)
-		return sc_pkcs15emu_gemsafeV1_init(p15card);
-	else {
-		int r = gemsafe_detect_card(p15card);
-		if (r)
-			return SC_ERROR_WRONG_CARD;
-		return sc_pkcs15emu_gemsafeV1_init(p15card);
-	}
+	if (gemsafe_detect_card(p15card))
+		return SC_ERROR_WRONG_CARD;
+	return sc_pkcs15emu_gemsafeV1_init(p15card);
 }
 
 static sc_pkcs15_df_t *

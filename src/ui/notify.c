@@ -328,7 +328,7 @@ static void notify_proxy(struct sc_context *ctx,
 	 * the notification
 	 * (https://github.com/julienXX/terminal-notifier/issues/196), that's why
 	 * we're including NotificationProxy which has similar features */
-	const char notificationproxy[] = "/Library/Security/tokend/OpenSC.tokend/Contents/Resources/Applications/NotificationProxy.app/Contents/MacOS/NotificationProxy";
+	const char notificationproxy[] = "/Library/OpenSC/Applications/NotificationProxy.app/Contents/MacOS/NotificationProxy";
 
 	if (ctx && ctx->app_name
 			&& (0 == strcmp(ctx->app_name, "opensc-pkcs11")
@@ -437,14 +437,16 @@ void sc_notify_id(struct sc_context *ctx, struct sc_atr *atr,
 #elif defined(ENABLE_NOTIFY) && defined(ENABLE_GIO2)
 
 #include <gio/gio.h>
+#include "libopensc/log.h"
 
 static GApplication *application = NULL;
 
 void sc_notify_init(void)
 {
-	sc_notify_close();
-	application = g_application_new("org.opensc.notify", G_APPLICATION_NON_UNIQUE);
-	if (application) {
+	if (!application) {
+		application = g_application_new("org.opensc.notify", G_APPLICATION_NON_UNIQUE);
+	}
+	if (application && FALSE == g_application_get_is_registered(application)) {
 		g_application_register(application, NULL, NULL);
 	}
 }
@@ -478,6 +480,14 @@ static void notify_gio(struct sc_context *ctx,
 			if (gicon) {
 				g_notification_set_icon(notification, gicon);
 			}
+		}
+
+		if (ctx) {
+			sc_log(ctx, "%s %s %s %s",
+					title ? title : "",
+					text ? text : "",
+					icon ? icon : "",
+					group ? group : "");
 		}
 
 		g_application_send_notification(application, group, notification);

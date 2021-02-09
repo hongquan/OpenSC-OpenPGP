@@ -211,6 +211,8 @@ isoApplet_init(sc_card_t *card)
 
 	/* Obtain applet version and specific features */
 	if (0 > isoApplet_select_applet(card, isoApplet_aid, ISOAPPLET_AID_LEN, rbuf, &rlen)) {
+		free(card->drv_data);
+		card->drv_data = NULL;
 		LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_CARD, "Error obtaining applet version.");
 	}
 	if(rlen < 3)
@@ -928,6 +930,10 @@ isoApplet_put_data_prkey_ec(sc_card_t *card, sc_cardctl_isoApplet_import_key_t *
 	apdu.lc = p - sbuf;
 	apdu.datalen = p - sbuf;
 	apdu.data = sbuf;
+	if ((apdu.datalen > 255) && !(card->caps & SC_CARD_CAP_APDU_EXT))
+	{
+		apdu.flags |= SC_APDU_FLAGS_CHAINING;
+	}
 	r = sc_transmit_apdu(card, &apdu);
 	if(r < 0)
 	{
@@ -988,7 +994,7 @@ isoApplet_ctl_import_key(sc_card_t *card, sc_cardctl_isoApplet_import_key_t *arg
 	 *
 	 * The first step is to perform a MANAGE SECURITY ENVIRONMENT as it would be done
 	 * with on-card key generation. The second step is PUT DATA (instead of
-	 * GENERATE ASYMMETRIC KEYPAIR).
+	 * GENERATE ASYMMETRIC KEY PAIR).
 	 */
 
 	/* MANAGE SECURITY ENVIRONMENT (SET). Set the algorithm and key references. */

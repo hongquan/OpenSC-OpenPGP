@@ -7,7 +7,7 @@ define([PRODUCT_TARNAME], [opensc])
 define([PRODUCT_BUGREPORT], [https://github.com/OpenSC/OpenSC/issues])
 define([PRODUCT_URL], [https://github.com/OpenSC/OpenSC])
 define([PACKAGE_VERSION_MAJOR], [0])
-define([PACKAGE_VERSION_MINOR], [19])
+define([PACKAGE_VERSION_MINOR], [21])
 define([PACKAGE_VERSION_FIX], [0])
 define([PACKAGE_SUFFIX], [])
 
@@ -21,13 +21,13 @@ define([VS_FF_PRODUCT_URL], [https://github.com/OpenSC/OpenSC])
 
 m4_sinclude(version.m4.ci)
 
-m4_define([openssl_minimum_version], [0.9.8])
+m4_define([openssl_minimum_version], [1.0.1])
 
 AC_INIT([PRODUCT_NAME],[PACKAGE_VERSION_MAJOR.PACKAGE_VERSION_MINOR.PACKAGE_VERSION_FIX[]PACKAGE_SUFFIX],[PRODUCT_BUGREPORT],[PRODUCT_TARNAME],[PRODUCT_URL])
 AC_CONFIG_AUX_DIR([.])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
-AM_INIT_AUTOMAKE(foreign 1.10)
+AM_INIT_AUTOMAKE(foreign 1.10 [subdir-objects])
 
 OPENSC_VERSION_MAJOR="PACKAGE_VERSION_MAJOR"
 OPENSC_VERSION_MINOR="PACKAGE_VERSION_MINOR"
@@ -43,10 +43,10 @@ OPENSC_VS_FF_PRODUCT_URL="VS_FF_PRODUCT_URL"
 
 # LT Version numbers, remember to change them just *before* a release.
 #   (Code changed:                      REVISION++)
-#   (Oldest interface removed:          OLDEST++)
+#   (Oldest interface changed/removed:  OLDEST++)
 #   (Interfaces added:                  CURRENT++, REVISION=0)
-OPENSC_LT_CURRENT="6"
-OPENSC_LT_OLDEST="6"
+OPENSC_LT_CURRENT="7"
+OPENSC_LT_OLDEST="7"
 OPENSC_LT_REVISION="0"
 OPENSC_LT_AGE="0"
 OPENSC_LT_AGE="$((${OPENSC_LT_CURRENT}-${OPENSC_LT_OLDEST}))"
@@ -79,7 +79,7 @@ AC_ARG_WITH(
 )
 
 if test "${enable_optimization}" = "no"; then
-	CFLAGS="-O0 -g"
+	CFLAGS="${CFLAGS} -O0 -g"
 fi
 
 dnl Check for some target-specific stuff
@@ -106,7 +106,6 @@ case "${host}" in
 			WIN32="yes"
 		else
 			AC_MSG_RESULT([Using cygwin])
-			CPPFLAGS="${CPPFLAGS} -DCRYPTOKI_FORCE_WIN32"
 			WIN_LIBPREFIX="cyg"
 			AC_DEFINE([USE_CYGWIN], [1], [Define if you are on Cygwin])
 		fi
@@ -132,8 +131,19 @@ case "${host}" in
 	;;
 esac
 
-AX_CHECK_COMPILE_FLAG(-Wunknown-warning-option, [have_unknown_warning_option="yes"], [have_unknown_warning_option="no"], [-Werror])
+AX_CODE_COVERAGE()
+
+AX_CHECK_COMPILE_FLAG([-Wunknown-warning-option], [have_unknown_warning_option="yes"], [have_unknown_warning_option="no"], [-Werror])
 AM_CONDITIONAL([HAVE_UNKNOWN_WARNING_OPTION], [test "${have_unknown_warning_option}" = "yes"])
+
+AC_ARG_ENABLE(
+	[fuzzing],
+	[AS_HELP_STRING([--enable-fuzzing],[enable compile of fuzzing tests @<:@disabled@:>@, note that CFLAGS and FUZZING_LIBS should be set accordingly, e.g. to something like CFLAGS="-fsanitize=address,fuzzer" FUZZING_LIBS="-fsanitize=fuzzer"])],
+	,
+	[enable_fuzzing="no"]
+)
+
+AC_ARG_VAR([FUZZING_LIBS], [linker flags for fuzzing])
 
 AC_ARG_ENABLE(
 	[strict],
@@ -172,10 +182,17 @@ AC_ARG_ENABLE(
 
 AC_ARG_ENABLE(
 	[openssl],
-	[AS_HELP_STRING([--enable-openssl],[enable openssl linkage @<:@detect@:>@])],
+	[AS_HELP_STRING([--enable-openssl],[enable OpenSSL linkage @<:@detect@:>@])],
 	,
 	[enable_openssl="detect"]
 )
+
+AC_ARG_ENABLE([openssl-secure-malloc],
+    [AC_HELP_STRING([--openssl-secure-malloc=<SIZE_IN_BYTES>],
+        [Enable OpenSSL secure memory by specifying its size in bytes, must be a power of 2 @<:@disabled@:>@])],
+    [], [enable_openssl_secure_malloc=no])
+AS_IF([test $enable_openssl_secure_malloc != no],
+	[AC_DEFINE_UNQUOTED([OPENSSL_SECURE_MALLOC_SIZE],[$enable_openssl_secure_malloc],[Size of OpenSSL secure memory in bytes, must be a power of 2])])
 
 AC_ARG_ENABLE(
 	[openpace],
@@ -255,10 +272,17 @@ AC_ARG_ENABLE(
 )
 
 AC_ARG_ENABLE(
-	[tests],
-	[AS_HELP_STRING([--enable-tests],[Build tests in src/tests/ directory @<:@detect@:>@])],
+	[autostart-items],
+	[AS_HELP_STRING([--enable-autostart-items],[enable autostart items @<:@enabled@:>@])],
 	,
-	[enable_tests="detect"]
+	[enable_autostart="yes"]
+)
+
+AC_ARG_ENABLE(
+	[cmocka],
+	[AS_HELP_STRING([--enable-cmocka],[Build tests in src/tests/p11test directory @<:@detect@:>@])],
+	,
+	[enable_cmocka="detect"]
 )
 
 AC_ARG_WITH(
@@ -376,7 +400,8 @@ AC_HEADER_ASSERT
 AC_CHECK_HEADERS([ \
 	errno.h fcntl.h stdlib.h \
 	inttypes.h string.h strings.h \
-	sys/time.h unistd.h getopt.h sys/mman.h
+	sys/time.h unistd.h sys/mman.h \
+	sys/endian.h endian.h
 ])
 
 dnl Checks for typedefs, structures, and compiler characteristics.
@@ -391,9 +416,22 @@ AC_FUNC_STAT
 AC_FUNC_VPRINTF
 AC_CHECK_FUNCS([ \
 	getpass gettimeofday getline memset mkdir \
-	strdup strerror getopt_long getopt_long_only \
-	strlcpy strlcat strnlen sigaction
+	strdup strerror memset_s explicit_bzero \
+	strnlen sigaction
 ])
+
+# Do not check for strlcpy and strlcat in Linux because it is not implemented
+# and autotools can not detect it in AC_CHECK_DECLS because build does not fail
+# in this test.
+# https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=22192
+case "${host_os}" in
+	linux*)
+		;;
+	*)
+		AC_CHECK_DECLS([strlcpy, strlcat], [], [], [[#include <string.h>]])
+		;;
+esac
+
 AC_CHECK_SIZEOF(void *)
 if test "${ac_cv_sizeof_void_p}" = 8; then
 	LIBRARY_BITNESS="64"
@@ -612,10 +650,7 @@ fi
 
 PKG_CHECK_MODULES(
 	[OPENSSL],
-	[
-		libcrypto >= openssl_minimum_version
-		openssl >= openssl_minimum_version
-	],
+	[libcrypto >= openssl_minimum_version],
 	[have_openssl="yes"],
 	[AC_CHECK_LIB(
 		[crypto],
@@ -656,20 +691,17 @@ else
 	OPENSSL_LIBS=""
 fi
 
-if test "${enable_tests}" = "detect"; then
+if test "${enable_cmocka}" = "detect"; then
 	if test "${have_cmocka}" = "yes" -a "${have_openssl}" = "yes"; then
-		enable_tests="yes"
+		enable_cmocka="yes"
 	else
-		enable_tests="no"
+		enable_cmocka="no"
 	fi
 fi
 
-if test "${enable_tests}" = "yes"; then
+if test "${enable_cmocka}" = "yes"; then
 	if test "${have_cmocka}" != "yes"; then
 		AC_MSG_ERROR([Tests required, but cmocka is not available])
-	fi
-	if test "${have_openssl}" != "yes"; then
-		AC_MSG_ERROR([Tests required, but openssl is not available])
 	fi
 fi
 
@@ -888,11 +920,14 @@ fi
 if test "${with_pkcs11_provider}" = "detect"; then
 	if test "${WIN32}" != "yes"; then
 		DEFAULT_PKCS11_PROVIDER="${libdir}/opensc-pkcs11${DYN_LIB_EXT}"
+		DEFAULT_ONEPIN_PKCS11_PROVIDER="${libdir}/onepin-opensc-pkcs11${DYN_LIB_EXT}"
 	else
 		DEFAULT_PKCS11_PROVIDER="%PROGRAMFILES%\\\OpenSC Project\\\OpenSC\\\pkcs11\\\opensc-pkcs11.dll"
+		DEFAULT_ONEPIN_PKCS11_PROVIDER="%PROGRAMFILES%\\\OpenSC Project\\\OpenSC\\\pkcs11\\\onepin-opensc-pkcs11.dll"
 	fi
 else
 	DEFAULT_PKCS11_PROVIDER="${with_pkcs11_provider}"
+	DEFAULT_ONEPIN_PKCS11_PROVIDER="${with_pkcs11_provider}"
 fi
 
 if test "${enable_man}" = "detect"; then
@@ -915,6 +950,13 @@ fi
 AC_ARG_VAR([GENGETOPT],
            [absolute path to gengetopt used for command line parsing of npa-tool])
 AC_PATH_PROG(GENGETOPT, gengetopt, not found)
+AC_ARG_VAR([CLANGTIDY],
+           [absolute path to clang-tidy used for static code analysis])
+AC_PATH_PROG(CLANGTIDY, clang-tidy, not found)
+TIDY_CHECKS="-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling"
+
+AX_FUNC_GETOPT_LONG
+#AH_BOTTOM([#include "common/compat_getopt.h"])
 
 OPENSC_FEATURES=""
 if test "${enable_thread_locking}" = "yes"; then
@@ -1001,6 +1043,7 @@ AC_SUBST([OPENSC_LT_OLDEST])
 AC_SUBST([WIN_LIBPREFIX])
 AC_SUBST([DEFAULT_PCSC_PROVIDER])
 AC_SUBST([DEFAULT_PKCS11_PROVIDER])
+AC_SUBST([DEFAULT_ONEPIN_PKCS11_PROVIDER])
 AC_SUBST([OPTIONAL_ZLIB_CFLAGS])
 AC_SUBST([OPTIONAL_ZLIB_LIBS])
 AC_SUBST([OPTIONAL_READLINE_CFLAGS])
@@ -1018,6 +1061,7 @@ AC_SUBST([PROFILE_DIR])
 AC_SUBST([PROFILE_DIR_DEFAULT])
 AC_SUBST([OPTIONAL_NOTIFY_CFLAGS])
 AC_SUBST([OPTIONAL_NOTIFY_LIBS])
+AC_SUBST([TIDY_CHECKS])
 
 AM_CONDITIONAL([ENABLE_MAN], [test "${enable_man}" = "yes"])
 AM_CONDITIONAL([ENABLE_THREAD_LOCKING], [test "${enable_thread_locking}" = "yes"])
@@ -1035,15 +1079,19 @@ AM_CONDITIONAL([ENABLE_MINIDRIVER_SETUP_CUSTOMACTION], [test "${enable_minidrive
 AM_CONDITIONAL([ENABLE_SM], [test "${enable_sm}" = "yes"])
 AM_CONDITIONAL([ENABLE_DNIE_UI], [test "${enable_dnie_ui}" = "yes"])
 AM_CONDITIONAL([ENABLE_NPATOOL], [test "${ENABLE_NPATOOL}" = "yes"])
-AM_CONDITIONAL([ENABLE_TESTS], [test "${enable_tests}" = "yes"])
+AM_CONDITIONAL([ENABLE_AUTOSTART], [test "${enable_autostart}" = "yes"])
+AM_CONDITIONAL([ENABLE_CMOCKA], [test "${enable_cmocka}" = "yes"])
 AM_CONDITIONAL([GIT_CHECKOUT], [test "${GIT_CHECKOUT}" = "yes"])
+AM_CONDITIONAL([ENABLE_FUZZING], [test "${enable_fuzzing}" = "yes"])
+AM_CONDITIONAL([ENABLE_SHARED], [test "${enable_shared}" = "yes"])
+AS_IF([test "${enable_shared}" = "yes"], [AC_DEFINE([ENABLE_SHARED], [1], [Enable shared libraries])])
 
 if test "${enable_pedantic}" = "yes"; then
 	enable_strict="yes";
-	CFLAGS="${CFLAGS} -pedantic"
+	CFLAGS="-pedantic ${CFLAGS}"
 fi
 if test "${enable_strict}" = "yes"; then
-	CFLAGS="${CFLAGS} -Wall -Wextra -Wno-unused-parameter -Werror"
+	CFLAGS="-Wall -Wextra -Wno-unused-parameter -Werror ${CFLAGS}"
 fi
 
 AC_CONFIG_FILES([
@@ -1052,6 +1100,7 @@ AC_CONFIG_FILES([
 	doc/tools/Makefile
 	doc/files/Makefile
 	etc/Makefile
+	tests/Makefile
 	src/Makefile
 	src/common/Makefile
 	src/ui/Makefile
@@ -1066,6 +1115,8 @@ AC_CONFIG_FILES([
 	src/tests/Makefile
 	src/tests/regression/Makefile
 	src/tests/p11test/Makefile
+	src/tests/fuzzing/Makefile
+	src/tests/unittests/Makefile
 	src/tools/Makefile
 	src/tools/versioninfo-tools.rc
 	src/tools/versioninfo-opensc-notify.rc
@@ -1084,6 +1135,7 @@ AC_CONFIG_FILES([
 	MacOSX/Distribution.xml
 	MacOSX/resources/Welcome.html
 ])
+
 AC_OUTPUT
 
 cat <<EOF
@@ -1115,6 +1167,7 @@ thread locking support:  ${enable_thread_locking}
 zlib support:            ${enable_zlib}
 readline support:        ${enable_readline}
 OpenSSL support:         ${enable_openssl}
+OpenSSL secure memory:   ${enable_openssl_secure_malloc}
 PC/SC support:           ${enable_pcsc}
 CryptoTokenKit support:  ${enable_cryptotokenkit}
 OpenCT support:          ${enable_openct}
@@ -1125,10 +1178,11 @@ SM default module:       ${DEFAULT_SM_MODULE}
 SM default path:         $(eval eval eval echo "${DEFAULT_SM_MODULE_PATH}")
 DNIe UI support:         ${enable_dnie_ui}
 Notification support:    ${enable_notify}
-Build tests:             ${enable_tests}
+Code coverage:           ${enable_code_coverage}
 
 PC/SC default provider:  ${DEFAULT_PCSC_PROVIDER}
 PKCS11 default provider: $(eval eval eval echo "${DEFAULT_PKCS11_PROVIDER}")
+PKCS11 onepin provider:  $(eval eval eval echo "${DEFAULT_ONEPIN_PKCS11_PROVIDER}")
 
 Host:                    ${host}
 Compiler:                ${CC}
@@ -1151,6 +1205,7 @@ PCSC_CFLAGS:             ${PCSC_CFLAGS}
 CRYPTOTOKENKIT_CFLAGS:   ${CRYPTOTOKENKIT_CFLAGS}
 GIO2_CFLAGS:             ${GIO2_CFLAGS}
 GIO2_LIBS:               ${GIO2_LIBS}
+FUZZING_LIBS:            ${FUZZING_LIBS}
 
 EOF
 

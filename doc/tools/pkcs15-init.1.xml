@@ -136,11 +136,12 @@
 				<command>pkcs15-init --generate-key " keyspec " --auth-id " nn</command>
 			</para>
 			<para>
-				where <replaceable>keyspec</replaceable> describes the algorithm and length of the
-				key to be created, such as <literal>rsa/512</literal>. This will create a 512 bit
-				RSA key. Currently, only RSA key generation is supported. Note that cards
-				usually support just a few different key lengths. Almost all cards will support
-				512 and 1024 bit keys, some will support 768 or 2048 as well.
+				where <replaceable>keyspec</replaceable> describes the algorithm and the parameters
+				of the key to be created. For example, <literal>rsa:2048</literal> generates a RSA key
+				with 2048-bit modulus. If you are generating an EC key, the curve designation must
+				be specified, for example <literal>ec:prime256v1</literal>. For symmetric key,
+				the length of key is specified in bytes, for example  <literal>AES:32</literal>
+				or <literal>DES3:24</literal>.
 			</para>
 			<para>
 				<replaceable>nn</replaceable> is the ID of a user PIN installed previously,
@@ -148,7 +149,7 @@
 			</para>
 			<para>
 				In addition to storing the private portion of the key on the card,
-				<command>pkcs15-init</command> will also store the the public portion of the
+				<command>pkcs15-init</command> will also store the public portion of the
 				key as a PKCS #15 public key object.
 			</para>
 		</refsect2>
@@ -165,7 +166,7 @@
 			</para>
 			<para>
 				In addition to storing the private portion of the key on the card,
-				<command>pkcs15-init</command> will also store the the public portion of the
+				<command>pkcs15-init</command> will also store the public portion of the
 				key as a PKCS #15 public key object.
 			</para>
 			<para>
@@ -242,7 +243,7 @@
 				you would use
 			</para>
 			<para>
-				<command>pkcs15-init --store-secret-key /dev/urandom --secret-key-algorithm aes/256 --auth-id 01</command>
+				<command>pkcs15-init --store-secret-key /dev/urandom --secret-key-algorithm aes:256 --auth-id 01</command>
 			</para>
 			<para>
 				By default a random ID is generated for the secret key. You may specify an ID
@@ -332,9 +333,9 @@
 					<listitem>
 						<para>
 							Tells the card to generate new key and store it on the card.
-							<replaceable>keyspec</replaceable> consists of an algorithm name
-							(currently, the only supported name is <option>RSA</option>),
-							optionally followed by a slash and the length of the key in bits.
+							<replaceable>keyspec</replaceable> consists of an algorithm name,
+							optionally followed by a colon ":", slash "/" or hyphen "-" and
+							the parameters of the key to be created.
 							It is a good idea to specify the key ID along with this command,
 							using the <option>id</option> option, otherwise an intrinsic ID
 							will be calculated from the key material. Look the description of
@@ -348,46 +349,26 @@
 
 				<varlistentry>
 					<term>
-						<option>--options-file</option> <replaceable>filename</replaceable>
+						<option>--pin</option> <replaceable>pin</replaceable>,
+						<option>--puk</option> <replaceable>puk</replaceable>,
+						<option>--so-pin</option> <replaceable>sopin</replaceable>,
+						<option>--so-puk</option> <replaceable>sopuk</replaceable>
 					</term>
 					<listitem>
 						<para>
-							Tells <command>pkcs15-init</command> to read additional options
-							from <replaceable>filename</replaceable>. The file is supposed to
-							contain one long option per line, without the leading dashes,
-							for instance:
-							<programlisting>
-pin		1234
-puk		87654321
-							</programlisting>
+							These options can be used to specify the PIN/PUK values
+							on the command line. If the value is set to
+							<literal>env:</literal><replaceable>VARIABLE</replaceable>, the value
+							of the specified environment variable is used. By default,
+							the code is prompted on the command line if needed.
 						</para>
 						<para>
-							You can specify <option>--options-file</option> several times.
-						</para>
-					</listitem>
-				</varlistentry>
-
-				<varlistentry>
-					<term>
-						<option>--pin</option>,
-						<option>--puk</option>
-						<option>--so-pin</option>,
-						<option>--so-puk</option>,
-					</term>
-					<listitem>
-						<para>
-							These options can be used to specify PIN/PUK values
-							on the command line. If set to
-							env:<replaceable>VARIABLE</replaceable>, the value
-							of the environment variable
-							<replaceable>VARIABLE</replaceable> is used. Note
-							that on most operation systems, any user can
+							Note that on most operation systems, any user can
 							display the command line of any process on the
 							system using utilities such as
-							<command>ps(1)</command>. Therefore, you should use
-							these options only on a secured system, or in an
-							options file specified with
-							<option>--options-file</option>.
+							<command>ps(1)</command>. Therefore, you should prefer
+							passing the codes via an environment variable
+							on an unsecured system.
 						</para>
 					</listitem>
 				</varlistentry>
@@ -437,7 +418,7 @@ puk		87654321
 					<listitem>
 						<para>
 							<replaceable>keyspec</replaceable> describes the algorithm and length of the
-							key to be created or downloaded, such as <literal>aes/256</literal>.
+							key to be created or downloaded, such as <literal>aes:256</literal>.
 							This will create a 256 bit AES key.
 						</para>
 					</listitem>
@@ -644,14 +625,14 @@ puk		87654321
 
 				<varlistentry>
 					<term>
-						<option>--reader</option> <replaceable>num</replaceable>,
-						<option>-r</option> <replaceable>num</replaceable>
+						<option>--reader</option> <replaceable>arg</replaceable>,
+						<option>-r</option> <replaceable>arg</replaceable>
 					</term>
 					<listitem>
 						<para>
-							Specify the reader to use. By default, the first
+							Number of the reader to use. By default, the first
 							reader with a present card is used. If
-							<replaceable>num</replaceable> is an ATR, the
+							<replaceable>arg</replaceable> is an ATR, the
 							reader with a matching card will be chosen.
 						</para>
 					</listitem>
@@ -869,6 +850,20 @@ puk		87654321
 					<listitem>
 						<para>
 							Private key stored as an extractable key
+						</para>
+					</listitem>
+				</varlistentry>
+
+                                <varlistentry>
+					<term>
+						<option>--user-consent</option> <replaceable>arg</replaceable>
+					</term>
+					<listitem>
+						<para>
+							Specify user-consent. <replaceable>arg</replaceable> is an integer value.
+                                                        If > 0, the value specifies how many times the
+                                                        object can be accessed before a new authentication is required.
+                                                        If zero, the object does not require re-authentication.
 						</para>
 					</listitem>
 				</varlistentry>

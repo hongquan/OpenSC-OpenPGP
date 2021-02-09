@@ -33,7 +33,6 @@
 #include "pkcs15.h"
 #include "log.h"
 
-int sc_pkcs15emu_openpgp_init_ex(sc_pkcs15_card_t *, struct sc_aid *, sc_pkcs15emu_opt_t *);
 static int sc_pkcs15emu_openpgp_add_data(sc_pkcs15_card_t *);
 
 
@@ -106,36 +105,32 @@ typedef struct _pgp_manuf_map {
 } pgp_manuf_map_t;
 
 static const pgp_manuf_map_t manuf_map[] = {
-	{ 0x0001, "PPC Card Systems"   },
-	{ 0x0002, "Prism"              },
-	{ 0x0003, "OpenFortress"       },
-	{ 0x0004, "Wewid AB"           },
-	{ 0x0005, "ZeitControl"        },
-	{ 0x0006, "Yubico"             },
-	{ 0x0007, "OpenKMS"            },
-	{ 0x0008, "LogoEmail"          },
-	{ 0x0009, "Fidesmo"            },
-	{ 0x000A, "Dangerous Things"   },
-	{ 0x002A, "Magrathea"          },
-	{ 0x0042, "GnuPG e.V."         },
-	{ 0x1337, "Warsaw Hackerspace" },
-	{ 0x2342, "warpzone"           },
-	{ 0x63AF, "Trustica"           },
-	{ 0xBD0E, "Paranoidlabs"       },
-	{ 0xF517, "FSIJ"               },
-	{ 0x0000, "test card"          },
-	{ 0xffff, "test card"          },
+	{ 0x0001, "PPC Card Systems"		},
+	{ 0x0002, "Prism"			},
+	{ 0x0003, "OpenFortress"		},
+	{ 0x0004, "Wewid AB"			},
+	{ 0x0005, "ZeitControl"			},
+	{ 0x0006, "Yubico"			},
+	{ 0x0007, "OpenKMS"			},
+	{ 0x0008, "LogoEmail"			},
+	{ 0x0009, "Fidesmo"			},
+	{ 0x000A, "Dangerous Things"		},
+	{ 0x000B, "Feitian Technologies"	},
+	{ 0x002A, "Magrathea"			},
+	{ 0x0042, "GnuPG e.V."			},
+	{ 0x1337, "Warsaw Hackerspace"		},
+	{ 0x2342, "warpzone"			},
+	{ 0x4354, "Confidential Technologies"	},
+	{ 0x5443, "TIF-IT e.V."			},
+	{ 0x63AF, "Trustica"			},
+	{ 0xBA53, "c-base e.V."			},
+	{ 0xBD0E, "Paranoidlabs"		},
+	{ 0xF517, "FSIJ"			},
+	{ 0xF5EC, "F-Secure"			},
+	{ 0x0000, "test card"			},
+	{ 0xffff, "test card"			},
 	{ 0, NULL }
 };
-
-
-static void
-set_string(char **strp, const char *value)
-{
-	if (*strp)
-		free(*strp);
-	*strp = value? strdup(value) : NULL;
-}
 
 /*
  * This function pretty much follows what find_tlv in the GNUpg
@@ -167,7 +162,7 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 	sc_context_t	*ctx = card->ctx;
 	char		string[256];
 	u8		c4data[10];
-	u8		c5data[70];
+	u8		c5data[100];
 	int		r, i;
 	const pgp_pin_cfg_t *pin_cfg = (card->type == SC_CARD_TYPE_OPENPGP_V1)
 	                               ? pin_cfg_v1 : pin_cfg_v2;
@@ -182,7 +177,7 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 		unsigned short manuf_id = bebytes2ushort(card->serialnr.value);
 		int j;
 
-		sc_bin_to_hex(card->serialnr.value, card->serialnr.len, string, sizeof(string)-1, 0);
+		sc_bin_to_hex(card->serialnr.value, card->serialnr.len, string, sizeof(string), 0);
 		set_string(&p15card->tokeninfo->serial_number, string);
 
 		for (j = 0; manuf_map[j].name != NULL; j++) {
@@ -211,7 +206,7 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 	if ((r = read_file(card, "006E:0073:00C4", c4data, sizeof(c4data))) < 0)
 		goto failed;
 	if (r != 7) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		sc_log(ctx, 
 			"CHV status bytes have unexpected length (expected 7, got %d)\n", r);
 		return SC_ERROR_OBJECT_NOT_VALID;
 	}
@@ -258,30 +253,27 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 	 */
 	if ((r = read_file(card, "006E:0073:00C5", c5data, sizeof(c5data))) < 0)
 		goto failed;
-	if (r != 60) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+	if (r < 60) {
+		sc_log(ctx, 
 			"finger print bytes have unexpected length (expected 60, got %d)\n", r);
 		return SC_ERROR_OBJECT_NOT_VALID;
 	}
 
-	/* XXX: check if "halfkeys" can be stored with gpg2. If not, add keypairs in one loop */
+	/* XXX: check if "halfkeys" can be stored with gpg2. If not, add key pairs in one loop */
 	for (i = 0; i < 3; i++) {
 		sc_pkcs15_prkey_info_t prkey_info;
 		sc_pkcs15_object_t     prkey_obj;
-		u8 cxdata[10];
+		u8 cxdata[12];
 		char path_template[] = "006E:0073:00Cx";
 		int j;
 
 		memset(&prkey_info, 0, sizeof(prkey_info));
 		memset(&prkey_obj,  0, sizeof(prkey_obj));
+		memset(&cxdata, 0, sizeof(cxdata));
 
 		path_template[13] = '1' + i; /* The needed tags are C1 C2 and C3 */
 		if ((r = read_file(card, path_template, cxdata, sizeof(cxdata))) < 0)
 			goto failed;
-		if (r != 6) {
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Key info bytes have unexpected length (expected 6, got %d)\n", r);
-			return SC_ERROR_INTERNAL;
-		}
 
 		/* check validity using finger prints */
 		for (j = 19; j >= 0; j--) {
@@ -296,14 +288,21 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 			prkey_info.usage          = key_cfg[i].prkey_usage;
 			prkey_info.native         = 1;
 			prkey_info.key_reference  = i;
-			prkey_info.modulus_length = bebytes2ushort(cxdata + 1);
 
 			strlcpy(prkey_obj.label, key_cfg[i].label, sizeof(prkey_obj.label));
 			prkey_obj.flags = SC_PKCS15_CO_FLAG_PRIVATE | SC_PKCS15_CO_FLAG_MODIFIABLE;
 			prkey_obj.auth_id.len      = 1;
 			prkey_obj.auth_id.value[0] = key_cfg[i].prkey_pin;
 
-			r = sc_pkcs15emu_add_rsa_prkey(p15card, &prkey_obj, &prkey_info);
+			if (cxdata[0] == SC_OPENPGP_KEYALGO_RSA && r >= 3) {
+				prkey_info.modulus_length = bebytes2ushort(cxdata + 1);
+				r = sc_pkcs15emu_add_rsa_prkey(p15card, &prkey_obj, &prkey_info);
+			}
+			if (cxdata[0] == SC_OPENPGP_KEYALGO_ECDH
+			   || cxdata[0] == SC_OPENPGP_KEYALGO_ECDSA) {
+				r = sc_pkcs15emu_add_ec_prkey(p15card, &prkey_obj, &prkey_info);
+			}
+
 			if (r < 0)
 				return SC_ERROR_INTERNAL;
 		}
@@ -318,14 +317,11 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 
 		memset(&pubkey_info, 0, sizeof(pubkey_info));
 		memset(&pubkey_obj,  0, sizeof(pubkey_obj));
+		memset(&cxdata, 0, sizeof(cxdata));
 
 		path_template[13] = '1' + i; /* The needed tags are C1 C2 and C3 */
 		if ((r = read_file(card, path_template, cxdata, sizeof(cxdata))) < 0)
 			goto failed;
-		if (r != 6) {
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Key info bytes have unexpected length (expected 6, got %d)\n", r);
-			return SC_ERROR_INTERNAL;
-		}
 
 		/* check validity using finger prints */
 		for (j = 19; j >= 0; j--) {
@@ -337,14 +333,21 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 		if (j >= 0 && cxdata[0] != 0) {
 			pubkey_info.id.len         = 1;
 			pubkey_info.id.value[0]    = i + 1;
-			pubkey_info.modulus_length = bebytes2ushort(cxdata + 1);
 			pubkey_info.usage          = key_cfg[i].pubkey_usage;
 			sc_format_path(key_cfg[i].pubkey_path, &pubkey_info.path);
 
 			strlcpy(pubkey_obj.label, key_cfg[i].label, sizeof(pubkey_obj.label));
 			pubkey_obj.flags = SC_PKCS15_CO_FLAG_MODIFIABLE;
 
-			r = sc_pkcs15emu_add_rsa_pubkey(p15card, &pubkey_obj, &pubkey_info);
+			if (cxdata[0] == SC_OPENPGP_KEYALGO_RSA && r >= 3) {
+				pubkey_info.modulus_length = bebytes2ushort(cxdata + 1);
+				r = sc_pkcs15emu_add_rsa_pubkey(p15card, &pubkey_obj, &pubkey_info);
+			}
+			if (cxdata[0] == SC_OPENPGP_KEYALGO_ECDH
+			   || cxdata[0] == SC_OPENPGP_KEYALGO_ECDSA) {
+				r = sc_pkcs15emu_add_ec_pubkey(p15card, &pubkey_obj, &pubkey_info);
+			}
+
 			if (r < 0)
 				return SC_ERROR_INTERNAL;
 		}
@@ -385,7 +388,7 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 
 failed:
 	if (r < 0) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+		sc_log(card->ctx, 
 				"Failed to initialize OpenPGP emulation: %s\n",
 				sc_strerror(r));
 	}
@@ -454,15 +457,9 @@ static int openpgp_detect_card(sc_pkcs15_card_t *p15card)
 		return SC_ERROR_WRONG_CARD;
 }
 
-int sc_pkcs15emu_openpgp_init_ex(sc_pkcs15_card_t *p15card, struct sc_aid *aid,
-				 sc_pkcs15emu_opt_t *opts)
+int sc_pkcs15emu_openpgp_init_ex(sc_pkcs15_card_t *p15card, struct sc_aid *aid)
 {
-	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)
-		return sc_pkcs15emu_openpgp_init(p15card);
-	else {
-		int r = openpgp_detect_card(p15card);
-		if (r)
-			return SC_ERROR_WRONG_CARD;
-		return sc_pkcs15emu_openpgp_init(p15card);
-	}
+	if (openpgp_detect_card(p15card))
+		return SC_ERROR_WRONG_CARD;
+	return sc_pkcs15emu_openpgp_init(p15card);
 }

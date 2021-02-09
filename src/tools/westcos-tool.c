@@ -292,13 +292,13 @@ static int unlock_pin(sc_card_t *card,
 	return 0;
 }
 
-static int cert2der(X509 *cert, u8 **value)
+static int cert2der(X509 *in_cert, u8 **value)
 {
 	int len;
 	u8 *p;
-	len = i2d_X509(cert, NULL);
+	len = i2d_X509(in_cert, NULL);
 	p = *value = malloc(len);
-	i2d_X509(cert, &p);
+	i2d_X509(in_cert, &p);
 	return len;
 }
 
@@ -441,11 +441,6 @@ int main(int argc, char *argv[])
 	{
 		printf("Failed to establish context: %s\n", sc_strerror(r));
 		return 1;
-	}
-
-	if (verbose > 1) {
-		ctx->debug = verbose;
-		sc_ctx_log_to_file(ctx, "stderr");
 	}
 
 	if (opt_driver != NULL)
@@ -678,11 +673,16 @@ int main(int argc, char *argv[])
 
 			if (!do_convert_bignum(&dst->modulus, rsa_n)
 			 || !do_convert_bignum(&dst->exponent, rsa_e))
+			{
+				free(dst->modulus.data);
+				free(dst->exponent.data);
 				goto out;
-
+			}
 		}
 
 		r = sc_pkcs15_encode_pubkey(ctx, &key, &pdata, &lg);
+		free(dst->modulus.data);
+		free(dst->exponent.data);
 		if(r) goto out;
 
 		printf("Public key length %"SC_FORMAT_LEN_SIZE_T"d\n", lg);

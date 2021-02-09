@@ -50,13 +50,11 @@
 #include <openssl/bn.h>
 #include <openssl/pkcs12.h>
 #include <openssl/x509v3.h>
-#if OPENSSL_VERSION_NUMBER >= 0x10000000L
 #include <openssl/crypto.h>
 #include <openssl/opensslconf.h> /* for OPENSSL_NO_EC */
 #ifndef OPENSSL_NO_EC
 #include <openssl/ec.h>
 #endif /* OPENSSL_NO_EC */
-#endif /* OPENSSL_VERSION_NUMBER >= 0x10000000L */
 
 #include "common/compat_strlcpy.h"
 #include "libopensc/internal.h"
@@ -117,13 +115,11 @@ static int	do_read_public_key(const char *, const char *, EVP_PKEY **);
 static int	do_read_certificate(const char *, const char *, X509 **);
 static char *	cert_common_name(X509 *x509);
 static void	parse_commandline(int argc, char **argv);
-static void	read_options_file(const char *);
 static void	ossl_print_errors(void);
 static int	verify_pin(struct sc_pkcs15_card *, char *);
 
 enum {
-	OPT_OPTIONS = 0x100,
-	OPT_PASSPHRASE,
+	OPT_PASSPHRASE = 0x100,
 	OPT_PUBKEY,
 	OPT_SECRKEY,
 	OPT_EXTRACTABLE,
@@ -147,6 +143,7 @@ enum {
 	OPT_UPDATE_EXISTING,
 	OPT_MD_CONTAINER_GUID,
 	OPT_VERSION,
+	OPT_USER_CONSENT,
 
 	OPT_PIN1      = 0x10000,	/* don't touch these values */
 	OPT_PUK1      = 0x10001,
@@ -205,6 +202,7 @@ const struct option	options[] = {
 	{ "update-existing",	no_argument,       NULL,	OPT_UPDATE_EXISTING},
 
 	{ "extractable",	no_argument, NULL,		OPT_EXTRACTABLE },
+	{ "user-consent",	required_argument, NULL, OPT_USER_CONSENT},
 	{ "insecure",		no_argument, NULL,		OPT_INSECURE },
 	{ "use-default-transport-keys",
 				no_argument, NULL,		'T' },
@@ -213,7 +211,6 @@ const struct option	options[] = {
 
 	{ "profile",		required_argument, NULL,	'p' },
 	{ "card-profile",	required_argument, NULL,	'c' },
-	{ "options-file",	required_argument, NULL,	OPT_OPTIONS },
 	{ "md-container-guid",	required_argument, NULL,	OPT_MD_CONTAINER_GUID},
 	{ "wait",		no_argument, NULL,		'w' },
 	{ "help",		no_argument, NULL,		'h' },
@@ -271,6 +268,7 @@ static const char *		option_help[] = {
 	"Store or update existing certificate",
 
 	"Private key stored as an extractable key",
+	"Set userConsent. Default = 0",
 	"Insecure mode: do not require a PIN for private key",
 	"Do not ask for transport keys if the driver thinks it knows the key",
 	"Do not prompt the user; if no PINs supplied, pinpad will be used",
@@ -278,7 +276,6 @@ static const char *		option_help[] = {
 
 	"Specify the general profile to use",
 	"Specify the card profile to use",
-	"Read additional command line options from file",
 	"For a new key specify GUID for a MD container",
 	"Wait for card insertion",
 	"Display this message",
@@ -350,9 +347,9 @@ struct secret {
 #define SC_PKCS15INIT_TYPE_DATA		16
 #define SC_PKCS15INIT_TYPE_SKEY		32
 
-static sc_context_t *	ctx = NULL;
-static sc_card_t *		card = NULL;
-static struct sc_pkcs15_card *	p15card = NULL;
+static sc_context_t *	g_ctx = NULL;
+static sc_card_t *		g_card = NULL;
+static struct sc_pkcs15_card *	g_p15card = NULL;
 static char *			opt_reader = NULL;
 static unsigned int		opt_actions;
 static int			opt_extractable = 0,
@@ -394,6 +391,7 @@ static unsigned int		opt_secret_count;
 static int			opt_ignore_ca_certs = 0;
 static int			opt_update_existing = 0;
 static int			verbose = 0;
+static int			opt_user_consent = 0;
 
 static struct sc_pkcs15init_callbacks callbacks = {
 	get_pin_callback,	/* get_pin() */
@@ -492,7 +490,7 @@ main(int argc, char **argv)
 	sc_pkcs15init_set_callbacks(&callbacks);
 
 	/* Bind the card-specific operations and load the profile */
-	r = sc_pkcs15init_bind(card, opt_profile, opt_card_profile, NULL, &profile);
+	r = sc_pkcs15init_bind(g_card, opt_profile, opt_card_profile, NULL, &profile);
 	if (r < 0) {
 		printf("Couldn't bind to the card: %s\n", sc_strerror(r));
 		return 1;
@@ -511,7 +509,7 @@ main(int argc, char **argv)
 		if (action != ACTION_ERASE
 		 && action != ACTION_INIT
 		 && action != ACTION_ASSERT_PRISTINE
-		 && p15card == NULL) {
+		 && g_p15card == NULL) {
 			/* Read the PKCS15 structure from the card */
 			if (opt_bind_to_aid)   {
 				struct sc_aid aid;
@@ -522,16 +520,16 @@ main(int argc, char **argv)
 					return 1;
 				}
 
-				r = sc_pkcs15init_finalize_profile(card, profile, &aid);
+				r = sc_pkcs15init_finalize_profile(g_card, profile, &aid);
 				if (r < 0)   {
 					fprintf(stderr, "Finalize profile error %s\n", sc_strerror(r));
 					break;
 				}
 
-				r = sc_pkcs15_bind(card, &aid, &p15card);
+				r = sc_pkcs15_bind(g_card, &aid, &g_p15card);
 			}
 			else   {
-				r = sc_pkcs15_bind(card, NULL, &p15card);
+				r = sc_pkcs15_bind(g_card, NULL, &g_p15card);
 			}
 			if (r) {
 				fprintf(stderr, "PKCS#15 binding failed: %s\n", sc_strerror(r));
@@ -542,12 +540,12 @@ main(int argc, char **argv)
 			 * sure we're not messing things up */
 
 			if (verbose)
-				printf("Found %s\n", p15card->tokeninfo->label);
+				printf("Found %s\n", g_p15card->tokeninfo->label);
 
-			sc_pkcs15init_set_p15card(profile, p15card);
+			sc_pkcs15init_set_p15card(profile, g_p15card);
 
 			if (opt_verify_pin)   {
-				r = verify_pin(p15card, opt_authid);
+				r = verify_pin(g_p15card, opt_authid);
 				if (r)   {
 					fprintf(stderr, "Failed to verify User PIN : %s\n",
 						sc_strerror(r));
@@ -565,11 +563,11 @@ main(int argc, char **argv)
 			break;
 		case ACTION_ASSERT_PRISTINE:
 			/* skip printing error message */
-			if ((r = do_assert_pristine(card)) < 0)
+			if ((r = do_assert_pristine(g_card)) < 0)
 				goto out;
 			continue;
 		case ACTION_ERASE:
-			r = do_erase(card, profile);
+			r = do_erase(g_card, profile);
 			break;
 		case ACTION_INIT:
 			r = do_init_app(profile);
@@ -607,7 +605,7 @@ main(int argc, char **argv)
 				r = do_generate_skey(profile, opt_newkey);
 			break;
 		case ACTION_FINALIZE_CARD:
-			r = do_finalize_card(card, profile);
+			r = do_finalize_card(g_card, profile);
 			break;
 		case ACTION_SANITY_CHECK:
 			r = do_sanity_check(profile);
@@ -616,7 +614,7 @@ main(int argc, char **argv)
 			profile->dirty = 1;
 			break;
 		case ACTION_ERASE_APPLICATION:
-			r = do_erase_application(card, profile);
+			r = do_erase_application(g_card, profile);
 			break;
 		default:
 			util_fatal("Action not yet implemented\n");
@@ -637,13 +635,13 @@ out:
 	if (profile) {
 		sc_pkcs15init_unbind(profile);
 	}
-	if (p15card) {
-		sc_pkcs15_unbind(p15card);
+	if (g_p15card) {
+		sc_pkcs15_unbind(g_p15card);
 	}
-	if (card) {
-		sc_disconnect_card(card);
+	if (g_card) {
+		sc_disconnect_card(g_card);
 	}
-	sc_release_context(ctx);
+	sc_release_context(g_ctx);
 	return r < 0? 1 : 0;
 }
 
@@ -657,18 +655,13 @@ open_reader_and_card(char *reader)
 	ctx_param.ver      = 0;
 	ctx_param.app_name = app_name;
 
-	r = sc_context_create(&ctx, &ctx_param);
+	r = sc_context_create(&g_ctx, &ctx_param);
 	if (r) {
 		util_error("Failed to establish context: %s\n", sc_strerror(r));
 		return 0;
 	}
 
-	if (verbose > 1) {
-		ctx->debug = verbose;
-		sc_ctx_log_to_file(ctx, "stderr");
-	}
-
-	if (util_connect_card_ex(ctx, &card, reader, opt_wait, 0, verbose))
+	if (util_connect_card_ex(g_ctx, &g_card, reader, opt_wait, 0, verbose))
 		return 0;
 
 	return 1;
@@ -726,7 +719,7 @@ struct alg_spec {
 };
 
 static const struct alg_spec alg_types_sym[] = {
-	{ "des",	SC_ALGORITHM_DES,	56 },
+	{ "des",	SC_ALGORITHM_DES,	64 },
 	{ "3des",	SC_ALGORITHM_3DES,	192 },
 	{ "aes",	SC_ALGORITHM_AES,	128 },
 	{ NULL, -1, 0 }
@@ -763,7 +756,7 @@ parse_alg_spec(const struct alg_spec *types, const char *spec, unsigned int *key
 		spec++;
 
 	if (*spec)   {
-		if (isalpha(*spec) && algorithm == SC_ALGORITHM_EC && prkey) {
+		if (isalpha((unsigned char)*spec) && algorithm == SC_ALGORITHM_EC && prkey) {
 			prkey->u.ec.params.named_curve = strdup(spec);
 		} else {
 			*keybits = strtoul(spec, &end, 10);
@@ -856,7 +849,7 @@ do_init_app(struct sc_profile *profile)
 	hints.flags	= SC_UI_PIN_RETYPE
 			   | SC_UI_PIN_CHECK_LENGTH
 			   | SC_UI_PIN_MISMATCH_RETRY;
-	hints.card	= card;
+	hints.card	= g_card;
 	hints.p15card	= NULL;
 	hints.info.pin	= &info;
 
@@ -916,11 +909,11 @@ do_init_app(struct sc_profile *profile)
 	args.serial = (const char *) opt_serial;
 	args.label = opt_label;
 
-	r = sc_lock(card);
+	r = sc_lock(g_card);
 	if (r < 0)
 		return r;
-	r = sc_pkcs15init_add_app(card, profile, &args);
-	sc_unlock(card);
+	r = sc_pkcs15init_add_app(g_card, profile, &args);
+	sc_unlock(g_card);
 	return r;
 
 failed:	fprintf(stderr, "Failed to read PIN: %s\n", sc_strerror(r));
@@ -944,8 +937,8 @@ do_store_pin(struct sc_profile *profile)
 	hints.flags	= SC_UI_PIN_RETYPE
 			   | SC_UI_PIN_CHECK_LENGTH
 			   | SC_UI_PIN_MISMATCH_RETRY;
-	hints.card	= card;
-	hints.p15card	= p15card;
+	hints.card	= g_card;
+	hints.p15card	= g_p15card;
 	hints.info.pin	= &info;
 
 	pin_id = opt_objectid ? opt_objectid : opt_authid;
@@ -989,15 +982,28 @@ do_store_pin(struct sc_profile *profile)
 	args.puk = (u8 *) opt_pins[1];
 	args.puk_len = opt_pins[1]? strlen(opt_pins[1]) : 0;
 
-	r = sc_lock(p15card->card);
+	r = sc_lock(g_p15card->card);
 	if (r < 0)
 		return r;
-	r = sc_pkcs15init_store_pin(p15card, profile, &args);
-	sc_unlock(p15card->card);
+	r = sc_pkcs15init_store_pin(g_p15card, profile, &args);
+	sc_unlock(g_p15card->card);
 	return r;
 
 failed:	fprintf(stderr, "Failed to read PIN: %s\n", sc_strerror(r));
 	return SC_ERROR_PKCS15INIT;
+}
+
+static void sc_pkcs15_inc_id(sc_pkcs15_id_t *id)
+{
+	int len;
+	for (len = id->len - 1; len >= 0; len--) {
+		if (id->value[len]++ != 0xFF)
+			break;
+	}
+	if (len < 0 && id->len < SC_PKCS15_MAX_ID_SIZE)	{
+		memmove(id->value + 1, id->value, id->len++);
+		id->value[0] = 1;
+	}
 }
 
 /*
@@ -1038,12 +1044,14 @@ do_store_private_key(struct sc_profile *profile)
 
 		/* tell openssl to cache the extensions */
 		X509_check_purpose(cert[0], -1, -1);
-		usage = X509_get_extended_key_usage(cert[0]);
+		usage = X509_get_key_usage(cert[0]);
 
 		/* No certificate usage? Assume ordinary
 		 * user cert */
 		if (usage == 0)
-			usage = 0x1F;
+			usage = KU_NON_REPUDIATION
+				| KU_DIGITAL_SIGNATURE
+				| KU_KEY_ENCIPHERMENT;
 
 		/* If the user requested a specific key usage on the
 		 * command line check if it includes _more_
@@ -1061,17 +1069,14 @@ do_store_private_key(struct sc_profile *profile)
 		args.x509_usage = opt_x509_usage? opt_x509_usage : usage;
 	}
 
-	args.access_flags |=
-		  SC_PKCS15_PRKEY_ACCESS_SENSITIVE
-		| SC_PKCS15_PRKEY_ACCESS_ALWAYSSENSITIVE
-		| SC_PKCS15_PRKEY_ACCESS_NEVEREXTRACTABLE;
+	args.access_flags |= SC_PKCS15_PRKEY_ACCESS_SENSITIVE;
 
-	r = sc_lock(p15card->card);
+	r = sc_lock(g_p15card->card);
 	if (r < 0)
 		return r;
-	r = sc_pkcs15init_store_private_key(p15card, profile, &args, NULL);
+	r = sc_pkcs15init_store_private_key(g_p15card, profile, &args, NULL);
 	if (r < 0) {
-		sc_unlock(p15card->card);
+		sc_unlock(g_p15card->card);
 		return r;
 	}
 
@@ -1081,6 +1086,7 @@ do_store_private_key(struct sc_profile *profile)
 	for (i = 0; i < ncerts && r >= 0; i++) {
 		struct sc_pkcs15init_certargs cargs;
 		char	namebuf[SC_PKCS15_MAX_LABEL_SIZE-1];
+		int cargs_label_needs_free = 0;
 
 		if (i && opt_ignore_ca_certs)
 			break;
@@ -1092,29 +1098,39 @@ do_store_private_key(struct sc_profile *profile)
 			return r;
 
 		X509_check_purpose(cert[i], -1, -1);
-		cargs.x509_usage = X509_get_extended_key_usage(cert[i]);
+		cargs.x509_usage = X509_get_key_usage(cert[i]);
 
 		cargs.label = cert_common_name(cert[i]);
 		if (!cargs.label)
 			cargs.label = X509_NAME_oneline(X509_get_subject_name(cert[i]), namebuf, sizeof(namebuf));
+		else
+			cargs_label_needs_free = 1;
 
 		/* Just the first certificate gets the same ID
 		 * as the private key. All others get
 		 * an ID of their own */
 		if (i == 0) {
 			cargs.id = args.id;
-			if (opt_cert_label != 0)
+			if (opt_cert_label != 0) {
+				if (cargs_label_needs_free)
+					free((char *) cargs.label);
 				cargs.label = opt_cert_label;
+				cargs_label_needs_free = 0;
+			}
 		} else {
 			if (is_cacert_already_present(&cargs)) {
 				printf("Certificate #%d already present, not stored.\n", i);
 				goto next_cert;
 			}
+			sc_pkcs15_inc_id(&args.id);
+			cargs.id = args.id;
 			cargs.authority = 1;
 		}
 
-		r = sc_pkcs15init_store_certificate(p15card, profile, &cargs, NULL);
+		r = sc_pkcs15init_store_certificate(g_p15card, profile, &cargs, NULL);
 next_cert:
+		if (cargs_label_needs_free)
+			free((char *) cargs.label);
 		free(cargs.der_encoded.value);
 	}
 
@@ -1122,7 +1138,7 @@ next_cert:
 	if (ncerts == 0)
 		r = do_store_public_key(profile, pkey);
 
-	sc_unlock(p15card->card);
+	sc_unlock(g_p15card->card);
 	return r;
 }
 
@@ -1137,7 +1153,7 @@ is_cacert_already_present(struct sc_pkcs15init_certargs *args)
 	sc_pkcs15_cert_t	*cert;
 	int			i, count, r;
 
-	r = sc_pkcs15_get_objects(p15card, SC_PKCS15_TYPE_CERT_X509, objs, 32);
+	r = sc_pkcs15_get_objects(g_p15card, SC_PKCS15_TYPE_CERT_X509, objs, 32);
 	if (r <= 0)
 		return 0;
 
@@ -1152,7 +1168,7 @@ is_cacert_already_present(struct sc_pkcs15init_certargs *args)
 		/* XXX we should also match the usage field here */
 
 		/* Compare the DER representation of the certificates */
-		r = sc_pkcs15_read_certificate(p15card, cinfo, &cert);
+		r = sc_pkcs15_read_certificate(g_p15card, cinfo, &cert);
 		if (r < 0 || !cert)
 			continue;
 
@@ -1194,11 +1210,11 @@ do_store_public_key(struct sc_profile *profile, EVP_PKEY *pkey)
 			init_gost_params(&args.params.gost, pkey);
 	}
 	if (r >= 0) {
-		r = sc_lock(p15card->card);
+		r = sc_lock(g_p15card->card);
 		if (r < 0)
 			return r;
-		r = sc_pkcs15init_store_public_key(p15card, profile, &args, &dummy);
-		sc_unlock(p15card->card);
+		r = sc_pkcs15init_store_public_key(g_p15card, profile, &args, &dummy);
+		sc_unlock(g_p15card->card);
 	}
 
 	return r;
@@ -1229,21 +1245,23 @@ do_store_secret_key(struct sc_profile *profile)
 	}
 
 	r = do_read_data_object(opt_infile, &args.key.data, &args.key.data_len, (keybits+7) / 8);
-	if (r < 0)
+	if (r < 0) {
+		free(args.key.data);
 		return r;
+	}
 
 	args.algorithm = algorithm;
 	args.value_len = keybits;
-	args.access_flags |=
-		  SC_PKCS15_PRKEY_ACCESS_SENSITIVE
-		| SC_PKCS15_PRKEY_ACCESS_ALWAYSSENSITIVE
-		| SC_PKCS15_PRKEY_ACCESS_NEVEREXTRACTABLE;
+	args.access_flags |= SC_PKCS15_PRKEY_ACCESS_SENSITIVE;
 
-	r = sc_lock(p15card->card);
-	if (r < 0)
+	r = sc_lock(g_p15card->card);
+	if (r < 0) {
+		free(args.key.data);
 		return r;
-	r = sc_pkcs15init_store_secret_key(p15card, profile, &args, NULL);
-	sc_unlock(p15card->card);
+	}
+	r = sc_pkcs15init_store_secret_key(g_p15card, profile, &args, NULL);
+	sc_unlock(g_p15card->card);
+	free(args.key.data);
 	return r;
 }
 
@@ -1272,11 +1290,11 @@ do_store_certificate(struct sc_profile *profile)
 	if (r >= 0)
 		r = do_convert_cert(&args.der_encoded, cert);
 	if (r >= 0) {
-		r = sc_lock(p15card->card);
+		r = sc_lock(g_p15card->card);
 		if (r < 0)
 			return r;
-		r = sc_pkcs15init_store_certificate(p15card, profile, &args, NULL);
-		sc_unlock(p15card->card);
+		r = sc_pkcs15init_store_certificate(g_p15card, profile, &args, NULL);
+		sc_unlock(g_p15card->card);
 	}
 
 	if (args.der_encoded.value)
@@ -1373,17 +1391,17 @@ do_update_certificate(struct sc_profile *profile)
 
 	sc_pkcs15_format_id(opt_objectid, &id);
 
-	if (sc_pkcs15_find_cert_by_id(p15card, &id, &obj) != 0) {
+	if (sc_pkcs15_find_cert_by_id(g_p15card, &id, &obj) != 0) {
 		util_error("Couldn't find the cert with ID %s\n", opt_objectid);
 		return SC_ERROR_OBJECT_NOT_FOUND;
 	}
 
-	r = sc_lock(p15card->card);
+	r = sc_lock(g_p15card->card);
 	if (r < 0)
 		return r;
 
 	certinfo = (sc_pkcs15_cert_info_t *) obj->data;
-	r = sc_pkcs15_read_certificate(p15card, certinfo, &oldcert);
+	r = sc_pkcs15_read_certificate(g_p15card, certinfo, &oldcert);
 	if (r < 0)
 		goto err;
 
@@ -1393,14 +1411,14 @@ do_update_certificate(struct sc_profile *profile)
 	if (r < 0)
 		goto err;
 
-	r = sc_pkcs15init_update_certificate(p15card, profile, obj,
+	r = sc_pkcs15init_update_certificate(g_p15card, profile, obj,
 		newcert_raw.value, newcert_raw.len);
 
 	if (newcert_raw.value)
 		free(newcert_raw.value);
 
 err:
-	sc_unlock(p15card->card);
+	sc_unlock(g_p15card->card);
 	return r;
 }
 
@@ -1436,17 +1454,16 @@ do_store_data_object(struct sc_profile *profile)
 		/* der_encoded contains the plain data, nothing DER encoded */
 		args.der_encoded.value = data;
 		args.der_encoded.len = datalen;
-		r = sc_lock(p15card->card);
+		r = sc_lock(g_p15card->card);
 		if (r < 0) {
 			free(data);
 			return r;
 		}
-		r = sc_pkcs15init_store_data_object(p15card, profile, &args, NULL);
-		sc_unlock(p15card->card);
+		r = sc_pkcs15init_store_data_object(g_p15card, profile, &args, NULL);
+		sc_unlock(g_p15card->card);
 	}
 
-	if (data)
-		free(data);
+	free(data);
 	return r;
 }
 
@@ -1457,11 +1474,11 @@ static int
 do_sanity_check(struct sc_profile *profile)
 {
 	int r;
-	r = sc_lock(p15card->card);
+	r = sc_lock(g_p15card->card);
 	if (r < 0)
 		return r;
-	r = sc_pkcs15init_sanity_check(p15card, profile);
-	sc_unlock(p15card->card);
+	r = sc_pkcs15init_sanity_check(g_p15card, profile);
+	sc_unlock(g_p15card->card);
 	return r;
 }
 
@@ -1617,7 +1634,7 @@ do_delete_objects(struct sc_profile *profile, unsigned int myopt_delete_flags)
 {
 	int r = 0, count = 0;
 
-	r = sc_lock(p15card->card);
+	r = sc_lock(g_p15card->card);
 	if (r < 0)
 		return r;
 
@@ -1628,17 +1645,17 @@ do_delete_objects(struct sc_profile *profile, unsigned int myopt_delete_flags)
 		if (opt_application_id != NULL) {
 			sc_format_oid(&app_oid, opt_application_id);
 
-			r = sc_pkcs15_find_data_object_by_app_oid(p15card, &app_oid, &obj);
+			r = sc_pkcs15_find_data_object_by_app_oid(g_p15card, &app_oid, &obj);
 		}
 		else if (opt_application_name != NULL && opt_label != NULL) {
-			r = sc_pkcs15_find_data_object_by_name(p15card, opt_application_name, opt_label, &obj);
+			r = sc_pkcs15_find_data_object_by_name(g_p15card, opt_application_name, opt_label, &obj);
 		}
 		else {
 			util_fatal("Specify the --application-id or --application-name and --label for the data object to be deleted\n");
 		}
 
 		if (r >= 0) {
-			r = sc_pkcs15init_delete_object(p15card, profile, obj);
+			r = sc_pkcs15init_delete_object(g_p15card, profile, obj);
 			if (r >= 0)
 				count++;
 		}
@@ -1650,12 +1667,12 @@ do_delete_objects(struct sc_profile *profile, unsigned int myopt_delete_flags)
 				util_fatal("Specify the --id for key(s) or cert(s) to be deleted\n");
 		sc_pkcs15_format_id(opt_objectid, &id);
 
-		r = do_delete_crypto_objects(p15card, profile, &id, myopt_delete_flags);
+		r = do_delete_crypto_objects(g_p15card, profile, &id, myopt_delete_flags);
 		if (r >= 0)
 			count += r;
 	}
 
-	sc_unlock(p15card->card);
+	sc_unlock(g_p15card->card);
 	printf("Deleted %d objects\n", count);
 
 	return r;
@@ -1682,23 +1699,23 @@ do_change_attributes(struct sc_profile *profile, unsigned int myopt_type)
 
 	switch(myopt_type) {
 		case SC_PKCS15INIT_TYPE_PRKEY:
-		    if ((r = sc_pkcs15_find_prkey_by_id(p15card, &id, &obj)) != 0)
+		    if ((r = sc_pkcs15_find_prkey_by_id(g_p15card, &id, &obj)) != 0)
 				return r;
 			break;
 		case SC_PKCS15INIT_TYPE_PUBKEY:
-		    if ((r = sc_pkcs15_find_pubkey_by_id(p15card, &id, &obj)) != 0)
+		    if ((r = sc_pkcs15_find_pubkey_by_id(g_p15card, &id, &obj)) != 0)
 				return r;
 			break;
 		case SC_PKCS15INIT_TYPE_CERT:
-		    if ((r = sc_pkcs15_find_cert_by_id(p15card, &id, &obj)) != 0)
+		    if ((r = sc_pkcs15_find_cert_by_id(g_p15card, &id, &obj)) != 0)
 				return r;
 			break;
 		case SC_PKCS15INIT_TYPE_DATA:
-		    if ((r = sc_pkcs15_find_data_object_by_id(p15card, &id, &obj)) != 0)
+		    if ((r = sc_pkcs15_find_data_object_by_id(g_p15card, &id, &obj)) != 0)
 				return r;
 			break;
 		case SC_PKCS15INIT_TYPE_SKEY:
-		    if ((r = sc_pkcs15_find_skey_by_id(p15card, &id, &obj)) != 0)
+		    if ((r = sc_pkcs15_find_skey_by_id(g_p15card, &id, &obj)) != 0)
 				return r;
 			break;
 	}
@@ -1712,11 +1729,11 @@ do_change_attributes(struct sc_profile *profile, unsigned int myopt_type)
 		strlcpy(obj->label, opt_label, sizeof(obj->label));
 	}
 
-	r = sc_lock(p15card->card);
+	r = sc_lock(g_p15card->card);
 	if (r < 0)
 		return r;
-	r = sc_pkcs15init_update_any_df(p15card, profile, obj->df, 0);
-	sc_unlock(p15card->card);
+	r = sc_pkcs15init_update_any_df(g_p15card, profile, obj->df, 0);
+	sc_unlock(g_p15card->card);
 
 	return r;
 }
@@ -1757,10 +1774,10 @@ do_generate_key(struct sc_profile *profile, const char *spec)
 		break;
 	}
 
-	r = sc_lock(p15card->card);
+	r = sc_lock(g_p15card->card);
 	if (r == 0)
-		r = sc_pkcs15init_generate_key(p15card, profile, &keygen_args, keybits, NULL);
-	sc_unlock(p15card->card);
+		r = sc_pkcs15init_generate_key(g_p15card, profile, &keygen_args, keybits, NULL);
+	sc_unlock(g_p15card->card);
 	return r;
 }
 
@@ -1785,10 +1802,10 @@ do_generate_skey(struct sc_profile *profile, const char *spec)
 	}
 	skey_args.value_len = keybits;
 
-	r = sc_lock(p15card->card);
+	r = sc_lock(g_p15card->card);
 	if (r == 0)
-		r = sc_pkcs15init_generate_secret_key(p15card, profile, &skey_args, NULL);
-	sc_unlock(p15card->card);
+		r = sc_pkcs15init_generate_secret_key(g_p15card, profile, &skey_args, NULL);
+	sc_unlock(g_p15card->card);
 	return r;
 }
 
@@ -1814,6 +1831,7 @@ static int init_prkeyargs(struct sc_pkcs15init_prkeyargs *args)
 		args->guid = (unsigned char *)opt_md_container_guid;
 		args->guid_len = strlen(opt_md_container_guid);
 	}
+	args->user_consent = opt_user_consent;
 
 	return 0;
 }
@@ -1835,13 +1853,22 @@ static int init_skeyargs(struct sc_pkcs15init_skeyargs *args)
 	}
 	args->label = opt_label;
 
+	if ((opt_x509_usage & SC_PKCS15INIT_X509_DATA_ENCIPHERMENT) == SC_PKCS15INIT_X509_DATA_ENCIPHERMENT) {
+	    args->usage |= SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_DECRYPT;
+	}
+
+	if ((opt_x509_usage & SC_PKCS15INIT_X509_KEY_ENCIPHERMENT) == SC_PKCS15INIT_X509_KEY_ENCIPHERMENT) {
+	    args->usage |= SC_PKCS15_PRKEY_USAGE_WRAP | SC_PKCS15_PRKEY_USAGE_UNWRAP;
+	}
+	args->user_consent = opt_user_consent;
+
 	return 0;
 }
 
 static void
 init_gost_params(struct sc_pkcs15init_keyarg_gost_params *params, EVP_PKEY *pkey)
 {
-#if OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_EC)
+#if !defined(OPENSSL_NO_EC)
 	EC_KEY *key;
 
 	assert(pkey);
@@ -1896,7 +1923,7 @@ parse_secret(struct secret *secret, const char *arg)
 		else
 			goto parse_err;
 		str += 3;
-		if (!isdigit(str[3]))
+		if (!isdigit((unsigned char)str[3]))
 			goto parse_err;
 		secret->reference = strtoul(str, &str, 10);
 		if (*str != '\0')
@@ -2060,10 +2087,14 @@ get_pin_callback(struct sc_profile *profile,
 		hints.prompt	= prompt;
 		hints.obj_label	= name;
 		hints.usage	= SC_UI_USAGE_OTHER;
-		hints.card	= card;
-		hints.p15card	= p15card;
+		hints.card	= g_card;
+		hints.p15card	= g_p15card;
 
 		if ((r = get_pin(&hints, &secret)) < 0) {
+			if (secret) {
+				sc_mem_clear(secret, strlen(secret));
+				free(secret);
+			}
 			fprintf(stderr,
 				"Failed to read PIN from user: %s\n",
 				sc_strerror(r));
@@ -2309,8 +2340,8 @@ do_read_private_key(const char *filename, const char *format,
 			r = util_getpass(&passphrase, &len, stdin);
 			if (r < 0 || !passphrase)
 				return SC_ERROR_INTERNAL;
- 			r = do_read_pkcs12_private_key(filename,
- 					passphrase, pk, certs, max_certs);
+			r = do_read_pkcs12_private_key(filename,
+					passphrase, pk, certs, max_certs);
 		}
 	} else {
 		util_error("Error when reading private key. "
@@ -2465,17 +2496,17 @@ do_read_data_object(const char *name, u8 **out, size_t *outlen, size_t expected)
         inf = fopen(name, "rb");
         if (inf == NULL) {
                 fprintf(stderr, "Unable to open '%s' for reading.\n", name);
-                return -1;
+                return SC_ERROR_FILE_NOT_FOUND;
         }
         c = fread(*out, 1, filesize, inf);
         fclose(inf);
         if (c < 0) {
                 perror("read");
-                return -1;
+                return SC_ERROR_FILE_NOT_FOUND;
         }
 
 	*outlen = filesize;
-	return 0;
+	return SC_SUCCESS;
 }
 
 static char *
@@ -2739,9 +2770,6 @@ handle_option(const struct option *opt)
 	case 'w':
 		opt_wait = 1;
 		break;
-	case OPT_OPTIONS:
-		read_options_file(optarg);
-		break;
 	case OPT_PIN1: case OPT_PUK1:
 	case OPT_PIN2: case OPT_PUK2:
 		util_get_pin(optarg, &(opt_pins[opt->val & 3]));
@@ -2840,6 +2868,10 @@ handle_option(const struct option *opt)
 	case OPT_VERSION:
 		this_action = ACTION_PRINT_VERSION;
 		break;
+	case OPT_USER_CONSENT:
+		if (optarg != NULL)
+			opt_user_consent = atoi(optarg);
+		break;
 	default:
 		util_print_usage_and_die(app_name, options, option_help, NULL);
 	}
@@ -2914,55 +2946,6 @@ parse_commandline(int argc, char **argv)
 next: ;
 	}
 }
-
-/*
- * Read a file containing more command line options.
- * This allows you to specify PINs to pkcs15-init without
- * exposing them through ps.
- */
-static void
-read_options_file(const char *filename)
-{
-	const struct option	*o;
-	char		buffer[1024], *name;
-	FILE		*fp;
-
-	if ((fp = fopen(filename, "r")) == NULL)
-		util_fatal("Unable to open %s: %m", filename);
-	while (fgets(buffer, sizeof(buffer), fp) != NULL) {
-		buffer[strcspn(buffer, "\n")] = '\0';
-
-		name = strtok(buffer, " \t");
-		while (name) {
-			if (*name == '#')
-				break;
-			for (o = options; o->name; o++)
-				if (!strcmp(o->name, name))
-					break;
-			if (!o->name) {
-				util_error("Unknown option \"%s\"\n", name);
-				util_print_usage_and_die(app_name, options, option_help, NULL);
-			}
-			if (o->has_arg != no_argument) {
-				optarg = strtok(NULL, "");
-				if (optarg) {
-					while (isspace((int) *optarg))
-						optarg++;
-					optarg = strdup(optarg);
-				}
-			}
-			if (o->has_arg == required_argument
-			 && (!optarg || !*optarg)) {
-				util_error("Option %s: missing argument\n", name);
-				util_print_usage_and_die(app_name, options, option_help, NULL);
-			}
-			handle_option(o);
-			name = strtok(NULL, " \t");
-		}
-	}
-	fclose(fp);
-}
-
 
 /*
  * OpenSSL helpers
@@ -3134,36 +3117,47 @@ static int verify_pin(struct sc_pkcs15_card *p15card, char *auth_id_str)
 	}
 
 	if (opt_pins[0] != NULL)   {
-		pin = (char *) opt_pins[0];
+		pin = strdup(opt_pins[0]);
 	}
 	else   {
-		sc_ui_hints_t   hints;
+		sc_ui_hints_t hints;
 
-                if (opt_use_pinpad)
+		if (opt_use_pinpad)
 			return SC_ERROR_OBJECT_NOT_FOUND;
 
 		if (pin_obj->label[0])
 			snprintf(pin_label, sizeof(pin_label), "User PIN [%.*s]",
-				(int) sizeof pin_obj->label, pin_obj->label);
+					(int) sizeof pin_obj->label, pin_obj->label);
 		else
 			snprintf(pin_label, sizeof(pin_label), "User PIN");
-                memset(&hints, 0, sizeof(hints));
-                hints.dialog_name = "pkcs15init.get_pin";
-                hints.prompt    = "User PIN required";
-                hints.obj_label = pin_label;
-                hints.usage     = SC_UI_USAGE_OTHER;
-                hints.card      = card;
-                hints.p15card   = p15card;
+		memset(&hints, 0, sizeof(hints));
+		hints.dialog_name = "pkcs15init.get_pin";
+		hints.prompt    = "User PIN required";
+		hints.obj_label = pin_label;
+		hints.usage     = SC_UI_USAGE_OTHER;
+		hints.card      = g_card;
+		hints.p15card   = p15card;
 
-        	get_pin(&hints, &pin);
+		if ((r = get_pin(&hints, &pin)) < 0) {
+			if (pin) {
+				sc_mem_clear(pin, strlen(pin));
+				free(pin);
+			}
+			fprintf(stderr,
+				"Failed to read PIN from user: %s\n",
+				sc_strerror(r));
+			return r;
+		}
 	}
 
-	r = sc_pkcs15_verify_pin(p15card, pin_obj, (unsigned char *)pin, pin ? strlen((char *) pin) : 0);
+	r = sc_pkcs15_verify_pin(p15card, pin_obj, (unsigned char *)pin, pin ? strlen(pin) : 0);
 	if (r < 0)
 		fprintf(stderr, "Operation failed: %s\n", sc_strerror(r));
 
-	if (NULL == opt_pins[0])
+	if (pin) {
+		sc_mem_clear(pin, strlen(pin));
 		free(pin);
+	}
 
 	return r;
 }

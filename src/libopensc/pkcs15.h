@@ -493,6 +493,8 @@ struct sc_pkcs15_object {
 	struct sc_pkcs15_object *next, *prev; /* used only internally */
 
 	struct sc_pkcs15_der content;
+
+	int session_object;	/* used internally. if nonzero, object is a session object. */
 };
 typedef struct sc_pkcs15_object sc_pkcs15_object_t;
 
@@ -591,6 +593,7 @@ typedef struct sc_pkcs15_card {
 		int use_pin_cache;
 		int pin_cache_counter;
 		int pin_cache_ignore_user_consent;
+		int private_certificate;
 	} opts;
 
 	unsigned int magic;
@@ -610,6 +613,11 @@ typedef struct sc_pkcs15_card {
 
 /* flags suitable for struct sc_pkcs15_card */
 #define SC_PKCS15_CARD_FLAG_EMULATED			0x02000000
+
+/* suitable for struct sc_pkcs15_card.opts.private_certificate */
+#define SC_PKCS15_CARD_OPTS_PRIV_CERT_PROTECT		0
+#define SC_PKCS15_CARD_OPTS_PRIV_CERT_IGNORE		1
+#define SC_PKCS15_CARD_OPTS_PRIV_CERT_DECLASSIFY	2
 
 /* X509 bits for certificate usage extension */
 #define SC_X509_DIGITAL_SIGNATURE     0x0001UL
@@ -658,7 +666,21 @@ int sc_pkcs15_decipher(struct sc_pkcs15_card *p15card,
 int sc_pkcs15_derive(struct sc_pkcs15_card *p15card,
 		       const struct sc_pkcs15_object *prkey_obj,
 		       unsigned long flags,
-		       const u8 *in, size_t inlen, u8 *out, unsigned long *poutlen);
+		       const u8 *in, size_t inlen, u8 *out, size_t *poutlen);
+
+int sc_pkcs15_unwrap(struct sc_pkcs15_card *p15card,
+		const struct sc_pkcs15_object *key,
+		struct sc_pkcs15_object *target_key,
+		unsigned long flags,
+		const u8 * in, size_t inlen,
+		const u8 * param, size_t paramlen);
+
+int sc_pkcs15_wrap(struct sc_pkcs15_card *p15card,
+		const struct sc_pkcs15_object *key,
+		struct sc_pkcs15_object *target_key,
+		unsigned long flags,
+		u8 * cryptogram, size_t* crgram_len,
+		const u8 * param, size_t paramlen);
 
 int sc_pkcs15_compute_signature(struct sc_pkcs15_card *p15card,
 				const struct sc_pkcs15_object *prkey_obj,
@@ -732,6 +754,9 @@ int sc_pkcs15_get_name_from_dn(struct sc_context *ctx,
                               const u8 *dn, size_t dn_len,
                               const struct sc_object_id *type,
                               u8 **name, size_t *name_len);
+int sc_pkcs15_map_usage(unsigned int cert_usage, int algorithm,
+			unsigned int *pub_usage_ptr, unsigned int *pr_usage_ptr,
+			int allow_nonrepudiation);
 int sc_pkcs15_get_extension(struct sc_context *ctx,
                             struct sc_pkcs15_cert *cert,
                             const struct sc_object_id *type,
@@ -748,7 +773,6 @@ int sc_pkcs15_get_bitstring_extension(struct sc_context *ctx,
 int sc_pkcs15_create_cdf(struct sc_pkcs15_card *card,
 			 struct sc_file *file,
 			 const struct sc_pkcs15_cert_info **certs);
-int sc_pkcs15_create(struct sc_pkcs15_card *p15card, struct sc_card *card);
 
 int sc_pkcs15_find_prkey_by_id(struct sc_pkcs15_card *card,
 			       const struct sc_pkcs15_id *id,
@@ -864,13 +888,6 @@ int sc_pkcs15_decode_skdf_entry(struct sc_pkcs15_card *p15card,
 				 struct sc_pkcs15_object *obj,
 				 const u8 **buf, size_t *bufsize);
 
-int sc_pkcs15_decode_enveloped_data(struct sc_context *ctx,
-				    struct sc_pkcs15_enveloped_data *result,
-				    const u8 *buf, size_t buflen);
-int sc_pkcs15_encode_enveloped_data(struct sc_context *ctx,
-				    struct sc_pkcs15_enveloped_data *data,
-				    u8 **buf, size_t *buflen);
-
 int sc_pkcs15_add_object(struct sc_pkcs15_card *p15card,
 			 struct sc_pkcs15_object *obj);
 void sc_pkcs15_remove_object(struct sc_pkcs15_card *p15card,
@@ -936,8 +953,14 @@ void sc_pkcs15_free_object_content(struct sc_pkcs15_object *);
 int sc_pkcs15_allocate_object_content(struct sc_context *, struct sc_pkcs15_object *,
 		const unsigned char *, size_t);
 
+/* find algorithm from card's supported algorithms by operation and mechanism */
 struct sc_supported_algo_info *sc_pkcs15_get_supported_algo(struct sc_pkcs15_card *,
-		unsigned, unsigned);
+		unsigned operation, unsigned mechanism);
+
+/* find algorithm from card's supported algorithms by operation, mechanism and object_id */
+struct sc_supported_algo_info *sc_pkcs15_get_specific_supported_algo(struct sc_pkcs15_card *,
+		unsigned operation, unsigned mechanism, const struct sc_object_id *algo_oid);
+
 int sc_pkcs15_add_supported_algo_ref(struct sc_pkcs15_object *,
 		struct sc_supported_algo_info *);
 
@@ -974,14 +997,6 @@ typedef struct sc_pkcs15_search_key {
 
 int sc_pkcs15_search_objects(struct sc_pkcs15_card *, sc_pkcs15_search_key_t *,
 			struct sc_pkcs15_object **, size_t);
-
-/* This structure is passed to the new sc_pkcs15emu_*_init functions */
-typedef struct sc_pkcs15emu_opt {
-	scconf_block *blk;
-	unsigned int flags;
-} sc_pkcs15emu_opt_t;
-
-#define SC_PKCS15EMU_FLAGS_NO_CHECK	0x00000001
 
 extern int sc_pkcs15_bind_synthetic(struct sc_pkcs15_card *, struct sc_aid *);
 extern int sc_pkcs15_is_emulation_only(sc_card_t *);

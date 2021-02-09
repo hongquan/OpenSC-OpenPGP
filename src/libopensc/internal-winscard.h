@@ -100,6 +100,7 @@ typedef unsigned __int8 uint8_t;
 #define SCARD_E_NOT_TRANSACTED		0x80100016 /**< An attempt was made to end a non-existent transaction. */
 #define SCARD_E_READER_UNAVAILABLE	0x80100017 /**< The specified reader is not currently available for use. */
 #define SCARD_E_NO_SERVICE		0x8010001D /**< The Smart card resource manager is not running. */
+#define SCARD_E_SERVICE_STOPPED	0x8010001E /**< The smart card resource manager has shut down. */
 #define SCARD_E_NO_READERS_AVAILABLE    0x8010002E /**< Cannot find a smart card reader. */
 #define SCARD_W_UNRESPONSIVE_CARD	0x80100066 /**< The smart card is not responding to a reset. */
 #define SCARD_W_UNPOWERED_CARD		0x80100067 /**< Power has been removed from the smart card, so that further communication is not possible. */
@@ -138,12 +139,19 @@ typedef const SCARD_IO_REQUEST *LPCSCARD_IO_REQUEST;
 
 #endif	/* HAVE_SCARD_H */
 
+#ifndef PCSC_API
 #if defined(_WIN32)
 #define PCSC_API WINAPI
 #elif defined(USE_CYGWIN)
 #define PCSC_API __stdcall
 #else
 #define PCSC_API
+#endif
+#endif
+
+#ifdef __APPLE__
+#define extern
+#define __attribute__(a)
 #endif
 
 typedef LONG (PCSC_API *SCardEstablishContext_t)(DWORD dwScope, LPCVOID pvReserved1,
@@ -173,6 +181,11 @@ typedef LONG (PCSC_API *SCardListReaders_t)(SCARDCONTEXT hContext, LPCSTR mszGro
 	LPSTR mszReaders, LPDWORD pcchReaders);
 typedef LONG (PCSC_API *SCardGetAttrib_t)(SCARDHANDLE hCard, DWORD dwAttrId,\
 	LPBYTE pbAttr, LPDWORD pcbAttrLen);
+
+#ifdef __APPLE__
+#undef extern
+#undef __attribute__
+#endif
 
 /* Copied from pcsc-lite reader.h */
 

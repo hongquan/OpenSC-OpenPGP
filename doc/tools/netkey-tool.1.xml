@@ -43,42 +43,42 @@
         </varlistentry>
         <varlistentry>
           <term>
-            <option>--pin</option> <replaceable>pin-value</replaceable>,
-            <option>-p</option> <replaceable>pin-value</replaceable>
+            <option>--pin</option> <replaceable>pin</replaceable>,
+            <option>-p</option> <replaceable>pin</replaceable>
           </term>
           <listitem><para>Specifies the current value of the global PIN.</para></listitem>
         </varlistentry>
         <varlistentry>
           <term>
-            <option>--puk</option> <replaceable>pin-value</replaceable>,
-            <option>-u</option> <replaceable>pin-value</replaceable>
+            <option>--puk</option> <replaceable>pin</replaceable>,
+            <option>-u</option> <replaceable>pin</replaceable>
           </term>
           <listitem><para>Specifies the current value of the global PUK.</para></listitem>
         </varlistentry>
         <varlistentry>
           <term>
-            <option>--pin0</option> <replaceable>pin-value</replaceable>,
-            <option>-0</option> <replaceable>pin-value</replaceable>
+            <option>--pin0</option> <replaceable>pin</replaceable>,
+            <option>-0</option> <replaceable>pin</replaceable>
           </term>
           <listitem><para>Specifies the current value of the local PIN0 (aka local PIN).</para></listitem>
         </varlistentry>
         <varlistentry>
           <term>
-            <option>--pin1</option> <replaceable>pin-value</replaceable>,
-            <option>-1</option> <replaceable>pin-value</replaceable>
+            <option>--pin1</option> <replaceable>pin</replaceable>,
+            <option>-1</option> <replaceable>pin</replaceable>
           </term>
           <listitem><para>Specifies the current value of the local PIN1 (aka local PUK).</para></listitem>
         </varlistentry>
         <varlistentry>
           <term>
-            <option>--reader</option> <replaceable>num</replaceable>,
-            <option>-r</option> <replaceable>num</replaceable>
+            <option>--reader</option> <replaceable>arg</replaceable>,
+            <option>-r</option> <replaceable>arg</replaceable>
           </term>
           <listitem>
             <para>
-              Specify the reader to use. By default, the first
+              Number of the reader to use. By default, the first
               reader with a present card is used. If
-              <replaceable>num</replaceable> is an ATR, the
+              <replaceable>arg</replaceable> is an ATR, the
               reader with a matching card will be chosen.
             </para>
           </listitem>

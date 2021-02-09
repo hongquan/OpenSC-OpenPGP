@@ -40,7 +40,7 @@ int sc_decipher(sc_card_t *card,
 	if (card == NULL || crgram == NULL || out == NULL) {
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
-	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_NORMAL);
+	LOG_FUNC_CALLED(card->ctx);
 	if (card->ops->decipher == NULL)
 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_NOT_SUPPORTED);
 	r = card->ops->decipher(card, crgram, crgram_len, out, outlen);
@@ -56,11 +56,41 @@ int sc_compute_signature(sc_card_t *card,
 	if (card == NULL) {
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
-	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_NORMAL);
+	LOG_FUNC_CALLED(card->ctx);
 	if (card->ops->compute_signature == NULL)
 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_NOT_SUPPORTED);
 	r = card->ops->compute_signature(card, data, datalen, out, outlen);
         SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, r);
+}
+
+int sc_unwrap(sc_card_t *card,
+		const u8 * crgram, size_t crgram_len, u8 * out, size_t outlen)
+{
+	int r;
+
+	if (card == NULL || crgram == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+	LOG_FUNC_CALLED(card->ctx);
+	if (card->ops->unwrap == NULL)
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_NOT_SUPPORTED);
+	r = card->ops->unwrap(card, crgram, crgram_len);
+	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, r);
+}
+
+int sc_wrap(sc_card_t *card,
+		const u8 * crgram, size_t crgram_len, u8 * out, size_t outlen)
+{
+	int r;
+
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+	LOG_FUNC_CALLED(card->ctx);
+	if (card->ops->wrap == NULL)
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_NOT_SUPPORTED);
+	r = card->ops->wrap(card, out, outlen);
+	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, r);
 }
 
 int sc_set_security_env(sc_card_t *card,
@@ -72,7 +102,7 @@ int sc_set_security_env(sc_card_t *card,
 	if (card == NULL) {
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
-	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_NORMAL);
+	LOG_FUNC_CALLED(card->ctx);
 	if (card->ops->set_security_env == NULL)
 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_NOT_SUPPORTED);
 	r = card->ops->set_security_env(card, env, se_num);
@@ -86,7 +116,7 @@ int sc_restore_security_env(sc_card_t *card, int se_num)
 	if (card == NULL) {
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
-	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_NORMAL);
+	LOG_FUNC_CALLED(card->ctx);
 	if (card->ops->restore_security_env == NULL)
 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_NOT_SUPPORTED);
 	r = card->ops->restore_security_env(card, se_num);
@@ -162,12 +192,19 @@ int sc_reset_retry_counter(sc_card_t *card, unsigned int type, int ref,
 int sc_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data,
 		int *tries_left)
 {
-	int r;
+	int r, debug;
 
 	if (card == NULL) {
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
-	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_NORMAL);
+	LOG_FUNC_CALLED(card->ctx);
+
+	debug = card->ctx->debug;
+	if (data->cmd != SC_PIN_CMD_GET_INFO
+			&& card->ctx->debug < SC_LOG_DEBUG_PIN) {
+		card->ctx->debug = 0;
+	}
+
 	if (card->ops->pin_cmd) {
 		r = card->ops->pin_cmd(card, data, tries_left);
 	} else if (!(data->flags & SC_PIN_CMD_USE_PINPAD)) {
@@ -208,12 +245,14 @@ int sc_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data,
 			break;
 		}
 		if (r == SC_ERROR_NOT_SUPPORTED)
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "unsupported PIN operation (%d)",
+			sc_log(card->ctx,  "unsupported PIN operation (%d)",
 					data->cmd);
 	} else {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Use of pin pad not supported by card driver");
+		sc_log(card->ctx,  "Use of pin pad not supported by card driver");
 		r = SC_ERROR_NOT_SUPPORTED;
 	}
+	card->ctx->debug = debug;
+
 	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, r);
 }
 

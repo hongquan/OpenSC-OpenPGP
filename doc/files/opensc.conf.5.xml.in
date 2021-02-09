@@ -168,6 +168,16 @@ app <replaceable>application</replaceable> {
 			</varlistentry>
 			<varlistentry>
 				<term>
+					<option>disable_colors = <replaceable>bool</replaceable>;</option>
+				</term>
+				<listitem><para>
+						Disable colors of log messages (Default:
+						<literal>false</literal> if attached to a console,
+						<literal>true</literal> otherwise).
+				</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term>
 					<option>disable_popups = <replaceable>bool</replaceable>;</option>
 				</term>
 				<listitem><para>
@@ -205,7 +215,7 @@ app <replaceable>application</replaceable> {
 					</para>
 					<para>
 						If an unknown (i.e. not internal or old) driver is
-						supplied, a separate configuration configuration
+						supplied, a separate configuration
 						block has to be written for the driver. A special
 						value <literal>old</literal> will load all
 						statically linked drivers that may be removed in
@@ -282,6 +292,12 @@ app <replaceable>application</replaceable> {
 							</para></listitem>
 							<listitem><para>
 									<literal>dnie</literal>: See <xref linkend="dnie"/>
+							</para></listitem>
+							<listitem><para>
+									<literal>edo</literal>: See <xref linkend="edo"/>
+							</para></listitem>
+							<listitem><para>
+									<literal>myeid</literal>: See <xref linkend="myeid"/>
 							</para></listitem>
 							<listitem><para>
 									Any other value: Configuration block for an externally loaded card driver
@@ -626,6 +642,37 @@ app <replaceable>application</replaceable> {
 
 		</refsect2>
 
+		<refsect2 id="myeid">
+			<title>Configuration Options for MyEID Card</title>
+			<variablelist>
+				<varlistentry>
+					<term>
+						<option>disable_hw_pkcs1_padding = <replaceable>bool</replaceable>;</option>
+					</term>
+					<listitem><para>
+							The MyEID card can internally
+							encapsulate the data (hash code)
+							into a DigestInfo ASN.1 structure
+							according to the selected hash
+							algorithm (currently only for SHA1).
+							DigestInfo is padded to RSA key
+							modulus length according to PKCS#1
+							v1.5, block type 01h. Size of the
+							DigestInfo must not exceed 40%
+							of the RSA key modulus length. If
+							this limit is unsatisfactory (for
+							example someone needs RSA 1024
+							with SHA512), the user can disable
+							this feature. In this case, the
+							card driver will do everything
+							necessary before sending the data
+							(hash code) to the card.
+					</para></listitem>
+				</varlistentry>
+
+			</variablelist>
+		</refsect2>
+
 		<refsect2 id="npa">
 			<title>Configuration Options for German ID Card</title>
 			<variablelist>
@@ -659,7 +706,7 @@ app <replaceable>application</replaceable> {
 							itself as signature terminal (ST).
 							We usually will use the reader's
 							capability to sign the data.
-							However, during developement you
+							However, during development you
 							may specify soft certificates and
 							keys for a ST.
 						</para>
@@ -700,6 +747,26 @@ app <replaceable>application</replaceable> {
 							<literal>/usr/bin/pinentry</literal>).
 							Only used if compiled with
 							<option>--enable-dnie-ui</option>
+					</para></listitem>
+				</varlistentry>
+			</variablelist>
+		</refsect2>
+
+		<refsect2 id="edo">
+			<title>Configuration Options for Polish eID Card</title>
+			<variablelist>
+				<varlistentry>
+					<term>
+						<option>can = <replaceable>value</replaceable>;</option>
+					</term>
+					<listitem><para>
+							CAN (Card Access Number – 6 digit number
+							printed on the right bottom corner of the
+							front side of the document) is required
+							to establish connection with the card.
+							It might be overwritten by <literal>EDO_CAN</literal>
+							environment variable. Currently, it is not
+							possible to set it in any other way.
 					</para></listitem>
 				</varlistentry>
 			</variablelist>
@@ -1083,12 +1150,17 @@ app <replaceable>application</replaceable> {
 							<itemizedlist>
 								<listitem>
 									<para>
-										<filename><envar>HOME</envar>/.eid/cache/</filename> (Unix)
+										<filename><envar>$XDG_CACHE_HOME</envar>/opensc/</filename> (If <envar>$XDG_CACHE_HOME</envar> is defined)
 									</para>
 								</listitem>
 								<listitem>
 									<para>
-										<filename><envar>USERPROFILE</envar>\.eid-cache\</filename> (Windows)
+										<filename><envar>$HOME</envar>/.cache/opensc/</filename> (Unix)
+									</para>
+								</listitem>
+								<listitem>
+									<para>
+										<filename><envar>$USERPROFILE</envar>\.eid-cache\</filename> (Windows)
 									</para>
 								</listitem>
 							</itemizedlist>
@@ -1130,6 +1202,35 @@ app <replaceable>application</replaceable> {
 							<literal>CKA_ALWAYS_AUTHENTICATE</literal> may
 							need to set this to get signatures to work with
 							some cards (Default: <literal>false</literal>).
+					</para>
+					<para>
+							It is recommended to enable also PIN caching using
+							<literal>use_pin_caching</literal> option for OpenSC
+							to be able to provide PIN for the card when needed.
+					</para></listitem>
+				</varlistentry>
+				<varlistentry>
+					<term>
+						<option>private_certificate = <replaceable>value</replaceable>;</option>
+					</term>
+					<listitem><para>
+							How to handle a PIN-protected certificate. Known
+							parameters:
+							<itemizedlist>
+								<listitem><para>
+										<literal>protect</literal>: The certificate stays PIN-protected.
+								</para></listitem>
+								<listitem><para>
+										<literal>declassify</literal>: Allow
+										reading the certificate without
+										enforcing verification of the PIN.
+								</para></listitem>
+								<listitem><para>
+										<literal>ignore</literal>: Ignore PIN-protected certificates.
+								</para></listitem>
+							</itemizedlist>
+							(Default: <literal>ignore</literal> in Tokend,
+							<literal>protect</literal> otherwise).
 					</para></listitem>
 				</varlistentry>
 				<varlistentry>
@@ -1168,8 +1269,8 @@ app <replaceable>application</replaceable> {
 					</term>
 					<listitem><para>
 							List of the builtin pkcs15 emulators to test
-							(Default: <literal>westcos, openpgp, infocamere,
-								starcert, tcos, esteid, itacns, postecert,
+							(Default: <literal>westcos, openpgp, 
+								starcert, tcos, esteid, itacns, 
 								PIV-II, cac, gemsafeGPK, gemsafeV1, actalis,
 								atrust-acos, tccardos, entersafe, pteid,
 								oberthur, sc-hsm, dnie, gids, iasecc, jpki,
@@ -1299,17 +1400,6 @@ app <replaceable>application</replaceable> {
 							Score for <application>OpenSC.tokend</application>
 							(Default: <literal>300</literal>).  The tokend with
 							the highest score shall be used.
-					</para></listitem>
-				</varlistentry>
-				<varlistentry>
-					<term>
-						<option>ignore_private_certificate = <replaceable>bool</replaceable>;</option>
-					</term>
-					<listitem><para>
-							Tokend ignore to read PIN protected certificate
-							that is set
-							<literal>SC_PKCS15_CO_FLAG_PRIVATE</literal> flag
-							(Default: <literal>true</literal>).
 					</para></listitem>
 				</varlistentry>
 			</variablelist>

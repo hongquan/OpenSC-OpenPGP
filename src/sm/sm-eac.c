@@ -32,6 +32,8 @@
 
 #ifdef ENABLE_OPENSSL
 #include <openssl/evp.h>
+#else
+#define ssl_error(a)
 #endif
 
 char eac_default_flags = 0;
@@ -246,8 +248,6 @@ DECLARE_ASN1_FUNCTIONS(EAC_GEN_AUTH_CA_R)
 IMPLEMENT_ASN1_FUNCTIONS(EAC_GEN_AUTH_CA_R)
 
 
-
-#define maxresp SC_MAX_APDU_BUFFER_SIZE - 2
 
 /** @brief NPA secure messaging context */
 struct eac_sm_ctx {
@@ -476,11 +476,11 @@ static int format_mse_cdata(struct sc_context *ctx, int protocol,
 		r = SC_ERROR_INTERNAL;
 		goto err;
 	}
-	if (length < 0) {
+	if (length <= 0) {
 		r = SC_ERROR_INTERNAL;
 		goto err;
 	}
-	sc_debug_hex(ctx, SC_LOG_DEBUG_NORMAL, "MSE command data", data_no_sequence, length);
+	sc_debug_hex(ctx, SC_LOG_DEBUG_SM, "MSE command data", data_no_sequence, length);
 
 
 	p = realloc(*cdata, length);
@@ -519,8 +519,6 @@ static int eac_mse(sc_card_t *card,
 		r = SC_ERROR_INVALID_ARGUMENTS;
 		goto err;
 	}
-
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, ISO_MSE, p1, p2);
 	
 	r = format_mse_cdata(card->ctx, protocol, key_reference1,
 			key_reference1_len, key_reference2, key_reference2_len,
@@ -528,10 +526,8 @@ static int eac_mse(sc_card_t *card,
 			chat, &d);
 	if (r < 0)
 		goto err;
-	apdu.data = d;
-	apdu.datalen = r;
-	apdu.lc = r;
-
+	sc_format_apdu_ex(&apdu, 0x00, ISO_MSE, p1, p2,
+			d, r, NULL, 0);
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r < 0)
@@ -616,11 +612,7 @@ static int eac_gen_auth_1_encrypted_nonce(sc_card_t *card,
 	EAC_GEN_AUTH_PACE_R *r_data = NULL;
 	unsigned char *d = NULL, *p;
 	int r, l;
-	unsigned char resp[maxresp];
-
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_4_SHORT, ISO_GENERAL_AUTHENTICATE,
-			0x00, 0x00);
-	apdu.cla = ISO_COMMAND_CHAINING;
+	unsigned char resp[SC_MAX_APDU_RESP_SIZE];
 
 	c_data = EAC_GEN_AUTH_PACE_C_new();
 	if (!c_data) {
@@ -633,14 +625,13 @@ static int eac_gen_auth_1_encrypted_nonce(sc_card_t *card,
 		r = SC_ERROR_INTERNAL;
 		goto err;
 	}
-	apdu.data = d;
-	apdu.datalen = r;
-	apdu.lc = r;
 
-	sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "General authenticate (Encrypted Nonce) command data", apdu.data, apdu.datalen);
+	sc_format_apdu_ex(&apdu, 0x00, ISO_GENERAL_AUTHENTICATE, 0x00, 0x00,
+			d, r, resp, sizeof resp);
+	apdu.cla = ISO_COMMAND_CHAINING;
 
-	apdu.resplen = sizeof resp;
-	apdu.resp = resp;
+	sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "General authenticate (Encrypted Nonce) command data", apdu.data, apdu.datalen);
+
 	r = sc_transmit_apdu(card, &apdu);
 	if (r < 0)
 		goto err;
@@ -649,7 +640,7 @@ static int eac_gen_auth_1_encrypted_nonce(sc_card_t *card,
 	if (r < 0)
 		goto err;
 
-	sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "General authenticate (Encrypted Nonce) response data", apdu.resp, apdu.resplen);
+	sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "General authenticate (Encrypted Nonce) response data", apdu.resp, apdu.resplen);
 
 	if (!d2i_EAC_GEN_AUTH_PACE_R(&r_data,
 				(const unsigned char **) &apdu.resp, apdu.resplen)) {
@@ -700,11 +691,7 @@ static int eac_gen_auth_2_map_nonce(sc_card_t *card,
 	EAC_GEN_AUTH_PACE_R *r_data = NULL;
 	unsigned char *d = NULL, *p;
 	int r, l;
-	unsigned char resp[maxresp];
-
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_4_SHORT, ISO_GENERAL_AUTHENTICATE,
-			0x00, 0x00);
-	apdu.cla = ISO_COMMAND_CHAINING;
+	unsigned char resp[SC_MAX_APDU_RESP_SIZE];
 
 	c_data = EAC_GEN_AUTH_PACE_C_new();
 	if (!c_data) {
@@ -725,14 +712,12 @@ static int eac_gen_auth_2_map_nonce(sc_card_t *card,
 		r = SC_ERROR_INTERNAL;
 		goto err;
 	}
-	apdu.data = d;
-	apdu.datalen = r;
-	apdu.lc = r;
+	sc_format_apdu_ex(&apdu, 0x00, ISO_GENERAL_AUTHENTICATE, 0x00, 0x00,
+		   	d, r, resp, sizeof resp);
+	apdu.cla = ISO_COMMAND_CHAINING;
 
-	sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "General authenticate (Map Nonce) command data", apdu.data, apdu.datalen);
+	sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "General authenticate (Map Nonce) command data", apdu.data, apdu.datalen);
 
-	apdu.resplen = sizeof resp;
-	apdu.resp = resp;
 	r = sc_transmit_apdu(card, &apdu);
 	if (r < 0)
 		goto err;
@@ -741,7 +726,7 @@ static int eac_gen_auth_2_map_nonce(sc_card_t *card,
 	if (r < 0)
 		goto err;
 
-	sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "General authenticate (Map Nonce) response data", apdu.resp, apdu.resplen);
+	sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "General authenticate (Map Nonce) response data", apdu.resp, apdu.resplen);
 
 	if (!d2i_EAC_GEN_AUTH_PACE_R(&r_data,
 				(const unsigned char **) &apdu.resp, apdu.resplen)) {
@@ -792,11 +777,7 @@ static int eac_gen_auth_3_perform_key_agreement(sc_card_t *card,
 	EAC_GEN_AUTH_PACE_R *r_data = NULL;
 	unsigned char *d = NULL, *p;
 	int r, l;
-	unsigned char resp[maxresp];
-
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_4_SHORT, ISO_GENERAL_AUTHENTICATE,
-			0x00, 0x00);
-	apdu.cla = ISO_COMMAND_CHAINING;
+	unsigned char resp[SC_MAX_APDU_RESP_SIZE];
 
 	c_data = EAC_GEN_AUTH_PACE_C_new();
 	if (!c_data) {
@@ -817,14 +798,12 @@ static int eac_gen_auth_3_perform_key_agreement(sc_card_t *card,
 		r = SC_ERROR_INTERNAL;
 		goto err;
 	}
-	apdu.data = d;
-	apdu.datalen = r;
-	apdu.lc = r;
+	sc_format_apdu_ex(&apdu, 0x00, ISO_GENERAL_AUTHENTICATE, 0x00, 0x00,
+			d, r, resp, sizeof resp);
+	apdu.cla = ISO_COMMAND_CHAINING;
 
-	sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "General authenticate (Perform Key Agreement) command data", apdu.data, apdu.datalen);
+	sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "General authenticate (Perform Key Agreement) command data", apdu.data, apdu.datalen);
 
-	apdu.resplen = sizeof resp;
-	apdu.resp = resp;
 	r = sc_transmit_apdu(card, &apdu);
 	if (r < 0)
 		goto err;
@@ -833,7 +812,7 @@ static int eac_gen_auth_3_perform_key_agreement(sc_card_t *card,
 	if (r < 0)
 		goto err;
 
-	sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "General authenticate (Perform Key Agreement) response data", apdu.resp, apdu.resplen);
+	sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "General authenticate (Perform Key Agreement) response data", apdu.resp, apdu.resplen);
 
 	if (!d2i_EAC_GEN_AUTH_PACE_R(&r_data,
 				(const unsigned char **) &apdu.resp, apdu.resplen)) {
@@ -886,10 +865,7 @@ static int eac_gen_auth_4_mutual_authentication(sc_card_t *card,
 	EAC_GEN_AUTH_PACE_R *r_data = NULL;
 	unsigned char *d = NULL, *p;
 	int r, l;
-	unsigned char resp[maxresp];
-
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_4_SHORT, ISO_GENERAL_AUTHENTICATE,
-			0x00, 0x00);
+	unsigned char resp[SC_MAX_APDU_RESP_SIZE];
 
 	c_data = EAC_GEN_AUTH_PACE_C_new();
 	if (!c_data) {
@@ -910,14 +886,12 @@ static int eac_gen_auth_4_mutual_authentication(sc_card_t *card,
 		r = SC_ERROR_INTERNAL;
 		goto err;
 	}
-	apdu.data = d;
-	apdu.datalen = r;
-	apdu.lc = r;
 
-	sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "General authenticate (Perform Key Agreement) command data", apdu.data, apdu.datalen);
+	sc_format_apdu_ex(&apdu, 0x00, ISO_GENERAL_AUTHENTICATE, 0x00, 0x00,
+			d, r, resp, sizeof resp);
 
-	apdu.resplen = sizeof resp;
-	apdu.resp = resp;
+	sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "General authenticate (Perform Key Agreement) command data", apdu.data, apdu.datalen);
+
 	r = sc_transmit_apdu(card, &apdu);
 	if (r < 0)
 		goto err;
@@ -926,7 +900,7 @@ static int eac_gen_auth_4_mutual_authentication(sc_card_t *card,
 	if (r < 0)
 		goto err;
 
-	sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "General authenticate (Perform Key Agreement) response data", apdu.resp, apdu.resplen);
+	sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "General authenticate (Perform Key Agreement) response data", apdu.resp, apdu.resplen);
 
 	if (!d2i_EAC_GEN_AUTH_PACE_R(&r_data,
 				(const unsigned char **) &apdu.resp, apdu.resplen)) {
@@ -948,7 +922,7 @@ static int eac_gen_auth_4_mutual_authentication(sc_card_t *card,
 	p = r_data->auth_token->data;
 	l = r_data->auth_token->length;
 	if (r_data->cur_car) {
-		sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "Most recent Certificate Authority Reference",
+		sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "Most recent Certificate Authority Reference",
 				r_data->cur_car->data, r_data->cur_car->length);
 		*recent_car = malloc(r_data->cur_car->length);
 		if (!*recent_car) {
@@ -961,7 +935,7 @@ static int eac_gen_auth_4_mutual_authentication(sc_card_t *card,
 	} else
 		*recent_car_len = 0;
 	if (r_data->prev_car) {
-		sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "Previous Certificate Authority Reference",
+		sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "Previous Certificate Authority Reference",
 				r_data->prev_car->data, r_data->prev_car->length);
 		*prev_car = malloc(r_data->prev_car->length);
 		if (!*prev_car) {
@@ -1159,14 +1133,8 @@ int perform_pace(sc_card_t *card,
 			}
 		}
 
-		sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "EF.CardAccess", pace_output->ef_cardaccess,
+		sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "EF.CardAccess", pace_output->ef_cardaccess,
 				pace_output->ef_cardaccess_length);
-
-		/* XXX Card capabilities should be determined by the OpenSC card driver. We
-		 * set it here to be able to use the nPA without patching OpenSC. By
-		 * now we have read the EF.CardAccess so the assumption to have an nPA
-		 * seems valid. */
-		card->caps |= SC_CARD_CAP_APDU_EXT;
 
 		eac_ctx = EAC_CTX_new();
 		if (!eac_ctx
@@ -1203,7 +1171,7 @@ int perform_pace(sc_card_t *card,
 					"(General Authenticate step 1 failed).");
 			goto err;
 		}
-		sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "Encrypted nonce from MRTD", (u8 *)enc_nonce->data, enc_nonce->length);
+		sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "Encrypted nonce from MRTD", (u8 *)enc_nonce->data, enc_nonce->length);
 		enc_nonce->max = enc_nonce->length;
 
 		sec = get_psec(card, (char *) pace_input.pin, pace_input.pin_length,
@@ -1238,7 +1206,7 @@ int perform_pace(sc_card_t *card,
 			goto err;
 		}
 		mdata_opp->max = mdata_opp->length;
-		sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "Mapping data from MRTD", (u8 *) mdata_opp->data, mdata_opp->length);
+		sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "Mapping data from MRTD", (u8 *) mdata_opp->data, mdata_opp->length);
 
 		if (!PACE_STEP3A_map_generator(eac_ctx, mdata_opp)) {
 			sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Could not map generator.");
@@ -1264,7 +1232,7 @@ int perform_pace(sc_card_t *card,
 			goto err;
 		}
 		pub_opp->max = pub_opp->length;
-		sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "Ephemeral public key from MRTD", (u8 *) pub_opp->data, pub_opp->length);
+		sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "Ephemeral public key from MRTD", (u8 *) pub_opp->data, pub_opp->length);
 
 
 		if (!PACE_STEP3B_compute_shared_secret(eac_ctx, pub_opp)
@@ -1319,6 +1287,10 @@ int perform_pace(sc_card_t *card,
 			r = SC_ERROR_INTERNAL;
 			goto err;
 		}
+		if (comp_pub_opp->length == 0) {
+			r = SC_ERROR_INTERNAL;
+			goto err;
+		}
 		p = realloc(pace_output->id_icc, comp_pub_opp->length);
 		if (!p) {
 			sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Not enough memory for ID ICC.\n");
@@ -1329,8 +1301,12 @@ int perform_pace(sc_card_t *card,
 		pace_output->id_icc_length = comp_pub_opp->length;
 		/* Flawfinder: ignore */
 		memcpy(pace_output->id_icc, comp_pub_opp->data, comp_pub_opp->length);
-		sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "ID ICC", pace_output->id_icc,
+		sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "ID ICC", pace_output->id_icc,
 				pace_output->id_icc_length);
+		if (comp_pub->length == 0) {
+			r = SC_ERROR_INTERNAL;
+			goto err;
+		}
 		p = realloc(pace_output->id_pcd, comp_pub->length);
 		if (!p) {
 			sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Not enough memory for ID PCD.\n");
@@ -1341,7 +1317,7 @@ int perform_pace(sc_card_t *card,
 		pace_output->id_pcd_length = comp_pub->length;
 		/* Flawfinder: ignore */
 		memcpy(pace_output->id_pcd, comp_pub->data, comp_pub->length);
-		sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "ID PCD", pace_output->id_pcd,
+		sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "ID PCD", pace_output->id_pcd,
 				pace_output->id_pcd_length);
 
 		r = eac_sm_start(card, eac_ctx, pace_input.certificate_description,
@@ -1379,7 +1355,7 @@ err:
 	if (r < 0)
 		EAC_CTX_clear_free(eac_ctx);
 
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_SM, r);
 }
 
 static int eac_mse_set_at_ta(sc_card_t *card, int protocol,
@@ -1410,10 +1386,7 @@ static int eac_get_challenge(sc_card_t *card,
 		goto err;
 	}
 
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0x84, 0x00, 0x00);
-	apdu.le = len;
-	apdu.resplen = len;
-	apdu.resp = challenge;
+	sc_format_apdu_ex(&apdu, 0x00, 0x84, 0x00, 0x00, NULL, 0, challenge, len);
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r < 0)
@@ -1439,17 +1412,14 @@ static int eac_verify(sc_card_t *card,
 		goto err;
 	}
 
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_EXT, 0x2A, 0x00, 0xbe);
-
-	apdu.data = cert;
-	if (0x80 & ASN1_get_object(&apdu.data, &length, &tag, &class, cert_len)) {
+	if (0x80 & ASN1_get_object(&cert, &length, &tag, &class, cert_len)) {
 		sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Error decoding Certificate");
 		ssl_error(card->ctx);
 		r = SC_ERROR_INTERNAL;
 		goto err;
 	}
-	apdu.datalen = length;
-	apdu.lc = length;
+
+	sc_format_apdu_ex(&apdu, 0x00, 0x2A, 0x00, 0xbe, (unsigned char *) cert, length, NULL, 0);
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r < 0)
@@ -1473,11 +1443,7 @@ static int eac_external_authenticate(sc_card_t *card,
 		goto err;
 	}
 
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x82, 0x00, 0x00);
-
-	apdu.data = signature;
-	apdu.datalen = signature_len;
-	apdu.lc = signature_len;
+	sc_format_apdu_ex(&apdu, 0x00, 0x82, 0x00, 0x00, signature, signature_len, NULL, 0);
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r < 0)
@@ -1487,6 +1453,16 @@ static int eac_external_authenticate(sc_card_t *card,
 
 err:
 	return r;
+}
+
+static void eac_sm_clear_free_without_ctx(const struct iso_sm_ctx *ctx)
+{
+	if (ctx) {
+		struct eac_sm_ctx *eacsmctx = ctx->priv_data;
+		if (eacsmctx)
+			eacsmctx->ctx = NULL;
+		eac_sm_clear_free(ctx);
+	}
 }
 
 #define TA_NONCE_LENGTH 8
@@ -1504,6 +1480,8 @@ int perform_terminal_authentication(sc_card_t *card,
 	struct eac_sm_ctx *eacsmctx = NULL;
 	unsigned char *ef_cardaccess = NULL;
 	EAC_CTX *eac_ctx = NULL;
+	const unsigned char *chr = NULL;
+	size_t chr_len = 0;
 
 	if (!card || !certs_lens || !certs) {
 		r = SC_ERROR_INVALID_ARGUMENTS;
@@ -1511,6 +1489,7 @@ int perform_terminal_authentication(sc_card_t *card,
 	}
 	if (!card->sm_ctx.info.cmd_data) {
 		card->sm_ctx.info.cmd_data = iso_sm_ctx_create();
+		card->sm_ctx.ops.close = iso_sm_close;
 	}
 	if (!card->sm_ctx.info.cmd_data) {
 		r = SC_ERROR_INTERNAL;
@@ -1525,7 +1504,7 @@ int perform_terminal_authentication(sc_card_t *card,
 			goto err;
 		}
 
-		sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "EF.CardAccess", ef_cardaccess,
+		sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "EF.CardAccess", ef_cardaccess,
 				ef_cardaccess_length);
 
 		/* XXX Card capabilities should be determined by the OpenSC card driver. We
@@ -1549,6 +1528,10 @@ int perform_terminal_authentication(sc_card_t *card,
 			r = SC_ERROR_INTERNAL;
 			goto err;
 		}
+		/* when iso_sm_ctx_clear_free is called, we want everything to be freed
+		 * except the EAC_CTX, because it is needed for performing SM *after*
+		 * iso_sm_start was called. */
+		isosmctx->clear_free = eac_sm_clear_free_without_ctx;
 		eac_ctx = NULL;
 	}
 	eacsmctx = isosmctx->priv_data;
@@ -1579,6 +1562,9 @@ int perform_terminal_authentication(sc_card_t *card,
 		if (r < 0)
 			goto err;
 
+		chr = cvc_cert->body->certificate_holder_reference->data;
+		chr_len = cvc_cert->body->certificate_holder_reference->length;
+
 		certs++;
 		certs_lens++;
 	}
@@ -1603,9 +1589,7 @@ int perform_terminal_authentication(sc_card_t *card,
 	}
 
 
-	r = eac_mse_set_at_ta(card, eacsmctx->ctx->ta_ctx->protocol,
-			cvc_cert->body->certificate_holder_reference->data,
-			cvc_cert->body->certificate_holder_reference->length,
+	r = eac_mse_set_at_ta(card, eacsmctx->ctx->ta_ctx->protocol, chr, chr_len,
 			(unsigned char *) eacsmctx->eph_pub_key->data, eacsmctx->eph_pub_key->length,
 			auxiliary_data, auxiliary_data_len);
 	if (r < 0) {
@@ -1636,6 +1620,8 @@ int perform_terminal_authentication(sc_card_t *card,
 		BUF_MEM_free(eacsmctx->auxiliary_data);
 	eacsmctx->auxiliary_data = BUF_MEM_create_init(auxiliary_data,
 			auxiliary_data_len);
+	if (!eacsmctx->id_icc)
+		eacsmctx->id_icc = BUF_MEM_new();
 	signature = TA_STEP5_sign(eacsmctx->ctx, eacsmctx->eph_pub_key,
 			eacsmctx->id_icc, eacsmctx->auxiliary_data);
 	if (!signature) {
@@ -1656,7 +1642,7 @@ err:
 	BUF_MEM_clear_free(signature);
 
 	if (card)
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_SM, r);
 	else
 		return r;
 }
@@ -1675,10 +1661,7 @@ static int eac_gen_auth_ca(sc_card_t *card, const BUF_MEM *eph_pub_key,
 	EAC_GEN_AUTH_CA_R *r_data = NULL;
 	unsigned char *d = NULL;
 	int r;
-	unsigned char resp[maxresp];
-
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_4_SHORT, ISO_GENERAL_AUTHENTICATE,
-			0, 0);
+	unsigned char resp[SC_MAX_APDU_RESP_SIZE];
 
 	c_data = EAC_GEN_AUTH_CA_C_new();
 	if (!c_data) {
@@ -1700,14 +1683,10 @@ static int eac_gen_auth_ca(sc_card_t *card, const BUF_MEM *eph_pub_key,
 		r = SC_ERROR_INTERNAL;
 		goto err;
 	}
-	apdu.data = d;
-	apdu.datalen = r;
-	apdu.lc = r;
+	sc_format_apdu_ex(&apdu, 0x00, ISO_GENERAL_AUTHENTICATE, 0, 0, d, r, resp, sizeof resp);
 
-	sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "General authenticate (Perform Key Agreement) command data", apdu.data, apdu.datalen);
+	sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "General authenticate (Perform Key Agreement) command data", apdu.data, apdu.datalen);
 
-	apdu.resplen = sizeof resp;
-	apdu.resp = resp;
 	r = sc_transmit_apdu(card, &apdu);
 	if (r < 0)
 		goto err;
@@ -1716,7 +1695,7 @@ static int eac_gen_auth_ca(sc_card_t *card, const BUF_MEM *eph_pub_key,
 	if (r < 0)
 		goto err;
 
-	sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "General authenticate (Perform Key Agreement) response data", apdu.resp, apdu.resplen);
+	sc_debug_hex(card->ctx, SC_LOG_DEBUG_SM, "General authenticate (Perform Key Agreement) response data", apdu.resp, apdu.resplen);
 
 	if (!d2i_EAC_GEN_AUTH_CA_R(&r_data,
 				(const unsigned char **) &apdu.resp, apdu.resplen)) {
@@ -1804,7 +1783,7 @@ err:
 	BUF_MEM_clear_free(picc_pubkey);
 
 	if (card)
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_SM, r);
 	else
 		return r;
 }
@@ -1889,7 +1868,7 @@ err:
 	BUF_MEM_clear_free(eph_pub_key);
 
 	if (card)
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_SM, r);
 	else
 		return r;
 }
@@ -1923,7 +1902,7 @@ eac_sm_encrypt(sc_card_t *card, const struct iso_sm_ctx *ctx,
 
 	databuf = BUF_MEM_create_init(data, datalen);
 	encbuf = EAC_encrypt(eacsmctx->ctx, databuf);
-	if (!databuf || !encbuf) {
+	if (!databuf || !encbuf || !encbuf->length) {
 		sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Could not encrypt data.");
 		ssl_error(card->ctx);
 		r = SC_ERROR_INTERNAL;
@@ -1965,7 +1944,7 @@ eac_sm_decrypt(sc_card_t *card, const struct iso_sm_ctx *ctx,
 
 	encbuf = BUF_MEM_create_init(enc, enclen);
 	databuf = EAC_decrypt(eacsmctx->ctx, encbuf);
-	if (!encbuf || !databuf) {
+	if (!encbuf || !databuf || !databuf->length) {
 		sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Could not decrypt data.");
 		ssl_error(card->ctx);
 		r = SC_ERROR_INTERNAL;
@@ -2012,7 +1991,7 @@ eac_sm_authenticate(sc_card_t *card, const struct iso_sm_ctx *ctx,
 	}
 
 	macbuf = EAC_authenticate(eacsmctx->ctx, inbuf);
-	if (!macbuf) {
+	if (!macbuf || !macbuf->length) {
 		sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE,
 				"Could not compute message authentication code (MAC).");
 		ssl_error(card->ctx);
@@ -2077,7 +2056,7 @@ eac_sm_verify_authentication(sc_card_t *card, const struct iso_sm_ctx *ctx,
 		goto err;
 	}
 
-	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Authentication data verified");
+	sc_debug(card->ctx, SC_LOG_DEBUG_SM, "Authentication data verified");
 
 	r = SC_SUCCESS;
 
@@ -2101,7 +2080,7 @@ add_tag(unsigned char **asn1new, int constructed, int tag,
 		return -1;
 
 	newlen = ASN1_object_size(constructed, len, tag);
-	if (newlen < 0)
+	if (newlen <= 0)
 		return newlen;
 
 	p = OPENSSL_realloc(*asn1new, newlen);
@@ -2308,14 +2287,14 @@ err:
 	if (msesetat)
 		EAC_MSE_C_free(msesetat);
 
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_SM, r);
 }
 
 static int
 eac_sm_post_transmit(sc_card_t *card, const struct iso_sm_ctx *ctx,
 		sc_apdu_t *sm_apdu)
 {
-	SC_FUNC_RETURN(card->ctx,  SC_LOG_DEBUG_NORMAL,
+	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_SM,  
 			increment_ssc(ctx->priv_data));
 }
 
@@ -2327,7 +2306,7 @@ eac_sm_finish(sc_card_t *card, const struct iso_sm_ctx *ctx,
 	if (!card)
 	   return SC_ERROR_INVALID_ARGUMENTS;
 	if(!ctx || !ctx->priv_data || !apdu)
-		SC_FUNC_RETURN(card->ctx,  SC_LOG_DEBUG_NORMAL,
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_SM,  
 				SC_ERROR_INVALID_ARGUMENTS);
 	eacsmctx = ctx->priv_data;
 
@@ -2349,13 +2328,13 @@ eac_sm_finish(sc_card_t *card, const struct iso_sm_ctx *ctx,
 
 				if (!r) {
 					ssl_error(card->ctx);
-					SC_FUNC_RETURN(card->ctx,  SC_LOG_DEBUG_NORMAL, SC_ERROR_INTERNAL);
+					SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_SM,  SC_ERROR_INTERNAL);
 				}
 			}
 		}
 	}
 
-	SC_FUNC_RETURN(card->ctx,  SC_LOG_DEBUG_NORMAL, SC_SUCCESS);
+	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_SM,  SC_SUCCESS);
 }
 
 static void
@@ -2363,16 +2342,18 @@ eac_sm_clear_free(const struct iso_sm_ctx *ctx)
 {
 	if (ctx) {
 		struct eac_sm_ctx *eacsmctx = ctx->priv_data;
-		EAC_CTX_clear_free(eacsmctx->ctx);
-		if (eacsmctx->certificate_description)
-			BUF_MEM_free(eacsmctx->certificate_description);
-		if (eacsmctx->id_icc)
-			BUF_MEM_free(eacsmctx->id_icc);
-		if (eacsmctx->eph_pub_key)
-			BUF_MEM_free(eacsmctx->eph_pub_key);
-		if (eacsmctx->auxiliary_data)
-			BUF_MEM_free(eacsmctx->auxiliary_data);
-		free(eacsmctx);
+		if (eacsmctx) {
+			EAC_CTX_clear_free(eacsmctx->ctx);
+			if (eacsmctx->certificate_description)
+				BUF_MEM_free(eacsmctx->certificate_description);
+			if (eacsmctx->id_icc)
+				BUF_MEM_free(eacsmctx->id_icc);
+			if (eacsmctx->eph_pub_key)
+				BUF_MEM_free(eacsmctx->eph_pub_key);
+			if (eacsmctx->auxiliary_data)
+				BUF_MEM_free(eacsmctx->auxiliary_data);
+			free(eacsmctx);
+		}
 	}
 }
 
@@ -2449,7 +2430,7 @@ int eac_pace_get_tries_left(sc_card_t *card,
 		r = eac_mse_set_at_pace(card, 0, pin_id, 0, &sw1, &sw2);
 #else
 		sc_apdu_t apdu;
-		sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, ISO_MSE, 0xC1, 0xA4);
+		sc_format_apdu_ex(&apdu, 0x00, ISO_MSE, 0xC1, 0xA4, NULL, 0, NULL, 0);
 		r = sc_transmit_apdu(card, &apdu);
 		sw1 = apdu.sw1;
 		sw2 = apdu.sw2;

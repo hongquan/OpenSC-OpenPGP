@@ -90,7 +90,7 @@ static const char *option_help[] = {
 	"Sends an APDU in format AA:BB:CC:DD:EE:FF...",
 	"Uses reader number <arg> [0]",
 	"Does card reset of type <cold|warm> [cold]",
-	"Forces the use of driver <arg> [auto-detect]",
+	"Forces the use of driver <arg> [auto-detect; '?' for list]",
 	"Lists algorithms supported by card",
 	"Wait for a card to be inserted",
 	"Verbose operation. Use several times to enable debug output.",
@@ -280,7 +280,7 @@ static int list_readers(void)
 		      reader->capabilities & SC_READER_CAP_PIN_PAD ? "PIN pad":"",
 		      reader->name);
 		if (state & SC_READER_CARD_PRESENT && verbose) {
-			struct sc_card *card;
+			struct sc_card *c;
 			int r;
 			char tmp[SC_MAX_ATR_SIZE*3];
 			sc_bin_to_hex(reader->atr.value, reader->atr.len, tmp, sizeof(tmp) - 1, ':');
@@ -288,30 +288,14 @@ static int list_readers(void)
 			if (state & SC_READER_CARD_EXCLUSIVE)
 				printf("     %s [EXCLUSIVE]\n", tmp);
 			else {
-				if ((r = sc_connect_card(reader, &card)) != SC_SUCCESS) {
+				if ((r = sc_connect_card(reader, &c)) != SC_SUCCESS) {
 					fprintf(stderr, "     failed: %s\n", sc_strerror(r));
 				} else {
-					printf("     %s %s %s\n", tmp, card->name ? card->name : "", state & SC_READER_CARD_INUSE ? "[IN USE]" : "");
-					sc_disconnect_card(card);
+					printf("     %s %s %s\n", tmp, c->name ? c->name : "", state & SC_READER_CARD_INUSE ? "[IN USE]" : "");
+					sc_disconnect_card(c);
 				}
 			}
 		}
-	}
-	return 0;
-}
-
-static int list_drivers(void)
-{
-	int i;
-
-	if (ctx->card_drivers[0] == NULL) {
-		printf("No card drivers installed!\n");
-		return 0;
-	}
-	printf("Configured card drivers:\n");
-	for (i = 0; ctx->card_drivers[i] != NULL; i++) {
-		printf("  %-16s %s\n", ctx->card_drivers[i]->short_name,
-		      ctx->card_drivers[i]->name);
 	}
 	return 0;
 }
@@ -438,13 +422,13 @@ static int print_file(sc_card_t *in_card, const sc_file_t *file,
 		free(buf);
 	} else {
 		unsigned char buf[256];
-		int i;
+		size_t rec_nr;
 
-		for (i=0; i < file->record_count; i++) {
-			printf("Record %d\n", i);
+		for (rec_nr = 1; rec_nr <= file->record_count; rec_nr++) {
+			printf("Record %"SC_FORMAT_LEN_SIZE_T"u\n", rec_nr);
 			r = sc_lock(card);
 			if (r == SC_SUCCESS)
-				r = sc_read_record(in_card, i, buf, 256, 0);
+				r = sc_read_record(in_card, rec_nr, buf, sizeof(buf), SC_RECORD_BY_REC_NR);
 			sc_unlock(card);
 			if (r > 0)
 				util_hex_dump_asc(stdout, buf, r, 0);
@@ -582,6 +566,7 @@ static int list_algorithms(void)
 		{ SC_ALGORITHM_GOSTR3411, "gostr3411" },
 		{ SC_ALGORITHM_PBKDF2,    "pbkdf2"    },
 		{ SC_ALGORITHM_PBES2,     "pbes2"     },
+		{ SC_ALGORITHM_AES,       "aes"       },
 		{ 0, NULL }
 	};
 	const id2str_t alg_flag_names[] = {
@@ -593,6 +578,7 @@ static int list_algorithms(void)
 		{ SC_ALGORITHM_RSA_PAD_PKCS1,      "pkcs1"     },
 		{ SC_ALGORITHM_RSA_PAD_ANSI,       "ansi"      },
 		{ SC_ALGORITHM_RSA_PAD_PSS,        "pss"       },
+		{ SC_ALGORITHM_RSA_PAD_OAEP,       "oaep"      },
 		{ SC_ALGORITHM_RSA_PAD_ISO9796,    "iso9796"   },
 		{ SC_ALGORITHM_RSA_HASH_SHA1,      "sha1"      },
 		{ SC_ALGORITHM_RSA_HASH_MD5,       "MD5"       },
@@ -628,7 +614,7 @@ static int list_algorithms(void)
 			if (card->algorithms[i].flags & alg_flag_names[j].id)
 				printf(" %s", alg_flag_names[j].str);
 
-		/* print RSA spcific flags */
+		/* print RSA specific flags */
 		if ( card->algorithms[i].algorithm == SC_ALGORITHM_RSA) {
 			int padding = card->algorithms[i].flags
 					& SC_ALGORITHM_RSA_PADS;
@@ -712,10 +698,8 @@ int main(int argc, char *argv[])
 	const char *opt_conf_entry = NULL;
 	const char *opt_reset_type = NULL;
 	char **p;
+	struct sc_reader *reader = NULL;
 	sc_context_param_t ctx_param;
-
-	setbuf(stderr, NULL);
-	setbuf(stdout, NULL);
 
 	while (1) {
 		c = getopt_long(argc, argv, "inlG:S:fr:vs:Dc:aw", options, &long_optind);
@@ -785,6 +769,13 @@ int main(int argc, char *argv[])
 			break;
 		case 'c':
 			opt_driver = optarg;
+
+			/* treat argument "?" as request to list drivers */
+			if (opt_driver && strncmp("?", opt_driver, sizeof("?")) == 0) {
+				opt_driver = NULL;
+				do_list_drivers = 1;
+				action_count++;
+			}
 			break;
 		case 'w':
 			opt_wait = 1;
@@ -829,11 +820,6 @@ int main(int argc, char *argv[])
 
 	ctx->flags |= SC_CTX_FLAG_ENABLE_DEFAULT_DRIVER;
 
-	if (verbose > 1) {
-		ctx->debug = verbose;
-		sc_ctx_log_to_file(ctx, "stderr");
-	}
-
 	if (do_get_conf_entry) {
 		if ((err = opensc_get_conf_entry (opt_conf_entry)))
 			goto end;
@@ -850,8 +836,28 @@ int main(int argc, char *argv[])
 		action_count--;
 	}
 	if (do_list_drivers) {
-		if ((err = list_drivers()))
+		if ((err = util_list_card_drivers(ctx)))
 			goto end;
+		action_count--;
+	}
+	if (action_count <= 0)
+		goto end;
+
+	err = util_connect_reader(ctx, &reader, opt_reader, opt_wait, verbose);
+	if (err) {
+		fprintf(stderr, "Failed to connect to reader: %s\n", sc_strerror(err));
+		err = 1;
+		goto end;
+	}
+	if (do_print_atr) {
+		if (verbose) {
+			printf("Card ATR:\n");
+			util_hex_dump_asc(stdout, reader->atr.value, reader->atr.len, -1);
+		} else {
+			char tmp[SC_MAX_ATR_SIZE*3];
+			sc_bin_to_hex(reader->atr.value, reader->atr.len, tmp, sizeof(tmp) - 1, ':');
+			fprintf(stdout,"%s\n",tmp);
+		}
 		action_count--;
 	}
 	if (action_count <= 0)
@@ -866,21 +872,19 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	err = util_connect_card_ex(ctx, &card, opt_reader, opt_wait, 0, verbose);
-	if (err)
-		goto end;
+	if (verbose)
+		printf("Connecting to card in reader %s...\n", reader->name);
 
-	if (do_print_atr) {
-		if (verbose) {
-			printf("Card ATR:\n");
-			util_hex_dump_asc(stdout, card->atr.value, card->atr.len, -1);
-		} else {
-			char tmp[SC_MAX_ATR_SIZE*3];
-			sc_bin_to_hex(card->atr.value, card->atr.len, tmp, sizeof(tmp) - 1, ':');
-			fprintf(stdout,"%s\n",tmp);
-		}
-		action_count--;
+	err = sc_connect_card(reader, &card);
+	if (err < 0) {
+		fprintf(stderr, "Failed to connect to card: %s\n", sc_strerror(err));
+		err = 1;
+		goto end;
 	}
+
+	if (verbose)
+                printf("Using card driver %s.\n", card->driver->name);
+
 	if (do_print_serial) {
 		if (verbose)
 			printf("Card serial number:");
@@ -917,10 +921,7 @@ int main(int argc, char *argv[])
 		action_count--;
 	}
 end:
-	if (card) {
-		sc_disconnect_card(card);
-	}
-	if (ctx)
-		sc_release_context(ctx);
+	sc_disconnect_card(card);
+	sc_release_context(ctx);
 	return err;
 }

@@ -27,6 +27,7 @@
 
 #include <ctype.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "internal.h"
 #include "asn1.h"
@@ -45,13 +46,6 @@ static struct sc_card_driver cardos_drv = {
 static const struct sc_atr_table cardos_atrs[] = {
 	/* 4.0 */
 	{ "3b:e2:00:ff:c1:10:31:fe:55:c8:02:9c", NULL, NULL, SC_CARD_TYPE_CARDOS_GENERIC, 0, NULL },
-	/* Italian eID card, postecert */
-	{ "3b:e9:00:ff:c1:10:31:fe:55:00:64:05:00:c8:02:31:80:00:47", NULL, NULL, SC_CARD_TYPE_CARDOS_CIE_V1, 0, NULL },
-	/* Italian eID card, infocamere */
-	{ "3b:fb:98:00:ff:c1:10:31:fe:55:00:64:05:20:47:03:31:80:00:90:00:f3", NULL, NULL, SC_CARD_TYPE_CARDOS_GENERIC, 0, NULL },
-	/* Another Italian InfocamereCard */
-	{ "3b:fc:98:00:ff:c1:10:31:fe:55:c8:03:49:6e:66:6f:63:61:6d:65:72:65:28", NULL, NULL, SC_CARD_TYPE_CARDOS_GENERIC, 0, NULL },
-	{ "3b:f4:98:00:ff:c1:10:31:fe:55:4d:34:63:76:b4", NULL, NULL, SC_CARD_TYPE_CARDOS_GENERIC, 0, NULL},
 	/* cardos m4.2 and above */
 	{ "3b:f2:18:00:ff:c1:0a:31:fe:55:c8:06:8a", "ff:ff:0f:ff:00:ff:00:ff:ff:00:00:00:00", NULL, SC_CARD_TYPE_CARDOS_M4_2, 0, NULL },
 	/* CardOS 4.4 */
@@ -59,13 +53,42 @@ static const struct sc_atr_table cardos_atrs[] = {
 	/* CardOS v5.0 */
 	{ "3b:d2:18:00:81:31:fe:58:c9:01:14", NULL, NULL, SC_CARD_TYPE_CARDOS_V5_0, 0, NULL},
 	/* CardOS v5.3 */
-	{ "3b:d2:18:00:81:31:fe:58:c9:02:17", NULL, NULL, SC_CARD_TYPE_CARDOS_V5_0, 0, NULL},
-	{ "3b:d2:18:00:81:31:fe:58:c9:03:16", NULL, NULL, SC_CARD_TYPE_CARDOS_V5_0, 0, NULL},
+	{ "3b:d2:18:00:81:31:fe:58:c9:02:17", NULL, NULL, SC_CARD_TYPE_CARDOS_V5_3, 0, NULL},
+	{ "3b:d2:18:00:81:31:fe:58:c9:03:16", NULL, NULL, SC_CARD_TYPE_CARDOS_V5_3, 0, NULL},
 	{ NULL, NULL, NULL, 0, 0, NULL }
 };
 
-static unsigned int algorithm_ids_in_tokeninfo[SC_MAX_SUPPORTED_ALGORITHMS];
-static unsigned int algorithm_ids_in_tokeninfo_count=0;
+/* private data for cardos driver */
+typedef struct cardos_data {
+	/* constructed internally */
+	unsigned int algorithm_ids_in_tokeninfo[SC_MAX_SUPPORTED_ALGORITHMS];
+	unsigned int algorithm_ids_in_tokeninfo_count;
+	unsigned long flags; /* flags used by init to create sc_algorithms */
+	unsigned long ec_flags;
+	unsigned long ext_flags;
+	int rsa_2048;
+	const sc_security_env_t * sec_env;
+} cardos_data_t;
+
+/* copied from iso7816.c */
+static void fixup_transceive_length(const struct sc_card *card,
+		struct sc_apdu *apdu)
+{
+	if (card == NULL || apdu == NULL) {
+		return;
+	}
+
+	if (apdu->lc > sc_get_max_send_size(card)) {
+		/* The lower layers will automatically do chaining */
+		apdu->flags |= SC_APDU_FLAGS_CHAINING;
+	}
+
+	if (apdu->le > sc_get_max_recv_size(card)) {
+		/* The lower layers will automatically do a GET RESPONSE, if possible.
+		 * All other workarounds must be carried out by the upper layers. */
+		apdu->le = sc_get_max_recv_size(card);
+	}
+}
 
 static int cardos_match_card(sc_card_t *card)
 {
@@ -85,6 +108,8 @@ static int cardos_match_card(sc_card_t *card)
 		return 1;
 	if (card->type == SC_CARD_TYPE_CARDOS_V5_0)
 		return 1;
+	if (card->type == SC_CARD_TYPE_CARDOS_V5_3)
+		return 1;
 	if (card->type == SC_CARD_TYPE_CARDOS_M4_2) {
 		int rv;
 		sc_apdu_t apdu;
@@ -96,14 +121,14 @@ static int cardos_match_card(sc_card_t *card)
 			return 0;
 		/* get the os version using GET DATA and compare it with
 		 * version in the ATR */
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "checking cardos version ...");
+		sc_log(card->ctx,  "checking cardos version ...");
 		sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0xca, 0x01, 0x82);
 		apdu.resp = rbuf;
 		apdu.resplen = sizeof(rbuf);
 		apdu.le = 256;
 		apdu.lc = 0;
 		rv = sc_transmit_apdu(card, &apdu);
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, rv, "APDU transmit failed");
+		LOG_TEST_RET(card->ctx, rv, "APDU transmit failed");
 		if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
 			return 0;
 		if (apdu.resp[0] != atr[10] ||
@@ -111,19 +136,19 @@ static int cardos_match_card(sc_card_t *card)
 			/* version mismatch */
 			return 0;
 		if (atr[11] <= 0x04) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "found cardos m4.01");
+			sc_log(card->ctx,  "found cardos m4.01");
 			card->type = SC_CARD_TYPE_CARDOS_M4_01;
 		} else if (atr[11] == 0x08) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "found cardos v4.3b");
+			sc_log(card->ctx,  "found cardos v4.3b");
 			card->type = SC_CARD_TYPE_CARDOS_M4_3;
 		} else if (atr[11] == 0x09) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "found cardos v4.2b");
+			sc_log(card->ctx,  "found cardos v4.2b");
 			card->type = SC_CARD_TYPE_CARDOS_M4_2B;
 		} else if (atr[11] >= 0x0B) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "found cardos v4.2c or higher");
+			sc_log(card->ctx,  "found cardos v4.2c or higher");
 			card->type = SC_CARD_TYPE_CARDOS_M4_2C;
 		} else {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "found cardos m4.2");
+			sc_log(card->ctx,  "found cardos m4.2");
 		}
 	}
 	return 1;
@@ -143,7 +168,7 @@ static int cardos_have_2048bit_package(sc_card_t *card)
 	apdu.lc = 0;
 	apdu.le = 256;
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	if ((len = apdu.resplen) == 0)
 		/* looks like no package has been installed  */
@@ -165,43 +190,104 @@ static int cardos_have_2048bit_package(sc_card_t *card)
 	return 0;
 }
 
+
+/* Called from cardos_init for old cards, from cardos_cardctl_parsed_token_info for new cards */
+/* TODO see if works from old cards too */
+static int cardos_add_algs(sc_card_t *card, unsigned long flags, unsigned long ec_flags, unsigned long ext_flags)
+{
+
+	cardos_data_t * priv = (cardos_data_t *)card->drv_data;
+
+	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	_sc_card_add_rsa_alg(card,  512, flags, 0);
+	_sc_card_add_rsa_alg(card,  768, flags, 0);
+	_sc_card_add_rsa_alg(card, 1024, flags, 0);
+	if (priv->rsa_2048 == 1) {
+		_sc_card_add_rsa_alg(card, 1280, flags, 0);
+		_sc_card_add_rsa_alg(card, 1536, flags, 0);
+		_sc_card_add_rsa_alg(card, 1792, flags, 0);
+		_sc_card_add_rsa_alg(card, 2048, flags, 0);
+	}
+
+	if (card->type == SC_CARD_TYPE_CARDOS_V5_0 || card->type == SC_CARD_TYPE_CARDOS_V5_3) {
+		/* Starting with CardOS 5, the card supports PIN query commands */
+		card->caps |= SC_CARD_CAP_ISO7816_PIN_INFO;
+		_sc_card_add_rsa_alg(card, 3072, flags, 0);
+		_sc_card_add_rsa_alg(card, 4096, flags, 0);
+	}
+
+	/* TODO need to get sizes from supported_algos too */
+	if (ec_flags != 0) {
+		 _sc_card_add_ec_alg(card, 256, ec_flags, priv->ext_flags, NULL);
+		 _sc_card_add_ec_alg(card, 384, ec_flags, priv->ext_flags, NULL);
+	}
+
+	return 0;
+}
+
 static int cardos_init(sc_card_t *card)
 {
-	unsigned long	flags, rsa_2048 = 0;
+	cardos_data_t * priv = NULL;
+	unsigned long flags = 0;
 	size_t data_field_length;
 	sc_apdu_t apdu;
 	u8 rbuf[2];
 	int r;
 
+	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	priv = calloc(1, sizeof(cardos_data_t));
+	if (!priv)
+		LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
+	card->drv_data = priv;
+
 	card->name = "Atos CardOS";
 	card->cla = 0x00;
 
-	/* Set up algorithm info. */
-	flags = SC_ALGORITHM_RSA_RAW
-		| SC_ALGORITHM_RSA_HASH_NONE
-		| SC_ALGORITHM_ONBOARD_KEY_GEN
-		;
-	if (card->type != SC_CARD_TYPE_CARDOS_V5_0)
-		flags |= SC_ALGORITHM_NEED_USAGE;
+	/* let user override flags and type from opensc.conf */
+	/* user can override card->type too.*/
+	if (card->flags) {
+	    flags = card->flags;
+	} else {
 
-	_sc_card_add_rsa_alg(card,  512, flags, 0);
-	_sc_card_add_rsa_alg(card,  768, flags, 0);
-	_sc_card_add_rsa_alg(card, 1024, flags, 0);
+		/* Set up algorithm info. */
+		flags = 0;
+		if (card->type == SC_CARD_TYPE_CARDOS_V5_0) {
+			flags |= SC_ALGORITHM_RSA_PAD_PKCS1;
+		} else if(card->type == SC_CARD_TYPE_CARDOS_V5_3) {
+			flags |= SC_ALGORITHM_RSA_RAW
+				| SC_ALGORITHM_RSA_HASH_NONE
+				| SC_ALGORITHM_ONBOARD_KEY_GEN;
+		} else {
+			flags |= SC_ALGORITHM_RSA_RAW
+				| SC_ALGORITHM_RSA_HASH_NONE
+				| SC_ALGORITHM_NEED_USAGE
+				| SC_ALGORITHM_ONBOARD_KEY_GEN;
+		}
+	}
+
+	priv->flags = flags;
 
 	if (card->type == SC_CARD_TYPE_CARDOS_M4_2) {
 		r = cardos_have_2048bit_package(card);
-		if (r < 0)
-			return SC_ERROR_INVALID_CARD;
+		if (r < 0) {
+			r = SC_ERROR_INVALID_CARD;
+			goto err;
+		}
 		if (r == 1)
-			rsa_2048 = 1;
+			priv->rsa_2048 = 1;
 		card->caps |= SC_CARD_CAP_APDU_EXT;
-	} else if (card->type == SC_CARD_TYPE_CARDOS_M4_3 
+	} else if (card->type == SC_CARD_TYPE_CARDOS_M4_3
 		|| card->type == SC_CARD_TYPE_CARDOS_M4_2B
 		|| card->type == SC_CARD_TYPE_CARDOS_M4_2C
 		|| card->type == SC_CARD_TYPE_CARDOS_M4_4
-		|| card->type == SC_CARD_TYPE_CARDOS_V5_0) {
-		rsa_2048 = 1;
+		|| card->type == SC_CARD_TYPE_CARDOS_V5_0
+		|| card->type == SC_CARD_TYPE_CARDOS_V5_3) {
+		priv->rsa_2048 = 1;
 		card->caps |= SC_CARD_CAP_APDU_EXT;
+		/* TODO check this. EC only if in supported_algo */
+		priv->ext_flags = SC_ALGORITHM_EXT_EC_NAMEDCURVE | SC_ALGORITHM_EXT_EC_UNCOMPRESES;
 	}
 
 	/* probe DATA FIELD LENGTH with GET DATA */
@@ -209,42 +295,121 @@ static int cardos_init(sc_card_t *card)
 	apdu.le = sizeof rbuf;
 	apdu.resp = rbuf;
 	apdu.resplen = sizeof(rbuf);
+
 	r = sc_transmit_apdu(card, &apdu);
 	if (r < 0)
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL,
+		LOG_TEST_GOTO_ERR(card->ctx,
 				SC_ERROR_INVALID_CARD,
 				"APDU transmit failed");
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 	if (r < 0)
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL,
+		LOG_TEST_GOTO_ERR(card->ctx,
 				SC_ERROR_INVALID_CARD,
 				"GET DATA command returned error");
-	if (apdu.resplen != 2)
-		return SC_ERROR_INVALID_CARD;
+	if (apdu.resplen != 2) {
+		r = SC_ERROR_INVALID_CARD;
+		goto err;
+	}
 	data_field_length = ((rbuf[0] << 8) | rbuf[1]);
 
-	/* strip the length of possible Lc and Le bytes */
-	if (card->caps & SC_CARD_CAP_APDU_EXT)
-		card->max_send_size = data_field_length - 6;
-	else
-		card->max_send_size = data_field_length - 3;
-	/* strip the length of SW bytes */
-	card->max_recv_size = data_field_length - 2;
+	/* TODO is this really needed? strip the length of possible Lc and Le bytes */
 
-	if (rsa_2048 == 1) {
-		_sc_card_add_rsa_alg(card, 1280, flags, 0);
-		_sc_card_add_rsa_alg(card, 1536, flags, 0);
-		_sc_card_add_rsa_alg(card, 1792, flags, 0);
-		_sc_card_add_rsa_alg(card, 2048, flags, 0);
+	/* Use Min card sizes and reader too. for V5_3 at least*/
+
+	if (card->type == SC_CARD_TYPE_CARDOS_V5_0 || card->type == SC_CARD_TYPE_CARDOS_V5_3) {
+		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "data_field_length:%"SC_FORMAT_LEN_SIZE_T"u "
+				"card->reader->max_send_size:%"SC_FORMAT_LEN_SIZE_T"u "
+				"card->reader->max_recv_size:%"SC_FORMAT_LEN_SIZE_T"u %s",
+				data_field_length, card->reader->max_send_size, card->reader->max_recv_size,
+				(card->caps & SC_CARD_CAP_APDU_EXT) ? "SC_CARD_CAP_APDU_EXT" : " ");
+
+		if (card->caps & SC_CARD_CAP_APDU_EXT) {
+			card->max_send_size  = data_field_length - 6;
+#ifdef _WIN32
+			/* Windows does not support PCSC PART_10 and may have forced reader to 255/256
+			 * https://github.com/OpenSC/OpenSC/commit/eddea6f3c2d3dafc2c09eba6695c745a61b5186f
+			 * may have reset this. if so, will override and force extended 
+			 * Most, if not all, cardos cards do extended, but not chaining 
+			 */
+			if (card->reader->max_send_size == 255 && card->reader->max_recv_size == 256) {
+				sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "resetting reader to use data_field_length");
+				card->reader->max_send_size = data_field_length - 6;
+				card->reader->max_recv_size = data_field_length - 3;
+			}
+#endif
+		} else
+			card->max_send_size = data_field_length - 3;
+
+		card->max_send_size = sc_get_max_send_size(card); /* include reader sizes and protocol */
+		card->max_recv_size = data_field_length - 2;
+		card->max_recv_size = sc_get_max_recv_size(card);
+	} else {
+		/* old way, disregards reader capabilities */
+		if (card->caps & SC_CARD_CAP_APDU_EXT)
+			card->max_send_size = data_field_length - 6;
+		else
+			card->max_send_size = data_field_length - 3;
+		/* strip the length of SW bytes */
+		card->max_recv_size = data_field_length - 2;
 	}
 
-	if (card->type == SC_CARD_TYPE_CARDOS_V5_0) {
-		/* Starting with CardOS 5, the card supports PIN query commands */
-		card->caps |= SC_CARD_CAP_ISO7816_PIN_INFO;
+	/*for new cards, wait till after sc_pkcs15_bind_internal reads tokeninfo */
+	if (card->type != SC_CARD_TYPE_CARDOS_V5_0 && card->type != SC_CARD_TYPE_CARDOS_V5_3) {
+		r = cardos_add_algs(card, flags, 0, 0);
 	}
 
-	return 0;
+err:
+	if (r != SC_SUCCESS) {
+		free(priv);
+		card->drv_data = NULL;
+	}
+
+	return r;
 }
+
+static int cardos_pass_algo_flags(sc_card_t *card, struct sc_cardctl_cardos_pass_algo_flags * ptr)
+{
+	cardos_data_t * priv = (cardos_data_t *)card->drv_data;
+	int r = 0;
+
+	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+	switch (ptr->pass) {
+		case 1:
+			ptr->card_flags = card->flags;
+			ptr->used_flags = priv->flags;
+			ptr->ec_flags = priv->ec_flags;
+			ptr->ext_flags = priv->ext_flags;
+			break;
+		case 2:
+			r = cardos_add_algs(card,ptr->new_flags, ptr->ec_flags, ptr->ext_flags);
+			break;
+		default:
+			sc_log(card->ctx, "ptr->pass: %ul invalid", ptr->pass);
+			r = SC_ERROR_INTERNAL;
+	}
+	LOG_FUNC_RETURN(card->ctx, r);
+}
+
+
+static int cardos_finish(sc_card_t *card)
+{
+	int r = 0;
+
+	if (card == NULL )
+		return 0;
+
+	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	/* free priv data */
+	if (card->drv_data) { /* priv */
+		free(card->drv_data);
+		card->drv_data = NULL;
+	}
+
+	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, r);
+}
+
+
 
 static const struct sc_card_error cardos_errors[] = {
 /* some error inside the card */
@@ -315,13 +480,13 @@ static int cardos_check_sw(sc_card_t *card, unsigned int sw1, unsigned int sw2)
 	for (i = 0; i < err_count; i++) {
 		if (cardos_errors[i].SWs == ((sw1 << 8) | sw2)) {
 			if ( cardos_errors[i].errorstr ) 
-				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "%s\n",
+				sc_log(card->ctx,  "%s\n",
 				 	cardos_errors[i].errorstr);
 			return cardos_errors[i].errorno;
 		}
 	}
 
-        sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Unknown SWs; SW1=%02X, SW2=%02X\n", sw1, sw2);
+        sc_log(card->ctx,  "Unknown SWs; SW1=%02X, SW2=%02X\n", sw1, sw2);
 	return SC_ERROR_CARD_CMD_FAILED;
 }
 
@@ -346,12 +511,12 @@ get_next_part:
 	apdu.resp = rbuf;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "DIRECTORY command returned error");
+	LOG_TEST_RET(card->ctx, r, "DIRECTORY command returned error");
 
 	if (apdu.resplen > 256) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "directory listing > 256 bytes, cutting");
+		sc_log(card->ctx,  "directory listing > 256 bytes, cutting");
 	}
 
 	len = apdu.resplen;
@@ -360,7 +525,7 @@ get_next_part:
 		/* is there a file information block (0x6f) ? */
 		p = sc_asn1_find_tag(card->ctx, p, len, 0x6f, &tlen);
 		if (p == NULL) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "directory tag missing");
+			sc_log(card->ctx,  "directory tag missing");
 			return SC_ERROR_INTERNAL;
 		}
 		if (tlen == 0)
@@ -368,7 +533,7 @@ get_next_part:
 			break;
 		q = sc_asn1_find_tag(card->ctx, p, tlen, 0x86, &ilen);
 		if (q == NULL || ilen != 2) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "error parsing file id TLV object");
+			sc_log(card->ctx,  "error parsing file id TLV object");
 			return SC_ERROR_INTERNAL;
 		}
 		/* put file id in buf */
@@ -383,8 +548,7 @@ get_next_part:
 		q = sc_asn1_find_tag(card->ctx, p, tlen, 0x8a, &ilen);
 		if (q != NULL && ilen == 1) {
 			offset = (u8)ilen;
-			if (offset != 0)
-				goto get_next_part;
+			goto get_next_part;
 		}
 		len -= tlen + 2;
 		p   += tlen;
@@ -392,7 +556,7 @@ get_next_part:
 
 	r = fids;
 
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 static void add_acl_entry(sc_file_t *file, int op, u8 byte)
@@ -464,7 +628,7 @@ static const int ef_acl[9] = {
 	/* XXX: ADMIN should be an ACL type of its own, or mapped
 	 * to erase */
 	SC_AC_OP_UPDATE,	/* ADMIN EF (modify meta information?) */
-	-1,			/* INC (-> cylic fixed files) */
+	-1,			/* INC (-> cyclic fixed files) */
 	-1			/* DEC */
 };
 
@@ -491,7 +655,7 @@ static int cardos_select_file(sc_card_t *card,
 	r = iso_ops->select_file(card, in_path, file);
 	if (r >= 0 && file)
 		parse_sec_attr((*file), (*file)->sec_attr, (*file)->sec_attr_len);
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 static int cardos_acl_to_bytes(sc_card_t *card, const sc_file_t *file,
@@ -510,7 +674,7 @@ static int cardos_acl_to_bytes(sc_card_t *card, const sc_file_t *file,
 		else
 			byte = acl_to_byte(sc_file_get_acl_entry(file, idx[i]));
 		if (byte < 0) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Invalid ACL\n");
+			sc_log(card->ctx,  "Invalid ACL\n");
 			return SC_ERROR_INVALID_ARGUMENTS;
 		}
 		buf[i] = byte;
@@ -595,7 +759,7 @@ static int cardos_construct_fcp(sc_card_t *card, const sc_file_t *file,
 	size_t inlen = *outlen, len;
 	int    r;
 
-	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_NORMAL);
+	LOG_FUNC_CALLED(card->ctx);
 
 	if (out == NULL || inlen < 64)
 		return SC_ERROR_INVALID_ARGUMENTS;
@@ -643,7 +807,7 @@ static int cardos_construct_fcp(sc_card_t *card, const sc_file_t *file,
 			buf[4] |= (u8) file->record_count;
 			break;
 		default:
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "unknown EF type: %u", file->type);
+			sc_log(card->ctx,  "unknown EF type: %u", file->type);
 			return SC_ERROR_INVALID_ARGUMENTS;
 		}
 		if (file->ef_structure == SC_FILE_EF_CYCLIC ||
@@ -720,7 +884,7 @@ static int cardos_create_file(sc_card_t *card, sc_file_t *file)
 
 		r = cardos_construct_fcp(card, file, sbuf, &len);
 		if (r < 0) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "unable to create FCP");
+			sc_log(card->ctx,  "unable to create FCP");
 			return r;
 		}
 	
@@ -730,7 +894,7 @@ static int cardos_create_file(sc_card_t *card, sc_file_t *file)
 		apdu.data    = sbuf;
 
 		r = sc_transmit_apdu(card, &apdu);
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+		LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 		return sc_check_sw(card, apdu.sw1, apdu.sw2);
 	} else
@@ -752,12 +916,12 @@ cardos_restore_security_env(sc_card_t *card, int se_num)
 	apdu.p1 = (card->type == SC_CARD_TYPE_CARDOS_CIE_V1 ? 0xF3 : 0x03);
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Card returned error");
+	LOG_TEST_RET(card->ctx, r, "Card returned error");
 
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 /*
@@ -775,8 +939,9 @@ cardos_set_security_env(sc_card_t *card,
 			    const sc_security_env_t *env,
 			    int se_num)
 {
+	cardos_data_t* priv = (cardos_data_t*)card->drv_data;
 	sc_apdu_t apdu;
-	u8	data[3];
+	u8	data[9];
 	int	key_id, r;
 
 	assert(card != NULL && env != NULL);
@@ -785,6 +950,15 @@ cardos_set_security_env(sc_card_t *card,
 		sc_log(card->ctx, "No or invalid key reference\n");
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
+	priv->sec_env = env; /* pass on to crypto routines */
+
+	/* key_ref includes card mechanism and key number
+	 * But newer cards appear to get this some other way,
+	 * We can use flags passed to know what OpenSC expects from the card
+	 * and have derived what these machanisums are. 
+	 * Newer cards may change how this is done
+	 */
+
 	key_id = env->key_ref[0];
 
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x22, 0, 0);
@@ -805,17 +979,52 @@ cardos_set_security_env(sc_card_t *card,
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
-	data[0] = 0x83;
-	data[1] = 0x01;
-	data[2] = key_id;
-	apdu.lc = apdu.datalen = 3;
+	if (card->type == SC_CARD_TYPE_CARDOS_V5_0 || card->type == SC_CARD_TYPE_CARDOS_V5_3) {
+		/* some cards appear to have key_id be both Cryptographic mechanism reference 4 bits
+		 * and key_ref 4 bits. But this limits card to 16 keys.
+		 * TODO may need to be looked at at a later time
+		 */
+		/* Private key reference */
+		data[0] = 0x84;
+		data[1] = 0x01;
+		data[2] = key_id & 0x0F;
+		/* Usage qualifier byte */
+		data[3] = 0x95;
+		data[4] = 0x01;
+		data[5] = 0x40;
+		apdu.lc = apdu.datalen = 6;
+		if (key_id & 0xF0) {
+			/* Cryptographic mechanism reference */
+			data[6] = 0x80;
+			data[7] = 0x01;
+			data[8] = key_id & 0xF0;
+			apdu.lc = apdu.datalen = 9;
+		} else if (priv->sec_env->algorithm_flags & SC_ALGORITHM_RSA_PAD_PKCS1) {
+			/* TODO this may only apply to c903 cards */
+			/* TODO or only for cards without any supported_algos or EIDComplient only */
+			data[6] = 0x80;
+			data[7] = 0x01;
+			data[8] = 0x10;
+			apdu.lc = apdu.datalen = 9;
+		} else if (priv->sec_env->algorithm_flags & SC_ALGORITHM_ECDSA_RAW) {
+			data[6] = 0x80;
+			data[7] = 0x01;
+			data[8] = 0x30;
+			apdu.lc = apdu.datalen = 9;
+		}
+	} else {
+		data[0] = 0x83;
+		data[1] = 0x01;
+		data[2] = key_id;
+		apdu.lc = apdu.datalen = 3;
+	}
 	apdu.data = data;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Card returned error");
+	LOG_TEST_RET(card->ctx, r, "Card returned error");
 
 	do   {
 		const struct sc_supported_algo_info* algorithm_info = env->supported_algos;
@@ -830,12 +1039,12 @@ cardos_set_security_env(sc_card_t *card,
 
 				sc_log(card->ctx, "is signature");
 				sc_log(card->ctx, "Adding ID %d at index %d", algorithm_id, algorithm_id_count);
-				algorithm_ids_in_tokeninfo[algorithm_id_count++] = algorithm_id;
+				priv->algorithm_ids_in_tokeninfo[algorithm_id_count++] = algorithm_id;
 			}
 			sc_log(card->ctx, "reference=%d, mechanism=%d, operations=%d, algo_ref=%d",
 					alg.reference, alg.mechanism, alg.operations, alg.algo_ref);
 		}
-		algorithm_ids_in_tokeninfo_count = algorithm_id_count;
+		priv -> algorithm_ids_in_tokeninfo_count = algorithm_id_count;
 	} while (0);
 
 	LOG_FUNC_RETURN(card->ctx, r);
@@ -850,6 +1059,7 @@ static int
 do_compute_signature(sc_card_t *card, const u8 *data, size_t datalen,
 		     u8 *out, size_t outlen)
 {
+	/* cardos_data_t* priv = (cardos_data_t*)card->drv_dataa */;
 	int r;
 	sc_apdu_t apdu;
 
@@ -864,8 +1074,9 @@ do_compute_signature(sc_card_t *card, const u8 *data, size_t datalen,
 	apdu.data    = data;
 	apdu.lc      = datalen;
 	apdu.datalen = datalen;
+	fixup_transceive_length(card, &apdu);
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	if (apdu.sw1 == 0x90 && apdu.sw2 == 0x00)
 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, apdu.resplen);
@@ -877,23 +1088,30 @@ static int
 cardos_compute_signature(sc_card_t *card, const u8 *data, size_t datalen,
 			 u8 *out, size_t outlen)
 {
+	cardos_data_t* priv;
 	int    r;
-	u8     buf[SC_MAX_APDU_BUFFER_SIZE];
-	size_t buf_len = sizeof(buf), tmp_len = buf_len;
 	sc_context_t *ctx;
 	int do_rsa_pure_sig = 0;
 	int do_rsa_sig = 0;
+	size_t i;
 
 
 	assert(card != NULL && data != NULL && out != NULL);
 	ctx = card->ctx;
+	priv = (cardos_data_t*)card->drv_data;
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_VERBOSE);
 
-	if (datalen > SC_MAX_APDU_BUFFER_SIZE)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
-	if (outlen < datalen)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_BUFFER_TOO_SMALL);
-	outlen = datalen;
+	/* sec_env has algorithm_flags set from sc_get_encoding_flags sec_flags
+	 * If flags are set correctly we don't need to test anything 
+	 * TODO this assumes RSA is  PSS, PKCS1 or RAW and we are passing 
+	 * the correct data. Should work for ECDSA too.    
+	 * use for V5 cards and TODO should for older cards too
+	 */
+	if (card->type == SC_CARD_TYPE_CARDOS_V5_0 || card->type == SC_CARD_TYPE_CARDOS_V5_3) {
+
+		r = do_compute_signature(card, data, datalen, out, outlen);
+		LOG_FUNC_RETURN(ctx, r);
+	}
 
 	/* There are two ways to create a signature, depending on the way,
 	 * the key was created: RSA_SIG and RSA_PURE_SIG.
@@ -910,23 +1128,13 @@ cardos_compute_signature(sc_card_t *card, const u8 *data, size_t datalen,
 	 *   and www.crysys.hu/infsec/M40_Manual_E_2001_10.pdf)
 	 */
 
-	if (card->caps & SC_CARD_CAP_ONLY_RAW_HASH_STRIPPED){
-		sc_log(ctx, "Forcing RAW_HASH_STRIPPED");
-		do_rsa_sig = 1;
-	}
-	else if (card->caps & SC_CARD_CAP_ONLY_RAW_HASH){
-		sc_log(ctx, "Forcing RAW_HASH");
-		do_rsa_sig = 1;
-	}
-	else  {
-		/* check the the algorithmIDs from the AlgorithmInfo */
-		size_t i;
-		for(i=0; i<algorithm_ids_in_tokeninfo_count;++i){
-			unsigned int id = algorithm_ids_in_tokeninfo[i];
-			if(id == 0x86 || id == 0x88)
-				do_rsa_sig = 1;
-			else if(id == 0x8C || id == 0x8A)
-				do_rsa_pure_sig = 1;
+	/* check the the algorithmIDs from the AlgorithmInfo */
+	for (i = 0; i < priv->algorithm_ids_in_tokeninfo_count; ++i) {
+		unsigned int id = priv->algorithm_ids_in_tokeninfo[i];
+		if (id == 0x86 || id == 0x88) {
+			do_rsa_sig = 1;
+		} else if (id == 0x8C || id == 0x8A) {
+			do_rsa_pure_sig = 1;
 		}
 	}
 
@@ -947,36 +1155,42 @@ cardos_compute_signature(sc_card_t *card, const u8 *data, size_t datalen,
 	}
 
 	if(do_rsa_sig == 1){
+		u8 *buf = malloc(datalen);
+		u8 *stripped_data = buf;
+		size_t stripped_datalen = datalen;
+		if (!buf)
+			LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+		memcpy(buf, data, datalen);
+		data = buf;
+
 		sc_log(ctx, "trying RSA_SIG (just the DigestInfo)");
+
 		/* remove padding: first try pkcs1 bt01 padding */
-		r = sc_pkcs1_strip_01_padding(ctx, data, datalen, buf, &tmp_len);
+		r = sc_pkcs1_strip_01_padding(ctx, data, datalen, stripped_data, &stripped_datalen);
 		if (r != SC_SUCCESS) {
-			const u8 *p = data;
 			/* no pkcs1 bt01 padding => let's try zero padding
 			 * This can only work if the data tbs doesn't have a
 			 * leading 0 byte.  */
-			tmp_len = buf_len;
-			while (*p == 0 && tmp_len != 0) {
-				++p;
-				--tmp_len;
+			while (*stripped_data == 0 && stripped_datalen != 0) {
+				++stripped_data;
+				--stripped_datalen;
 			}
-			memcpy(buf, p, tmp_len);
 		}
-		if (!(card->caps & (SC_CARD_CAP_ONLY_RAW_HASH_STRIPPED | SC_CARD_CAP_ONLY_RAW_HASH)) || card->caps & SC_CARD_CAP_ONLY_RAW_HASH ) {
-			sc_log(ctx, "trying to sign raw hash value with prefix");
-			r = do_compute_signature(card, buf, tmp_len, out, outlen);
-			if (r >= SC_SUCCESS)
-				LOG_FUNC_RETURN(ctx, r);
-		}
-		if (card->caps & SC_CARD_CAP_ONLY_RAW_HASH) {
-			sc_log(ctx, "Failed to sign raw hash value with prefix when forcing");
-			LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
+		sc_log(ctx, "trying to sign raw hash value with prefix");
+		r = do_compute_signature(card, stripped_data, stripped_datalen, out, outlen);
+		if (r >= SC_SUCCESS) {
+			free(buf);
+			LOG_FUNC_RETURN(ctx, r);
 		}
 		sc_log(ctx, "trying to sign stripped raw hash value (card is responsible for prefix)");
-		r = sc_pkcs1_strip_digest_info_prefix(NULL,buf,tmp_len,buf,&buf_len);
-		if (r != SC_SUCCESS)
+		r = sc_pkcs1_strip_digest_info_prefix(NULL, stripped_data, stripped_datalen, stripped_data, &stripped_datalen);
+		if (r != SC_SUCCESS) {
+			free(buf);
 			LOG_FUNC_RETURN(ctx, r);
-		return do_compute_signature(card, buf, buf_len, out, outlen);
+		}
+		r = do_compute_signature(card, stripped_data, stripped_datalen, out, outlen);
+		free(buf);
+		LOG_FUNC_RETURN(ctx, r);
 	}
 
 	LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
@@ -987,9 +1201,40 @@ cardos_decipher(struct sc_card *card,
 		const u8 * crgram, size_t crgram_len,
 		u8 * out, size_t outlen)
 {
+	cardos_data_t* priv = (cardos_data_t*)card->drv_data;
 	int r;
 	size_t card_max_send_size = card->max_send_size;
 	size_t reader_max_send_size = card->reader->max_send_size;
+
+	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	/* 5.3 supports command chaining. Others may also
+	 * card_max_send_size for 5.3 is already based on reader max_send_size */
+
+	if (card->type == SC_CARD_TYPE_CARDOS_V5_0 || card->type == SC_CARD_TYPE_CARDOS_V5_3) {
+
+		r = iso_ops->decipher(card, crgram, crgram_len, out, outlen);
+		/*
+		 * 5.3 supports RAW as well as PKCS1 and PSS
+		 * description may strip padding if card supports it
+		 * with cards that support RAW, it always appears to 
+		 * drop first 00 that is start of padding.
+		 */
+
+		if (r > 0 && priv->sec_env->algorithm_flags & SC_ALGORITHM_RSA_RAW) {
+			size_t rsize = r;
+			/* RSA RAW crgram_len == modlen */
+			/* removed padding is always > 1 byte */
+			/* add back missing leading zero if card dropped it */
+			if (rsize == crgram_len - 1 && rsize < outlen) {
+				memmove(out+1, out, rsize);
+				out[0] =0x00;
+				r++;
+			}
+		}
+
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, r);
+	}
 
 	if (sc_get_max_send_size(card) < crgram_len + 1) {
 		/* CardOS doesn't support chaining for PSO:DEC, so we just _hope_
@@ -1005,7 +1250,7 @@ cardos_decipher(struct sc_card *card,
 	card->max_send_size = card_max_send_size;
 	card->reader->max_send_size = reader_max_send_size;
 
-	return r;
+	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, r);
 }
 
 static int
@@ -1024,13 +1269,13 @@ cardos_lifecycle_get(sc_card_t *card, int *mode)
 	apdu.resp = rbuf;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Card returned error");
+	LOG_TEST_RET(card->ctx, r, "Card returned error");
 
 	if (apdu.resplen < 1) {
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Lifecycle byte not in response");
+		LOG_TEST_RET(card->ctx, r, "Lifecycle byte not in response");
 	}
 
 	r = SC_SUCCESS;
@@ -1045,11 +1290,11 @@ cardos_lifecycle_get(sc_card_t *card, int *mode)
 		*mode = SC_CARDCTRL_LIFECYCLE_OTHER;
 		break;
 	default:
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Unknown lifecycle byte %d", rbuf[0]);
+		sc_log(card->ctx,  "Unknown lifecycle byte %d", rbuf[0]);
 		r = SC_ERROR_INTERNAL;
 	}
 
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 static int
@@ -1080,12 +1325,12 @@ cardos_lifecycle_set(sc_card_t *card, int *mode)
 	apdu.resp = NULL;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Card returned error");
+	LOG_TEST_RET(card->ctx, r, "Card returned error");
 
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 static int
@@ -1108,12 +1353,12 @@ cardos_put_data_oci(sc_card_t *card,
 	apdu.datalen = args->len;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Card returned error");
+	LOG_TEST_RET(card->ctx, r, "Card returned error");
 
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 static int
@@ -1134,10 +1379,10 @@ cardos_put_data_seci(sc_card_t *card,
 	apdu.datalen = args->len;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Card returned error");
+	LOG_TEST_RET(card->ctx, r, "Card returned error");
 
 	return r;
 }
@@ -1169,9 +1414,9 @@ cardos_generate_key(sc_card_t *card,
 	apdu.datalen = apdu.lc = sizeof(data);
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "GENERATE_KEY failed");
+	LOG_TEST_RET(card->ctx, r, "GENERATE_KEY failed");
 
 	return r;
 }
@@ -1187,17 +1432,22 @@ static int cardos_get_serialnr(sc_card_t *card, sc_serial_number_t *serial)
 	apdu.resplen = sizeof(rbuf);
 	apdu.le   = 256;
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r,  "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r,  "APDU transmit failed");
 	if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
 		return SC_ERROR_INTERNAL;
-	if (apdu.resplen != 32) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "unexpected response to GET DATA serial"
+	if ((apdu.resplen == 8) && (card->type == SC_CARD_TYPE_CARDOS_V5_0 || card->type == SC_CARD_TYPE_CARDOS_V5_3)) {
+		/* cache serial number */
+		memcpy(card->serialnr.value, rbuf, 8);
+		card->serialnr.len = 8;
+	} else if (apdu.resplen == 32) {
+		/* cache serial number */
+		memcpy(card->serialnr.value, &rbuf[10], 6);
+		card->serialnr.len = 6;
+	} else {
+		sc_log(card->ctx,  "unexpected response to GET DATA serial"
 				" number\n");
 		return SC_ERROR_INTERNAL;
 	}
-	/* cache serial number */
-	memcpy(card->serialnr.value, &rbuf[10], 6);
-	card->serialnr.len = 6;
 	/* copy and return serial number */
 	memcpy(serial, &card->serialnr, sizeof(*serial));
 	return SC_SUCCESS;
@@ -1220,6 +1470,9 @@ cardos_card_ctl(sc_card_t *card, unsigned long cmd, void *ptr)
 	case SC_CARDCTL_CARDOS_GENERATE_KEY:
 		return cardos_generate_key(card,
 			(struct sc_cardctl_cardos_genkey_info *) ptr);
+	case  SC_CARDCTL_CARDOS_PASS_ALGO_FLAGS:
+		return cardos_pass_algo_flags(card,
+			(struct sc_cardctl_cardos_pass_algo_flags *) ptr);
 	case SC_CARDCTL_LIFECYCLE_GET:
 		return cardos_lifecycle_get(card, (int *) ptr);
 	case SC_CARDCTL_LIFECYCLE_SET:
@@ -1276,7 +1529,8 @@ cardos_logout(sc_card_t *card)
 		   	|| card->type == SC_CARD_TYPE_CARDOS_M4_2C
 		   	|| card->type == SC_CARD_TYPE_CARDOS_M4_3
 		   	|| card->type == SC_CARD_TYPE_CARDOS_M4_4
-			|| card->type == SC_CARD_TYPE_CARDOS_V5_0) {
+			|| card->type == SC_CARD_TYPE_CARDOS_V5_0
+			|| card->type == SC_CARD_TYPE_CARDOS_V5_3) {
 		sc_apdu_t apdu;
 		int       r;
 		sc_path_t path;
@@ -1290,7 +1544,7 @@ cardos_logout(sc_card_t *card)
 		apdu.cla = 0x80;
 
 		r = sc_transmit_apdu(card, &apdu);
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+		LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 		return sc_check_sw(card, apdu.sw1, apdu.sw2);
 	} else
@@ -1306,6 +1560,7 @@ static struct sc_card_driver * sc_get_driver(void)
 	cardos_ops = *iso_ops;
 	cardos_ops.match_card = cardos_match_card;
 	cardos_ops.init = cardos_init;
+	cardos_ops.finish = cardos_finish;
 	cardos_ops.select_file = cardos_select_file;
 	cardos_ops.create_file = cardos_create_file;
 	cardos_ops.set_security_env = cardos_set_security_env;

@@ -47,6 +47,8 @@ static sc_pkcs11_mechanism_type_t find_mechanism = {
 	NULL,		/* decrypt_init */
 	NULL,		/* decrypt */
 	NULL,		/* derive */
+	NULL,		/* wrap */
+	NULL,		/* unwrap */
 	NULL,		/* mech_data */
 	NULL,		/* free_mech_data */
 };
@@ -56,7 +58,6 @@ sc_find_release(sc_pkcs11_operation_t *operation)
 {
 	struct sc_pkcs11_find_operation *fop = (struct sc_pkcs11_find_operation *)operation;
 
-	sc_log(context,"freeing %d handles used %d  at %p", fop->allocated_handles, fop->num_handles, fop->handles);
 	if (fop->handles) {
 		free(fop->handles);
 		fop->handles = NULL;
@@ -95,6 +96,7 @@ CK_RV sc_create_object_int(CK_SESSION_HANDLE hSession,	/* the session's handle *
 	CK_RV rv = CKR_OK;
 	struct sc_pkcs11_session *session;
 	struct sc_pkcs11_card *card;
+	CK_BBOOL is_token = FALSE;
 
 	LOG_FUNC_CALLED(context);
 	if (pTemplate == NULL_PTR || ulCount == 0)
@@ -114,9 +116,20 @@ CK_RV sc_create_object_int(CK_SESSION_HANDLE hSession,	/* the session's handle *
 		goto out;
 	}
 
-	if (session->slot->token_info.flags & CKF_WRITE_PROTECTED) {
-		rv = CKR_TOKEN_WRITE_PROTECTED;
+	rv = attr_find(pTemplate, ulCount, CKA_TOKEN, &is_token, NULL);
+	if (rv != CKR_TEMPLATE_INCOMPLETE && rv != CKR_OK) {
 		goto out;
+	}
+
+	if (is_token == TRUE) {
+		if (session->slot->token_info.flags & CKF_WRITE_PROTECTED) {
+			rv = CKR_TOKEN_WRITE_PROTECTED;
+			goto out;
+		}
+		if (!(session->flags & CKF_RW_SESSION)) {
+			rv = CKR_SESSION_READ_ONLY;
+			goto out;
+		}
 	}
 
 	card = session->slot->p11card;
@@ -128,7 +141,8 @@ CK_RV sc_create_object_int(CK_SESSION_HANDLE hSession,	/* the session's handle *
 out:
 	if (use_lock)
 		sc_pkcs11_unlock();
-	LOG_FUNC_RETURN(context, rv);
+
+	return rv;
 }
 
 
@@ -210,7 +224,7 @@ C_GetAttributeValue(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		CK_ATTRIBUTE_PTR pTemplate,	/* specifies attributes, gets values */
 		CK_ULONG ulCount)		/* attributes in template */
 {
-	static int precedence[] = {
+	static CK_RV precedence[] = {
 		CKR_OK,
 		CKR_BUFFER_TOO_SMALL,
 		CKR_ATTRIBUTE_TYPE_INVALID,
@@ -218,11 +232,12 @@ C_GetAttributeValue(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		-1
 	};
 	char object_name[64];
-	int j;
+	CK_RV j;
 	CK_RV rv;
 	struct sc_pkcs11_session *session;
 	struct sc_pkcs11_object *object;
-	int res, res_type;
+	CK_RV res;
+	CK_RV res_type;
 	unsigned int i;
 
 	if (pTemplate == NULL_PTR || ulCount == 0)
@@ -256,7 +271,7 @@ C_GetAttributeValue(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		 * should be handled - we give them highest
 		 * precedence
 		 */
-		for (j = 0; precedence[j] != -1; j++) {
+		for (j = 0; precedence[j] != (CK_RV) -1; j++) {
 			if (precedence[j] == res)
 				break;
 		}
@@ -360,7 +375,7 @@ C_FindObjectsInit(CK_SESSION_HANDLE hSession,	/* the session's handle */
 
 	/* Check whether we should hide private objects */
 	hide_private = 0;
-	if (slot->login_user != CKU_USER && (slot->token_info.flags & CKF_LOGIN_REQUIRED))
+	if ((slot->login_user == -1) && (slot->token_info.flags & CKF_LOGIN_REQUIRED))
 		hide_private = 1;
 
 	/* For each object in token do */
@@ -1012,7 +1027,8 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession,	/* the session's handle */
 	}
 
 	slot = session->slot;
-	if (slot->p11card->framework->gen_keypair == NULL)
+	if (slot == NULL || slot->p11card == NULL || slot->p11card->framework == NULL
+			|| slot->p11card->framework->gen_keypair == NULL)
 		rv = CKR_FUNCTION_NOT_SUPPORTED;
 	else {
 		rv = restore_login_state(slot);
@@ -1037,7 +1053,71 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		CK_BYTE_PTR pWrappedKey,	/* receives the wrapped key */
 		CK_ULONG_PTR pulWrappedKeyLen)
 {				/* receives byte size of wrapped key */
-	return CKR_FUNCTION_NOT_SUPPORTED;
+	CK_RV rv;
+	CK_BBOOL can_wrap,
+			 can_be_wrapped;
+	CK_KEY_TYPE key_type;
+	CK_ATTRIBUTE wrap_attribute = { CKA_WRAP, &can_wrap, sizeof(can_wrap) };
+	CK_ATTRIBUTE extractable_attribute = { CKA_EXTRACTABLE, &can_be_wrapped, sizeof(can_be_wrapped) };
+	CK_ATTRIBUTE key_type_attr = { CKA_KEY_TYPE, &key_type, sizeof(key_type) };
+	struct sc_pkcs11_session *session;
+	struct sc_pkcs11_object *wrapping_object;
+	struct sc_pkcs11_object *key_object;
+
+	if (pMechanism == NULL_PTR)
+		return CKR_ARGUMENTS_BAD;
+
+	rv = sc_pkcs11_lock();
+	if (rv != CKR_OK)
+		return rv;
+
+	/* Check if the wrapping key is OK to do wrapping */
+	rv = get_object_from_session(hSession, hWrappingKey, &session, &wrapping_object);
+	if (rv != CKR_OK) {
+		if (rv == CKR_OBJECT_HANDLE_INVALID)
+			rv = CKR_KEY_HANDLE_INVALID;
+		goto out;
+	}
+	if (wrapping_object->ops->wrap_key == NULL_PTR) {
+		rv = CKR_KEY_TYPE_INCONSISTENT;
+		goto out;
+	}
+
+	rv = wrapping_object->ops->get_attribute(session, wrapping_object, &wrap_attribute);
+	if (rv != CKR_OK || !can_wrap) {
+		rv = CKR_KEY_TYPE_INCONSISTENT;
+		goto out;
+	}
+	rv = wrapping_object->ops->get_attribute(session, wrapping_object, &key_type_attr);
+	if (rv != CKR_OK) {
+		rv = CKR_KEY_TYPE_INCONSISTENT;
+		goto out;
+	}
+
+	/* Check if the key to be wrapped exists and is extractable*/
+	rv = get_object_from_session(hSession, hKey, &session, &key_object);
+	if (rv != CKR_OK) {
+		if (rv == CKR_OBJECT_HANDLE_INVALID)
+			rv = CKR_KEY_HANDLE_INVALID;
+		goto out;
+	}
+
+	rv = key_object->ops->get_attribute(session, key_object, &extractable_attribute);
+	if (rv != CKR_OK || !can_be_wrapped) {
+		rv = CKR_KEY_TYPE_INCONSISTENT;
+		goto out;
+	}
+
+	rv = restore_login_state(session->slot);
+	if (rv == CKR_OK)
+		rv = sc_pkcs11_wrap(session, pMechanism, wrapping_object, key_type,
+				key_object, pWrappedKey, pulWrappedKeyLen);
+
+	rv = reset_login_state(session->slot, rv);
+
+out:
+	sc_pkcs11_unlock();
+	return rv;
 }
 
 CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession,	/* the session's handle */
@@ -1049,7 +1129,67 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		  CK_ULONG ulAttributeCount,	/* # of attributes in template */
 		  CK_OBJECT_HANDLE_PTR phKey)
 {				/* gets handle of recovered key */
-	return CKR_FUNCTION_NOT_SUPPORTED;
+	CK_RV rv;
+	CK_BBOOL can_unwrap;
+	CK_KEY_TYPE key_type;
+	CK_ATTRIBUTE unwrap_attribute = { CKA_UNWRAP, &can_unwrap, sizeof(can_unwrap) };
+	CK_ATTRIBUTE key_type_attr = { CKA_KEY_TYPE, &key_type, sizeof(key_type) };
+	struct sc_pkcs11_session *session;
+	struct sc_pkcs11_object *object;
+	struct sc_pkcs11_object *key_object;
+
+	if (pMechanism == NULL_PTR)
+		return CKR_ARGUMENTS_BAD;
+
+	rv = sc_pkcs11_lock();
+	if (rv != CKR_OK)
+		return rv;
+
+	rv = get_object_from_session(hSession, hUnwrappingKey, &session, &object);
+	if (rv != CKR_OK) {
+		if (rv == CKR_OBJECT_HANDLE_INVALID)
+			rv = CKR_KEY_HANDLE_INVALID;
+		goto out;
+	}
+	if (object->ops->unwrap_key == NULL_PTR) {
+		rv = CKR_KEY_TYPE_INCONSISTENT;
+		goto out;
+	}
+
+	rv = object->ops->get_attribute(session, object, &unwrap_attribute);
+	if (rv != CKR_OK || !can_unwrap) {
+		rv = CKR_KEY_TYPE_INCONSISTENT;
+		goto out;
+	}
+	rv = object->ops->get_attribute(session, object, &key_type_attr);
+	if (rv != CKR_OK) {
+		rv = CKR_KEY_TYPE_INCONSISTENT;
+		goto out;
+	}
+
+	/* Create the target object in memory */
+	rv = sc_create_object_int(hSession, pTemplate, ulAttributeCount, phKey, 0);
+
+	if (rv != CKR_OK)
+	    goto out;
+
+	rv = get_object_from_session(hSession, *phKey, &session, &key_object);
+	if (rv != CKR_OK) {
+		if (rv == CKR_OBJECT_HANDLE_INVALID)
+			rv = CKR_KEY_HANDLE_INVALID;
+		goto out;
+	}
+
+	rv = restore_login_state(session->slot);
+	if (rv == CKR_OK)
+		rv = sc_pkcs11_unwrap(session, pMechanism, object, key_type,
+				pWrappedKey, ulWrappedKeyLen, key_object);
+	/* TODO if (rv != CK_OK) need to destroy the object */
+	rv = reset_login_state(session->slot, rv);
+
+out:
+	sc_pkcs11_unlock();
+	return rv;
 }
 
 CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession,	/* the session's handle */
@@ -1156,7 +1296,8 @@ CK_RV C_GenerateRandom(CK_SESSION_HANDLE hSession,	/* the session's handle */
 	rv = get_session(hSession, &session);
 	if (rv == CKR_OK) {
 		slot = session->slot;
-		if (slot->p11card->framework->get_random == NULL)
+		if (slot == NULL || slot->p11card == NULL || slot->p11card->framework == NULL
+				|| slot->p11card->framework->get_random == NULL)
 			rv = CKR_RANDOM_NO_RNG;
 		else
 			rv = slot->p11card->framework->get_random(slot, RandomData, ulRandomLen);
@@ -1322,17 +1463,191 @@ CK_RV C_VerifyRecover(CK_SESSION_HANDLE hSession,	/* the session's handle */
 	return CKR_FUNCTION_NOT_SUPPORTED;
 }
 
+/* PKCS #11 3.0 only */
+CK_RV C_MessageEncryptInit(CK_SESSION_HANDLE hSession,    /* the session's handle */
+			   CK_MECHANISM_PTR pMechanism,  /* the encryption mechanism */
+			   CK_OBJECT_HANDLE hKey)         /* handle of encryption key */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_EncryptMessage(CK_SESSION_HANDLE hSession,   /* the session's handle */
+		       CK_VOID_PTR pParameter,       /* message specific parameter */
+		       CK_ULONG ulParameterLen,      /* length of message specific parameter */
+		       CK_BYTE_PTR pAssociatedData,  /* AEAD Associated data */
+		       CK_ULONG ulAssociatedDataLen, /* AEAD Associated data length */
+		       CK_BYTE_PTR pPlaintext,       /* plain text  */
+		       CK_ULONG ulPlaintextLen,      /* plain text length */
+		       CK_BYTE_PTR pCiphertext,      /* gets cipher text */
+		       CK_ULONG_PTR pulCiphertextLen) /* gets cipher text length */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_EncryptMessageBegin(CK_SESSION_HANDLE hSession,   /* the session's handle */
+			    CK_VOID_PTR pParameter,       /* message specific parameter */
+			    CK_ULONG ulParameterLen,      /* length of message specific parameter */
+			    CK_BYTE_PTR pAssociatedData,  /* AEAD Associated data */
+			    CK_ULONG ulAssociatedDataLen)  /* AEAD Associated data length */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_EncryptMessageNext(CK_SESSION_HANDLE hSession,        /* the session's handle */
+			   CK_VOID_PTR pParameter,            /* message specific parameter */
+			   CK_ULONG ulParameterLen,           /* length of message specific parameter */
+			   CK_BYTE_PTR pPlaintextPart,        /* plain text */
+			   CK_ULONG ulPlaintextPartLen,       /* plain text length */
+			   CK_BYTE_PTR pCiphertextPart,       /* gets cipher text */
+			   CK_ULONG_PTR pulCiphertextPartLen, /* gets cipher text length */
+			   CK_FLAGS flags)                     /* multi mode flag */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_MessageEncryptFinal(CK_SESSION_HANDLE hSession)        /* the session's handle */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_MessageDecryptInit(CK_SESSION_HANDLE hSession,    /* the session's handle */
+			   CK_MECHANISM_PTR pMechanism,  /* the decryption mechanism */
+			   CK_OBJECT_HANDLE hKey)         /* handle of decryption key */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_DecryptMessage(CK_SESSION_HANDLE hSession,    /* the session's handle */
+		       CK_VOID_PTR pParameter,       /* message specific parameter */
+		       CK_ULONG ulParameterLen,      /* length of message specific parameter */
+		       CK_BYTE_PTR pAssociatedData,  /* AEAD Associated data */
+		       CK_ULONG ulAssociatedDataLen, /* AEAD Associated data length */
+		       CK_BYTE_PTR pCiphertext,      /* cipher text */
+		       CK_ULONG ulCiphertextLen,     /* cipher text length */
+		       CK_BYTE_PTR pPlaintext,       /* gets plain text */
+		       CK_ULONG_PTR pulPlaintextLen)  /* gets plain text length */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_DecryptMessageBegin(CK_SESSION_HANDLE hSession,    /* the session's handle */
+			    CK_VOID_PTR pParameter,       /* message specific parameter */
+			    CK_ULONG ulParameterLen,      /* length of message specific parameter */
+			    CK_BYTE_PTR pAssociatedData,  /* AEAD Associated data */
+			    CK_ULONG ulAssociatedDataLen)  /* AEAD Associated data length */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_DecryptMessageNext(CK_SESSION_HANDLE hSession,    /* the session's handle */
+			   CK_VOID_PTR pParameter,            /* message specific parameter */
+			   CK_ULONG ulParameterLen,           /* length of message specific parameter */
+			   CK_BYTE_PTR pCiphertextPart,       /* cipher text */
+			   CK_ULONG ulCiphertextPartLen,      /* cipher text length */
+			   CK_BYTE_PTR pPlaintextPart,        /* gets plain text */
+			   CK_ULONG_PTR pulPlaintextPartLen,  /* gets plain text length */
+			   CK_FLAGS flags)                     /* multi mode flag */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_MessageDecryptFinal(CK_SESSION_HANDLE hSession)    /* the session's handle */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_MessageSignInit(CK_SESSION_HANDLE hSession,    /* the session's handle */
+			CK_MECHANISM_PTR pMechanism,  /* the signing mechanism */
+			CK_OBJECT_HANDLE hKey)         /* handle of signing key */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_SignMessage(CK_SESSION_HANDLE hSession,    /* the session's handle */
+		    CK_VOID_PTR pParameter,       /* message specific parameter */
+		    CK_ULONG ulParameterLen,      /* length of message specific parameter */
+		    CK_BYTE_PTR pData,            /* data to sign */
+		    CK_ULONG ulDataLen,           /* data to sign length */
+		    CK_BYTE_PTR pSignature,       /* gets signature */
+		    CK_ULONG_PTR pulSignatureLen)  /* gets signature length */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_SignMessageBegin(CK_SESSION_HANDLE hSession,    /* the session's handle */
+			 CK_VOID_PTR pParameter,       /* message specific parameter */
+			 CK_ULONG ulParameterLen)      /* length of message specific parameter */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_SignMessageNext(CK_SESSION_HANDLE hSession,    /* the session's handle */
+			CK_VOID_PTR pParameter,       /* message specific parameter */
+			CK_ULONG ulParameterLen,      /* length of message specific parameter */
+			CK_BYTE_PTR pData,            /* data to sign */
+			CK_ULONG ulDataLen,           /* data to sign length */
+			CK_BYTE_PTR pSignature,       /* gets signature */
+			CK_ULONG_PTR pulSignatureLen)  /* gets signature length */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_MessageSignFinal(CK_SESSION_HANDLE hSession)    /* the session's handle */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_MessageVerifyInit(CK_SESSION_HANDLE hSession,    /* the session's handle */
+			  CK_MECHANISM_PTR  pMechanism,  /* the signing mechanism */
+			  CK_OBJECT_HANDLE  hKey)         /* handle of signing key */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_VerifyMessage(CK_SESSION_HANDLE hSession,    /* the session's handle */
+		      CK_VOID_PTR pParameter,       /* message specific parameter */
+		      CK_ULONG ulParameterLen,      /* length of message specific parameter */
+		      CK_BYTE_PTR pData,            /* data to sign */
+		      CK_ULONG ulDataLen,           /* data to sign length */
+		      CK_BYTE_PTR pSignature,       /* signature */
+		      CK_ULONG ulSignatureLen)       /* signature length */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_VerifyMessageBegin(CK_SESSION_HANDLE hSession,    /* the session's handle */
+			   CK_VOID_PTR pParameter,       /* message specific parameter */
+			   CK_ULONG ulParameterLen)      /* length of message specific parameter */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_VerifyMessageNext(CK_SESSION_HANDLE hSession,    /* the session's handle */
+			  CK_VOID_PTR pParameter,       /* message specific parameter */
+			  CK_ULONG ulParameterLen,      /* length of message specific parameter */
+			  CK_BYTE_PTR pData,            /* data to sign */
+			  CK_ULONG ulDataLen,           /* data to sign length */
+			  CK_BYTE_PTR pSignature,       /* signature */
+			  CK_ULONG ulSignatureLen)       /* signature length */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV C_MessageVerifyFinal(CK_SESSION_HANDLE hSession)    /* the session's handle */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
 /*
  * Helper function to compare attributes on any sort of object
  */
-int sc_pkcs11_any_cmp_attribute(struct sc_pkcs11_session *session, void *ptr, CK_ATTRIBUTE_PTR attr)
+CK_RV sc_pkcs11_any_cmp_attribute(struct sc_pkcs11_session *session, void *ptr, CK_ATTRIBUTE_PTR attr)
 {
-	int rv;
+	CK_RV rv;
 	struct sc_pkcs11_object *object;
 	u8 temp1[1024];
 	u8 *temp2 = NULL;	/* dynamic allocation for large attributes */
 	CK_ATTRIBUTE temp_attr;
-	int res;
 
 	object = (struct sc_pkcs11_object *)ptr;
 	temp_attr.type = attr->type;
@@ -1356,7 +1671,7 @@ int sc_pkcs11_any_cmp_attribute(struct sc_pkcs11_session *session, void *ptr, CK
 	/* Get the attribute */
 	rv = object->ops->get_attribute(session, object, &temp_attr);
 	if (rv != CKR_OK) {
-		res = 0;
+		rv = 0;
 		goto done;
 	}
 #ifdef DEBUG
@@ -1367,12 +1682,12 @@ int sc_pkcs11_any_cmp_attribute(struct sc_pkcs11_session *session, void *ptr, CK
 		dump_template(SC_LOG_DEBUG_NORMAL, foo, &temp_attr, 1);
 	}
 #endif
-	res = temp_attr.ulValueLen == attr->ulValueLen
+	rv = temp_attr.ulValueLen == attr->ulValueLen
 	    && !memcmp(temp_attr.pValue, attr->pValue, attr->ulValueLen);
 
       done:
 	if (temp2 != NULL)
 		free(temp2);
 
-	return res;
+	return rv;
 }

@@ -108,7 +108,7 @@ static int itacns_match_cns_card(sc_card_t *card, unsigned int i)
 	if(atr[i] != 0x10) {
 		char version[8];
 		snprintf(version, sizeof(version), "%d.%d", (atr[i] >> 4) & 0x0f, atr[i] & 0x0f);
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "CNS card version %s; no official specifications "
+		sc_log(card->ctx, "CNS card version %s; no official specifications "
 			"are published. Proceeding anyway.\n", version);
 	}
 	i++;
@@ -260,10 +260,10 @@ static int itacns_restore_security_env(sc_card_t *card, int se_num)
 	apdu.le = 0;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Card returned error");
+	LOG_TEST_RET(card->ctx, r, "Card returned error");
 
 	SC_FUNC_RETURN(card->ctx, 1, r);
 }
@@ -292,7 +292,7 @@ static int itacns_set_security_env(sc_card_t *card,
 
 	if (!(env->flags & SC_SEC_ENV_KEY_REF_PRESENT)
 	 || env->key_ref_len != 1) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+		sc_log(card->ctx,
 			"No or invalid key reference\n");
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
@@ -302,7 +302,7 @@ static int itacns_set_security_env(sc_card_t *card,
 	   so far want 0x03. */
 	r = itacns_restore_security_env(card,
 		(card->type == SC_CARD_TYPE_ITACNS_CIE_V1 ? 0x30 : 0x03));
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x22, 0xF1, 0);
 	switch (env->operation) {
@@ -311,9 +311,6 @@ static int itacns_set_security_env(sc_card_t *card,
 		break;
 	case SC_SEC_OPERATION_SIGN:
 		apdu.p2 = 0xB6;
-		break;
-	case SC_SEC_OPERATION_AUTHENTICATE:
-		apdu.p2 = 0xA4;
 		break;
 	default:
 		return SC_ERROR_INVALID_ARGUMENTS;
@@ -329,10 +326,10 @@ static int itacns_set_security_env(sc_card_t *card,
 	apdu.data = data;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Card returned error");
+	LOG_TEST_RET(card->ctx, r, "Card returned error");
 
 	SC_FUNC_RETURN(card->ctx, 1, r);
 }
@@ -446,7 +443,7 @@ static const int ef_acl[9] = {
 	/* XXX: ADMIN should be an ACL type of its own, or mapped
 	 * to erase */
 	SC_AC_OP_ERASE,		/* ADMIN EF (modify meta information?) */
-	-1,			/* INC (-> cylic fixed files) */
+	-1,			/* INC (-> cyclic fixed files) */
 	-1			/* DEC */
 };
 
@@ -478,7 +475,7 @@ static int itacns_select_file(sc_card_t *card,
 		parse_sec_attr((*file), (*file)->sec_attr,
 			(*file)->sec_attr_len);
 	}
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 static int itacns_get_serialnr(sc_card_t *card, sc_serial_number_t *serial)
@@ -497,7 +494,7 @@ static int itacns_get_serialnr(sc_card_t *card, sc_serial_number_t *serial)
 		return SC_SUCCESS;
 	}
 
-	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Reading EF_IDCarta.\n");
+	sc_log(card->ctx, "Reading EF_IDCarta.\n");
 
 	sc_format_path("3F0010001003", &path);
 
@@ -506,13 +503,14 @@ static int itacns_get_serialnr(sc_card_t *card, sc_serial_number_t *serial)
 		return SC_ERROR_WRONG_CARD;
 	}
 	len = file->size;
+	sc_file_free(file);
 
 	//Returned file->size should be 16. 
 	//We choose to not consider it as critical, because some cards 
 	//do not return FCI/FCP templates that include the file size.
 	//Notify abnormal length anyway.
 	if (len != 16) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, 
+		sc_log(card->ctx, 
 				"Unexpected file length of EF_IDCarta (%lu)\n",
 				(unsigned long) len);
 	}

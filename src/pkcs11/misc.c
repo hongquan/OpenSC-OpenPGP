@@ -43,16 +43,26 @@ static struct sc_to_cryptoki_error_conversion sc_to_cryptoki_error_map[]  = {
 
 void strcpy_bp(u8 * dst, const char *src, size_t dstsize)
 {
-	size_t c;
-
-	if (!dst || !src || !dstsize)
+	if (!dst || !dstsize)
 		return;
 
 	memset((char *)dst, ' ', dstsize);
 
-	c = strlen(src) > dstsize ? dstsize : strlen(src);
+	if (src) {
+		size_t src_len = strlen(src);
 
-	memcpy((char *)dst, src, c);
+		if (src_len > dstsize) {
+			/* string will be truncated */
+			memcpy((char *)dst, src, dstsize);
+			if (dstsize > 3) {
+				/* show truncation with '...' */
+				/* FIXME avoid breaking an UTF-8 character on multiple bytes */
+				memset((char *)dst + dstsize - 3, '.', 3);
+			}
+		} else {
+			memcpy((char *)dst, src, src_len);
+		}
+	}
 }
 
 
@@ -140,7 +150,7 @@ CK_RV restore_login_state(struct sc_pkcs11_slot *slot)
 	if (sc_pkcs11_conf.atomic && slot) {
 		if (list_iterator_start(&slot->logins)) {
 			struct sc_pkcs11_login *login = list_iterator_next(&slot->logins);
-			while (login) {
+			while (login && slot->p11card && slot->p11card->framework) {
 				r = slot->p11card->framework->login(slot, login->userType,
 						login->pPin, login->ulPinLen);
 				if (r != CKR_OK)
@@ -305,7 +315,7 @@ CK_RV session_stop_operation(struct sc_pkcs11_session * session, int type)
 
 CK_RV attr_extract(CK_ATTRIBUTE_PTR pAttr, void *ptr, size_t * sizep)
 {
-	unsigned int size;
+	size_t size;
 
 	if (sizep) {
 		size = *sizep;

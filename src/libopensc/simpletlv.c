@@ -49,19 +49,20 @@ sc_simpletlv_put_tag(u8 tag, size_t datalen, u8 *out, size_t outlen, u8 **ptr)
 	/* tag is just number between 0x01 and 0xFE */
 	if (tag == 0x00 || tag == 0xff)
 		return SC_ERROR_INVALID_ARGUMENTS;
+	if (datalen > 0xffff) {
+		/* we can't store more than two bytes in Simple TLV */
+		return SC_ERROR_WRONG_LENGTH;
+	}
 
 	*p++ = tag; /* tag is single byte */
 	if (datalen < 0xff) {
 		/* short value up to 255 */
 		*p++ = (u8)datalen; /* is in the second byte */
-	} else if (datalen < 0xffff) {
+	} else {
 		/* longer values up to 65535 */
 		*p++ = (u8)0xff; /* first byte is 0xff */
 		*p++ = (u8)datalen & 0xff;
 		*p++ = (u8)(datalen >> 8) & 0xff; /* LE */
-	} else {
-		/* we can't store more than two bytes in Simple TLV */
-		return SC_ERROR_WRONG_LENGTH;
 	}
 	if (ptr != NULL)
 		*ptr = p;
@@ -72,11 +73,11 @@ sc_simpletlv_put_tag(u8 tag, size_t datalen, u8 *out, size_t outlen, u8 **ptr)
  * content.
  */
 int
-sc_simpletlv_read_tag(u8 **buf, size_t buflen, u8 *tag_out, size_t *taglen)
+sc_simpletlv_read_tag(const u8 **buf, size_t buflen, u8 *tag_out, size_t *taglen)
 {
 	u8 tag;
 	size_t left = buflen, len;
-	u8 *p = *buf;
+	const u8 *p = *buf;
 
 	*buf = NULL;
 

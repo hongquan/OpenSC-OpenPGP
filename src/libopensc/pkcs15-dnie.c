@@ -169,7 +169,10 @@ static int sc_pkcs15emu_dnie_init(sc_pkcs15_card_t * p15card)
         }
 
 	/* Set root path of this application */
+	sc_file_free(p15card->file_app);
 	p15card->file_app = sc_file_new();
+	if (NULL == p15card->file_app)
+		LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_ENOUGH_MEMORY);
 	sc_format_path("3F00", &p15card->file_app->path);
 
 	/* Load TokenInfo */
@@ -274,17 +277,13 @@ static int sc_pkcs15emu_dnie_init(sc_pkcs15_card_t * p15card)
 /* public functions for in-built module */
 /****************************************/
 int sc_pkcs15emu_dnie_init_ex(sc_pkcs15_card_t * p15card,
-			      struct sc_aid *aid,
-			      sc_pkcs15emu_opt_t * opts)
+				  struct sc_aid *aid)
 {
 	int r=SC_SUCCESS;
 	sc_context_t *ctx = p15card->card->ctx;
 	LOG_FUNC_CALLED(ctx);
 
 #if defined(ENABLE_OPENSSL) && defined(ENABLE_SM)
-	/* if no check flag execute unconditionally */
-	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)
-		LOG_FUNC_RETURN(ctx, sc_pkcs15emu_dnie_init(p15card));
 	/* check for proper card */
 	r = dnie_match_card(p15card->card);
 	if (r == 0)

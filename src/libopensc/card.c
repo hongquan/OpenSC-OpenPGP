@@ -28,6 +28,7 @@
 #include <unistd.h>
 #endif
 #include <string.h>
+#include <limits.h>
 
 #include "reader-tr03119.h"
 #include "internal.h"
@@ -63,6 +64,65 @@ void sc_format_apdu(sc_card_t *card, sc_apdu_t *apdu,
 	apdu->p2 = (u8) p2;
 }
 
+void sc_format_apdu_cse_lc_le(struct sc_apdu *apdu)
+{
+	/* TODO calculating the APDU case, Lc and Le should actually only be
+	 * done in sc_apdu2bytes, but to gradually change OpenSC we start here. */
+	/* Let sc_detect_apdu_cse set short or extended  and test for chaining */
+
+	if (!apdu)
+		return;
+	if (apdu->datalen > SC_MAX_APDU_DATA_SIZE
+			|| apdu->resplen > SC_MAX_APDU_RESP_SIZE) {
+		/* extended length  or data chaining and/or get response */
+		if (apdu->datalen <= SC_MAX_EXT_APDU_DATA_SIZE)
+			apdu->lc = apdu->datalen;
+		if (apdu->resplen <= SC_MAX_EXT_APDU_RESP_SIZE)
+			apdu->le = apdu->resplen;
+		if (apdu->resplen && !apdu->datalen)
+			apdu->cse = SC_APDU_CASE_2;
+		if (!apdu->resplen && apdu->datalen)
+			apdu->cse = SC_APDU_CASE_3;
+		if (apdu->resplen && apdu->datalen)
+			apdu->cse = SC_APDU_CASE_4;
+	} else {
+		/* short length */
+		if (apdu->datalen <= SC_MAX_APDU_DATA_SIZE)
+			apdu->lc = apdu->datalen;
+		if (apdu->resplen <= SC_MAX_APDU_RESP_SIZE)
+			apdu->le = apdu->resplen;
+		if (!apdu->resplen && !apdu->datalen)
+			apdu->cse = SC_APDU_CASE_1;
+		if (apdu->resplen && !apdu->datalen)
+			apdu->cse = SC_APDU_CASE_2_SHORT;
+		if (!apdu->resplen && apdu->datalen)
+			apdu->cse = SC_APDU_CASE_3_SHORT;
+		if (apdu->resplen && apdu->datalen)
+			apdu->cse = SC_APDU_CASE_4_SHORT;
+	}
+}
+
+void sc_format_apdu_ex(struct sc_apdu *apdu,
+		u8 cla, u8 ins, u8 p1, u8 p2,
+		const u8 *data, size_t datalen,
+		u8 *resp, size_t resplen)
+{
+	if (!apdu) {
+		return;
+	}
+
+	memset(apdu, 0, sizeof(*apdu));
+	apdu->cla = cla;
+	apdu->ins = ins;
+	apdu->p1 = p1;
+	apdu->p2 = p2;
+	apdu->resp = resp;
+	apdu->resplen = resplen;
+	apdu->data = data;
+	apdu->datalen = datalen;
+	sc_format_apdu_cse_lc_le(apdu);
+}
+
 static sc_card_t * sc_card_new(sc_context_t *ctx)
 {
 	sc_card_t *card;
@@ -96,8 +156,6 @@ static void sc_card_free(sc_card_t *card)
 {
 	sc_free_apps(card);
 	sc_free_ef_atr(card);
-
-	sc_file_free(card->ef_dir);
 
 	free(card->ops);
 
@@ -264,14 +322,14 @@ int sc_connect_card(sc_reader_t *reader, sc_card_t **card_out)
 		sc_card_t uninitialized = *card;
 		sc_log(ctx, "matching built-in ATRs");
 		for (i = 0; ctx->card_drivers[i] != NULL; i++) {
-			/* FIXME If we had a clean API description, we'd propably get a
+			/* FIXME If we had a clean API description, we'd probably get a
 			 * cleaner implementation of the driver's match_card and init,
 			 * which should normally *not* modify the card object if
 			 * unsuccessful. However, after years of relentless hacking, reality
 			 * is different: The card object is changed in virtually every card
 			 * driver so in order to prevent unwanted interaction, we reset the
 			 * card object here and hope that the card driver at least doesn't
-			 * allocate any internal ressources that need to be freed. If we
+			 * allocate any internal resources that need to be freed. If we
 			 * had more time, we should refactor the existing code to not
 			 * modify sc_card_t until complete success (possibly by combining
 			 * `match_card()` and `init()`) */
@@ -562,6 +620,7 @@ int sc_read_binary(sc_card_t *card, unsigned int idx,
 		   unsigned char *buf, size_t count, unsigned long flags)
 {
 	size_t max_le = sc_get_max_recv_size(card);
+	size_t todo = count;
 	int r;
 
 	if (card == NULL || card->ops == NULL || buf == NULL) {
@@ -570,7 +629,7 @@ int sc_read_binary(sc_card_t *card, unsigned int idx,
 	sc_log(card->ctx, "called; %"SC_FORMAT_LEN_SIZE_T"u bytes at index %d",
 	       count, idx);
 	if (count == 0)
-		return 0;
+		LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 
 #ifdef ENABLE_SM
 	if (card->sm_ctx.ops.read_binary)   {
@@ -579,42 +638,45 @@ int sc_read_binary(sc_card_t *card, unsigned int idx,
 			LOG_FUNC_RETURN(card->ctx, r);
 	}
 #endif
+
 	if (card->ops->read_binary == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
 
-	if (count > max_le) {
-		int bytes_read = 0;
-		unsigned char *p = buf;
+	/* lock the card now to avoid deselection of the file */
+	r = sc_lock(card);
+	LOG_TEST_RET(card->ctx, r, "sc_lock() failed");
 
-		r = sc_lock(card);
-		LOG_TEST_RET(card->ctx, r, "sc_lock() failed");
-		while (count > 0) {
-			size_t n = count > max_le ? max_le : count;
-			r = sc_read_binary(card, idx, p, n, flags);
-			if (r < 0) {
-				sc_unlock(card);
-				LOG_TEST_RET(card->ctx, r, "sc_read_binary() failed");
-			}
-			p += r;
-			idx += r;
-			bytes_read += r;
-			count -= r;
-			if (r == 0) {
-				sc_unlock(card);
-				LOG_FUNC_RETURN(card->ctx, bytes_read);
-			}
+	while (todo > 0) {
+		size_t chunk = todo > max_le ? max_le : todo;
+
+		r = card->ops->read_binary(card, idx, buf, chunk, flags);
+		if (r == 0 || r == SC_ERROR_FILE_END_REACHED)
+			break;
+		if ((idx > SIZE_MAX - (size_t) r)
+				|| (size_t) r > todo) {
+			/* `idx + r` or `todo - r` would overflow */
+			r = SC_ERROR_OFFSET_TOO_LARGE;
 		}
-		sc_unlock(card);
-		LOG_FUNC_RETURN(card->ctx, bytes_read);
+		if (r < 0) {
+			sc_unlock(card);
+			LOG_FUNC_RETURN(card->ctx, r);
+		}
+
+		todo -= (size_t) r;
+		buf  += (size_t) r;
+		idx  += (size_t) r;
 	}
-	r = card->ops->read_binary(card, idx, buf, count, flags);
-	LOG_FUNC_RETURN(card->ctx, r);
+
+	sc_unlock(card);
+
+	LOG_FUNC_RETURN(card->ctx, count - todo);
 }
 
 int sc_write_binary(sc_card_t *card, unsigned int idx,
 		    const u8 *buf, size_t count, unsigned long flags)
 {
 	size_t max_lc = sc_get_max_send_size(card);
+	size_t todo = count;
 	int r;
 
 	if (card == NULL || card->ops == NULL || buf == NULL) {
@@ -623,44 +685,46 @@ int sc_write_binary(sc_card_t *card, unsigned int idx,
 	sc_log(card->ctx, "called; %"SC_FORMAT_LEN_SIZE_T"u bytes at index %d",
 	       count, idx);
 	if (count == 0)
-		LOG_FUNC_RETURN(card->ctx, 0);
+		LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
+
 	if (card->ops->write_binary == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
 
-	if (count > max_lc) {
-		int bytes_written = 0;
-		const u8 *p = buf;
+	/* lock the card now to avoid deselection of the file */
+	r = sc_lock(card);
+	LOG_TEST_RET(card->ctx, r, "sc_lock() failed");
 
-		r = sc_lock(card);
-		LOG_TEST_RET(card->ctx, r, "sc_lock() failed");
-		while (count > 0) {
-			size_t n = count > max_lc? max_lc : count;
-			r = sc_write_binary(card, idx, p, n, flags);
-			if (r < 0) {
-				sc_unlock(card);
-				LOG_TEST_RET(card->ctx, r, "sc_write_binary() failed");
-			}
-			p += r;
-			idx += r;
-			bytes_written += r;
-			count -= r;
-			if (r == 0) {
-				sc_unlock(card);
-				LOG_FUNC_RETURN(card->ctx, bytes_written);
-			}
+	while (todo > 0) {
+		size_t chunk = todo > max_lc ? max_lc : todo;
+
+		r = card->ops->write_binary(card, idx, buf, chunk, flags);
+		if (r == 0 || r == SC_ERROR_FILE_END_REACHED)
+			break;
+		if ((idx > SIZE_MAX - (size_t) r)
+				|| (size_t) r > todo) {
+			/* `idx + r` or `todo - r` would overflow */
+			r = SC_ERROR_OFFSET_TOO_LARGE;
 		}
-		sc_unlock(card);
-		LOG_FUNC_RETURN(card->ctx, bytes_written);
+		if (r < 0) {
+			sc_unlock(card);
+			LOG_FUNC_RETURN(card->ctx, r);
+		}
+
+		todo -= (size_t) r;
+		buf  += (size_t) r;
+		idx  += (size_t) r;
 	}
 
-	r = card->ops->write_binary(card, idx, buf, count, flags);
-	LOG_FUNC_RETURN(card->ctx, r);
+	sc_unlock(card);
+
+	LOG_FUNC_RETURN(card->ctx, count - todo);
 }
 
 int sc_update_binary(sc_card_t *card, unsigned int idx,
 		     const u8 *buf, size_t count, unsigned long flags)
 {
 	size_t max_lc = sc_get_max_send_size(card);
+	size_t todo = count;
 	int r;
 
 	if (card == NULL || card->ops == NULL || buf == NULL) {
@@ -669,7 +733,7 @@ int sc_update_binary(sc_card_t *card, unsigned int idx,
 	sc_log(card->ctx, "called; %"SC_FORMAT_LEN_SIZE_T"u bytes at index %d",
 	       count, idx);
 	if (count == 0)
-		return 0;
+		LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 
 #ifdef ENABLE_SM
 	if (card->sm_ctx.ops.update_binary)   {
@@ -682,53 +746,79 @@ int sc_update_binary(sc_card_t *card, unsigned int idx,
 	if (card->ops->update_binary == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
 
-	if (count > max_lc) {
-		int bytes_written = 0;
-		const u8 *p = buf;
+	/* lock the card now to avoid deselection of the file */
+	r = sc_lock(card);
+	LOG_TEST_RET(card->ctx, r, "sc_lock() failed");
 
-		r = sc_lock(card);
-		LOG_TEST_RET(card->ctx, r, "sc_lock() failed");
-		while (count > 0) {
-			size_t n = count > max_lc? max_lc : count;
-			r = sc_update_binary(card, idx, p, n, flags);
-			if (r < 0) {
-				sc_unlock(card);
-				LOG_TEST_RET(card->ctx, r, "sc_update_binary() failed");
-			}
-			p += r;
-			idx += r;
-			bytes_written += r;
-			count -= r;
-			if (r == 0) {
-				sc_unlock(card);
-				LOG_FUNC_RETURN(card->ctx, bytes_written);
-			}
+	while (todo > 0) {
+		size_t chunk = todo > max_lc ? max_lc : todo;
+
+		r = card->ops->update_binary(card, idx, buf, chunk, flags);
+		if (r == 0 || r == SC_ERROR_FILE_END_REACHED)
+			break;
+		if ((idx > SIZE_MAX - (size_t) r)
+				|| (size_t) r > todo) {
+			/* `idx + r` or `todo - r` would overflow */
+			r = SC_ERROR_OFFSET_TOO_LARGE;
 		}
-		sc_unlock(card);
-		LOG_FUNC_RETURN(card->ctx, bytes_written);
+		if (r < 0) {
+			sc_unlock(card);
+			LOG_FUNC_RETURN(card->ctx, r);
+		}
+
+		todo -= (size_t) r;
+		buf  += (size_t) r;
+		idx  += (size_t) r;
 	}
 
-	r = card->ops->update_binary(card, idx, buf, count, flags);
-	LOG_FUNC_RETURN(card->ctx, r);
+	sc_unlock(card);
+
+	LOG_FUNC_RETURN(card->ctx, count - todo);
 }
 
 
-int sc_erase_binary(struct sc_card *card, unsigned int offs, size_t count,  unsigned long flags)
+int sc_erase_binary(struct sc_card *card, unsigned int idx, size_t count,  unsigned long flags)
 {
 	int r;
+	size_t todo = count;
 
 	if (card == NULL || card->ops == NULL) {
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 	sc_log(card->ctx,
 	       "called; erase %"SC_FORMAT_LEN_SIZE_T"u bytes from offset %d",
-	       count, offs);
+	       count, idx);
+	if (count == 0)
+		LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 
 	if (card->ops->erase_binary == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
 
-	r = card->ops->erase_binary(card, offs, count, flags);
-	LOG_FUNC_RETURN(card->ctx, r);
+	/* lock the card now to avoid deselection of the file */
+	r = sc_lock(card);
+	LOG_TEST_RET(card->ctx, r, "sc_lock() failed");
+
+	while (todo > 0) {
+		r = card->ops->erase_binary(card, idx, todo, flags);
+		if (r == 0 || r == SC_ERROR_FILE_END_REACHED)
+			break;
+		if ((idx > SIZE_MAX - (size_t) r)
+				|| (size_t) r > todo) {
+			/* `idx + r` or `todo - r` would overflow */
+			r = SC_ERROR_OFFSET_TOO_LARGE;
+		}
+		if (r < 0) {
+			sc_unlock(card);
+			LOG_FUNC_RETURN(card->ctx, r);
+		}
+
+		todo -= (size_t) r;
+		idx  += (size_t) r;
+	}
+
+	sc_unlock(card);
+
+	LOG_FUNC_RETURN(card->ctx, count - todo);
 }
 
 
@@ -818,7 +908,6 @@ int sc_put_data(sc_card_t *card, unsigned int tag, const u8 *buf, size_t len)
 int sc_get_challenge(sc_card_t *card, u8 *rnd, size_t len)
 {
 	int r;
-	size_t retry = 10;
 
 	if (len == 0)
 		return SC_SUCCESS;
@@ -834,21 +923,19 @@ int sc_get_challenge(sc_card_t *card, u8 *rnd, size_t len)
 
 	r = sc_lock(card);
 	if (r != SC_SUCCESS)
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+		LOG_FUNC_RETURN(card->ctx, r);
 
-	while (len > 0 && retry > 0) {
+	while (len > 0) {
 		r = card->ops->get_challenge(card, rnd, len);
+		if (r == 0)
+			r = SC_ERROR_INVALID_DATA;
 		if (r < 0) {
 			sc_unlock(card);
-			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+			LOG_FUNC_RETURN(card->ctx, r);
 		}
 
-		if (r > 0) {
-			rnd += (size_t) r;
-			len -= (size_t) r;
-		} else {
-			retry--;
-		}
+		rnd += (size_t) r;
+		len -= (size_t) r;
 	}
 
 	sc_unlock(card);
@@ -868,7 +955,11 @@ int sc_read_record(sc_card_t *card, unsigned int rec_nr, u8 *buf,
 
 	if (card->ops->read_record == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
+
 	r = card->ops->read_record(card, rec_nr, buf, count, flags);
+	if (r == SC_SUCCESS) {
+		r = count;
+	}
 
 	LOG_FUNC_RETURN(card->ctx, r);
 }
@@ -885,7 +976,11 @@ int sc_write_record(sc_card_t *card, unsigned int rec_nr, const u8 * buf,
 
 	if (card->ops->write_record == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
+
 	r = card->ops->write_record(card, rec_nr, buf, count, flags);
+	if (r == SC_SUCCESS) {
+		r = count;
+	}
 
 	LOG_FUNC_RETURN(card->ctx, r);
 }
@@ -902,7 +997,11 @@ int sc_append_record(sc_card_t *card, const u8 * buf, size_t count,
 
 	if (card->ops->append_record == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
+
 	r = card->ops->append_record(card, buf, count, flags);
+	if (r == SC_SUCCESS) {
+		r = count;
+	}
 
 	LOG_FUNC_RETURN(card->ctx, r);
 }
@@ -919,7 +1018,11 @@ int sc_update_record(sc_card_t *card, unsigned int rec_nr, const u8 * buf,
 
 	if (card->ops->update_record == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
+
 	r = card->ops->update_record(card, rec_nr, buf, count, flags);
+	if (r == SC_SUCCESS) {
+		r = count;
+	}
 
 	LOG_FUNC_RETURN(card->ctx, r);
 }
@@ -935,6 +1038,7 @@ int sc_delete_record(sc_card_t *card, unsigned int rec_nr)
 
 	if (card->ops->delete_record == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
+
 	r = card->ops->delete_record(card, rec_nr);
 
 	LOG_FUNC_RETURN(card->ctx, r);
@@ -970,10 +1074,6 @@ int _sc_card_add_algorithm(sc_card_t *card, const sc_algorithm_info_t *info)
 	}
 	p = (sc_algorithm_info_t *) realloc(card->algorithms, (card->algorithm_count + 1) * sizeof(*info));
 	if (!p) {
-		if (card->algorithms)
-			free(card->algorithms);
-		card->algorithms = NULL;
-		card->algorithm_count = 0;
 		return SC_ERROR_OUT_OF_MEMORY;
 	}
 	card->algorithms = p;
@@ -1016,7 +1116,7 @@ int  _sc_card_add_ec_alg(sc_card_t *card, unsigned int key_length,
 	return _sc_card_add_algorithm(card, &info);
 }
 
-static sc_algorithm_info_t * sc_card_find_alg(sc_card_t *card,
+sc_algorithm_info_t * sc_card_find_alg(sc_card_t *card,
 		unsigned int algorithm, unsigned int key_length, void *param)
 {
 	int i;
@@ -1085,7 +1185,7 @@ static int match_atr_table(sc_context_t *ctx, const struct sc_atr_table *table, 
 	sc_bin_to_hex(card_atr_bin, card_atr_bin_len, card_atr_hex, sizeof(card_atr_hex), ':');
 	card_atr_hex_len = strlen(card_atr_hex);
 
-	sc_log(ctx, "ATR     : %s", card_atr_hex);
+	sc_debug(ctx, SC_LOG_DEBUG_MATCH, "ATR     : %s", card_atr_hex);
 
 	for (i = 0; table[i].atr != NULL; i++) {
 		const char *tatr = table[i].atr;
@@ -1096,14 +1196,14 @@ static int match_atr_table(sc_context_t *ctx, const struct sc_atr_table *table, 
 		size_t fix_hex_len = card_atr_hex_len;
 		size_t fix_bin_len = card_atr_bin_len;
 
-		sc_log(ctx, "ATR try : %s", tatr);
+		sc_debug(ctx, SC_LOG_DEBUG_MATCH, "ATR try : %s", tatr);
 
 		if (tatr_len != fix_hex_len) {
-			sc_log(ctx, "ignored - wrong length");
+			sc_debug(ctx, SC_LOG_DEBUG_MATCH, "ignored - wrong length");
 			continue;
 		}
 		if (matr != NULL) {
-			sc_log(ctx, "ATR mask: %s", matr);
+			sc_debug(ctx, SC_LOG_DEBUG_MATCH, "ATR mask: %s", matr);
 
 			matr_len = strlen(matr);
 			if (tatr_len != matr_len)
@@ -1113,7 +1213,7 @@ static int match_atr_table(sc_context_t *ctx, const struct sc_atr_table *table, 
 			mbin_len = sizeof(mbin);
 			sc_hex_to_bin(matr, mbin, &mbin_len);
 			if (mbin_len != fix_bin_len) {
-				sc_log(ctx, "length of atr and atr mask do not match - ignored: %s - %s", tatr, matr);
+				sc_debug(ctx, SC_LOG_DEBUG_MATCH, "length of atr and atr mask do not match - ignored: %s - %s", tatr, matr);
 				continue;
 			}
 			for (s = 0; s < tbin_len; s++) {
@@ -1267,6 +1367,8 @@ scconf_block *sc_get_conf_block(sc_context_t *ctx, const char *name1, const char
 void sc_invalidate_cache(struct sc_card *card)
 {
 	if (card) {
+		sc_file_free(card->cache.current_ef);
+		sc_file_free(card->cache.current_df);
 		memset(&card->cache, 0, sizeof(card->cache));
 		card->cache.valid = 0;
 	}
@@ -1362,7 +1464,7 @@ sc_card_sm_load(struct sc_card *card, const char *module_path, const char *in_mo
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 	ctx = card->ctx;
-	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
+	LOG_FUNC_CALLED(ctx);
 	if (!in_module)
 		return sc_card_sm_unload(card);
 
@@ -1381,7 +1483,7 @@ sc_card_sm_load(struct sc_card *card, const char *module_path, const char *in_mo
 	if (0 < expanded_len && expanded_len < sizeof expanded_val)
 		module_path = expanded_val;
 #endif
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "SM module '%s' located in '%s'", in_module, module_path);
+	sc_log(ctx, "SM module '%s' located in '%s'", in_module, module_path);
 	if (module_path && strlen(module_path) > 0)   {
 		int sz = strlen(in_module) + strlen(module_path) + 3;
 		module = malloc(sz);
@@ -1459,8 +1561,7 @@ sc_card_sm_check(struct sc_card *card)
 	scconf_block *atrblock = NULL, *sm_conf_block = NULL;
 	int rv, ii;
 
-	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
-	sc_log(ctx, "card->sm_ctx.ops.open %p", card->sm_ctx.ops.open);
+	LOG_FUNC_CALLED(ctx);
 
 	/* get the name of card specific SM configuration section */
 	atrblock = _sc_match_atr_block(ctx, card->driver, &card->atr);
@@ -1501,18 +1602,15 @@ sc_card_sm_check(struct sc_card *card)
 	strlcpy(card->sm_ctx.config_section, sm, sizeof(card->sm_ctx.config_section));
 
 	/* allocate resources for the external SM module */
-	sc_log(ctx, "'module_init' handler %p", card->sm_ctx.module.ops.module_init);
 	if (card->sm_ctx.module.ops.module_init)   {
 		module_data = scconf_get_str(sm_conf_block, "module_data", NULL);
-		sc_log(ctx, "module_data '%s'", module_data);
 
 		rv = card->sm_ctx.module.ops.module_init(ctx, module_data);
-		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "Cannot initialize SM module");
+		LOG_TEST_RET(ctx, rv, "Cannot initialize SM module");
 	}
 
 	/* initialize SM session in the case of 'APDU TRANSMIT' SM mode */
 	sm_mode = scconf_get_str(sm_conf_block, "mode", NULL);
-	sc_log(ctx, "SM mode '%s'; 'open' handler %p", sm_mode, card->sm_ctx.ops.open);
 	if (sm_mode && !strcasecmp("Transmit", sm_mode))   {
 		if (!card->sm_ctx.ops.open || !card->sm_ctx.ops.get_sm_apdu || !card->sm_ctx.ops.free_sm_apdu)
 			LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "'Transmit' SM asked but not supported by card driver");

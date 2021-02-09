@@ -1,4 +1,4 @@
-CV_CERTS = DESRCACC100001
+CV_CERTS = DESRCACC100001 DESCHSMCVCA00001
 
 MAINTAINERCLEANFILES = $(srcdir)/Makefile.in
 DISTCLEANFILES = opensc.conf.example
@@ -12,7 +12,7 @@ nodist_noinst_DATA = opensc.conf.example
 
 # Make sure we build this every time
 # as there is no dependency for this.
-# Can be removed if MSVC is not requried.
+# Can be removed if MSVC is not required.
 force:
 opensc.conf.example: opensc.conf.example.in force
 

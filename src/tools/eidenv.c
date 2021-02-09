@@ -29,11 +29,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "common/compat_getopt.h"
+#include <getopt.h>
 #include "libopensc/opensc.h"
 #include "libopensc/asn1.h"
 #include "libopensc/cards.h"
-#include "libopensc/esteid.h"
 #include "util.h"
 
 static char *opt_reader = NULL;
@@ -106,7 +105,7 @@ static void decode_options(int argc, char **argv)
 {
 	int c;
 
-	while ((c = getopt_long(argc, argv,"pwtr:x:hV", options, (int *) 0)) != EOF) {
+	while ((c = getopt_long(argc, argv,"pwtr:x:hV", options, (int *) 0)) != -1) {
 
 		switch (c) {
 		case 'r':
@@ -404,6 +403,7 @@ int main(int argc, char **argv)
 	r = util_connect_card(ctx, &card, opt_reader, opt_wait, 0);
 	if (r) {
 		fprintf(stderr, "Failed to connect to card: %s\n", sc_strerror(r));
+		sc_release_context(ctx);
 		return 1;
 	}
 

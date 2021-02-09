@@ -143,7 +143,7 @@ sc_pkcs15_decode_aodf_entry(struct sc_pkcs15_card *p15card, struct sc_pkcs15_obj
 	r = sc_asn1_decode(ctx, asn1_auth_type, *buf, *buflen, buf, buflen);
 	if (r == SC_ERROR_ASN1_END_OF_CONTENTS)
 		return r;
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, r, "ASN.1 decoding failed");
+	LOG_TEST_RET(ctx, r, "ASN.1 decoding failed");
 
 	if (asn1_auth_type_choice[0].flags & SC_ASN1_PRESENT)   {
 		sc_log(ctx, "AuthType: PIN");
@@ -176,14 +176,16 @@ sc_pkcs15_decode_aodf_entry(struct sc_pkcs15_card *p15card, struct sc_pkcs15_obj
 				/* Give priority to AID defined in the application DDO */
 				if (p15card->app && p15card->app->ddo.aid.len)
 					info.path.aid = p15card->app->ddo.aid;
-				else if (p15card->file_app->path.len)
+				else if (p15card->file_app && p15card->file_app->path.len)
 					info.path = p15card->file_app->path;
+				else
+					return SC_ERROR_INTERNAL;
 			}
 		}
 		sc_debug(ctx, SC_LOG_DEBUG_ASN1, "decoded PIN(ref:%X,path:%s)", info.attrs.pin.reference, sc_print_path(&info.path));
 	}
 	else if (asn1_auth_type_choice[1].flags & SC_ASN1_PRESENT)   {
-		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_NOT_SUPPORTED, "BIO authentication object not yet supported");
+		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "BIO authentication object not yet supported");
 	}
 	else if (asn1_auth_type_choice[2].flags & SC_ASN1_PRESENT)   {
 		sc_log(ctx, "AuthType: AuthKey");
@@ -194,12 +196,12 @@ sc_pkcs15_decode_aodf_entry(struct sc_pkcs15_card *p15card, struct sc_pkcs15_obj
 			info.attrs.authkey.derived = 1;
 	}
 	else   {
-		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_NOT_SUPPORTED, "unknown authentication type");
+		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "unknown authentication type");
 	}
 
 	obj->data = malloc(sizeof(info));
 	if (obj->data == NULL)
-		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
+		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
 	memcpy(obj->data, &info, sizeof(info));
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_ASN1, SC_SUCCESS);
@@ -296,10 +298,14 @@ sc_pkcs15_verify_pin(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *pi
 		const unsigned char *pincode, size_t pinlen)
 {
 	struct sc_context *ctx = p15card->card->ctx;
-	struct sc_pkcs15_auth_info *auth_info = (struct sc_pkcs15_auth_info *)pin_obj->data;
+	struct sc_pkcs15_auth_info *auth_info;
 	int r;
 
 	LOG_FUNC_CALLED(ctx);
+
+	if (!pin_obj || !pin_obj->data)
+		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_PIN_REFERENCE);
+	auth_info = (struct sc_pkcs15_auth_info *)pin_obj->data;
 
 	/*
 	 * if pin cache is disabled, we can get here with no PIN data.
@@ -575,6 +581,7 @@ int sc_pkcs15_unblock_pin(struct sc_pkcs15_card *p15card,
 	struct sc_pin_cmd_data data;
 	struct sc_pkcs15_object *puk_obj;
 	struct sc_pkcs15_auth_info *puk_info = NULL;
+	int pukref = 0;
 	struct sc_pkcs15_auth_info *auth_info = (struct sc_pkcs15_auth_info *)pin_obj->data;
 	struct sc_card *card = p15card->card;
 	int r;
@@ -596,6 +603,7 @@ int sc_pkcs15_unblock_pin(struct sc_pkcs15_card *p15card,
 	if (r >= 0 && puk_obj) {
 		/* second step:  get the pkcs15 info object of the puk */
 		puk_info = (struct sc_pkcs15_auth_info *)puk_obj->data;
+		pukref = puk_info->attrs.pin.reference;
 	}
 
 	if (!puk_info) {
@@ -605,6 +613,15 @@ int sc_pkcs15_unblock_pin(struct sc_pkcs15_card *p15card,
 	/* make sure the puk is in valid range */
 	r = _validate_pin(p15card, puk_info, puklen);
 	LOG_TEST_RET(ctx, r, "PIN do not conforms PIN policy");
+
+	/*
+	 * With the current card driver interface we have no way of specifying different padding
+	 * flags for the PIN and the PUK. Therefore reject this case.
+	 */
+	if ((auth_info->attrs.pin.flags & SC_PKCS15_PIN_FLAG_NEEDS_PADDING) !=
+	    (puk_info->attrs.pin.flags & SC_PKCS15_PIN_FLAG_NEEDS_PADDING)) {
+		LOG_TEST_RET(ctx, r, "Padding mismatch for PIN/PUK");
+	}
 
 	r = sc_lock(card);
 	LOG_TEST_RET(ctx, r, "sc_lock() failed");
@@ -621,18 +638,19 @@ int sc_pkcs15_unblock_pin(struct sc_pkcs15_card *p15card,
 	data.cmd             = SC_PIN_CMD_UNBLOCK;
 	data.pin_type        = SC_AC_CHV;
 	data.pin_reference   = auth_info->attrs.pin.reference;
+	data.puk_reference   = pukref;
 	data.pin1.data       = puk;
 	data.pin1.len        = puklen;
-	data.pin1.pad_char   = auth_info->attrs.pin.pad_char;
-	data.pin1.min_length = auth_info->attrs.pin.min_length;
-	data.pin1.max_length = auth_info->attrs.pin.max_length;
-	data.pin1.pad_length = auth_info->attrs.pin.stored_length;
+	data.pin1.pad_char   = puk_info->attrs.pin.pad_char;
+	data.pin1.min_length = puk_info->attrs.pin.min_length;
+	data.pin1.max_length = puk_info->attrs.pin.max_length;
+	data.pin1.pad_length = puk_info->attrs.pin.stored_length;
 	data.pin2.data       = newpin;
 	data.pin2.len        = newpinlen;
-	data.pin2.pad_char   = puk_info->attrs.pin.pad_char;
-	data.pin2.min_length = puk_info->attrs.pin.min_length;
-	data.pin2.max_length = puk_info->attrs.pin.max_length;
-	data.pin2.pad_length = puk_info->attrs.pin.stored_length;
+	data.pin2.pad_char   = auth_info->attrs.pin.pad_char;
+	data.pin2.min_length = auth_info->attrs.pin.min_length;
+	data.pin2.max_length = auth_info->attrs.pin.max_length;
+	data.pin2.pad_length = auth_info->attrs.pin.stored_length;
 
 	if (auth_info->attrs.pin.flags & SC_PKCS15_PIN_FLAG_NEEDS_PADDING)
 		data.flags |= SC_PIN_CMD_NEED_PADDING;
@@ -695,6 +713,13 @@ int sc_pkcs15_get_pin_info(struct sc_pkcs15_card *p15card,
 	if (pin_info->auth_type != SC_PKCS15_PIN_AUTH_TYPE_PIN)   {
 		r = SC_ERROR_INVALID_DATA;
 		goto out;
+	}
+
+	/* the path in the pin object is optional */
+	if ((pin_info->path.len > 0) || ((pin_info->path.aid.len > 0))) {
+		r = sc_select_file(card, &pin_info->path, NULL);
+		if (r)
+			goto out;
 	}
 
 	/* Try to update PIN info from card */
@@ -835,7 +860,7 @@ void sc_pkcs15_pincache_clear(struct sc_pkcs15_card *p15card)
 	struct sc_pkcs15_object *objs[32];
 	int i, r;
 
-	SC_FUNC_CALLED(p15card->card->ctx, SC_LOG_DEBUG_NORMAL);
+	LOG_FUNC_CALLED(p15card->card->ctx);
 	r = sc_pkcs15_get_objects(p15card, SC_PKCS15_TYPE_AUTH_PIN, objs, 32);
 	for (i = 0; i < r; i++)
 		sc_pkcs15_free_object_content(objs[i]);

@@ -36,8 +36,7 @@
 #include "common/compat_strlcpy.h"
 #include "libopensc/pkcs15.h"
 #include "libopensc/log.h"
-
-int sc_pkcs15emu_actalis_init_ex(sc_pkcs15_card_t *, struct sc_aid *, sc_pkcs15emu_opt_t *);
+#include "libopensc/internal.h"
 
 static int (*set_security_env) (sc_card_t *, const sc_security_env_t *, int);
 
@@ -60,13 +59,6 @@ static int do_sign(sc_card_t * card, const u8 * in, size_t inlen, u8 * out,
 		   size_t outlen)
 {
 	return card->ops->decipher(card, in, inlen, out, outlen);
-}
-
-static void set_string(char **strp, const char *value)
-{
-	if (*strp)
-		free(*strp);
-	*strp = value ? strdup(value) : NULL;
 }
 
 #if 1
@@ -182,7 +174,9 @@ static int sc_pkcs15emu_actalis_init(sc_pkcs15_card_t * p15card)
 	if (r != SC_SUCCESS)
 		return SC_ERROR_WRONG_CARD;
 
-	sc_read_binary(card, 0xC3, serial_buf, 12, 0);
+	r = sc_read_binary(card, 0xC3, serial_buf, 12, 0);
+	if (r != SC_SUCCESS)
+		return SC_ERROR_WRONG_CARD;
 	serial = serial_buf;
 
 	/*
@@ -220,7 +214,8 @@ static int sc_pkcs15emu_actalis_init(sc_pkcs15_card_t * p15card)
 			memset(&cert_info, 0, sizeof(cert_info));
 			memset(&cert_obj, 0, sizeof(cert_obj));
 
-			sc_read_binary(card, 2, size, 2, 0);
+			if (SC_SUCCESS != sc_read_binary(card, 2, size, 2, 0))
+				continue;
 			compLen = (size[0] << 8) + size[1];
 			compCert = malloc(compLen * sizeof(unsigned char));
 			len = 3 * compLen;	/*Approximation of the uncompressed size */
@@ -231,11 +226,12 @@ static int sc_pkcs15emu_actalis_init(sc_pkcs15_card_t * p15card)
 				return SC_ERROR_OUT_OF_MEMORY;
 			}
 
-			sc_read_binary(card, 4, compCert, compLen, 0);
-
-			if (uncompress(cert, &len,
-				compCert, compLen) != Z_OK)
-				return SC_ERROR_INTERNAL;
+			if (sc_read_binary(card, 4, compCert, compLen, 0) != SC_SUCCESS
+					|| uncompress(cert, &len, compCert, compLen) != Z_OK) {
+				free(cert);
+				free(compCert);
+				continue;
+			}
 			cpath.index = 0;
 			cpath.count = len;
 
@@ -250,7 +246,16 @@ static int sc_pkcs15emu_actalis_init(sc_pkcs15_card_t * p15card)
 
 			j++;
 			cert_obj.flags = SC_PKCS15_CO_FLAG_MODIFIABLE;
-			sc_pkcs15emu_add_x509_cert(p15card, &cert_obj, &cert_info);
+			r = sc_pkcs15emu_add_x509_cert(p15card, &cert_obj, &cert_info);
+			if (r < 0) {
+				sc_log(card->ctx, "Failed to add cert obj r=%d", r);
+				free(cert);
+				free(compCert);
+				continue;
+			}
+
+			free(cert);
+			free(compCert);
 		}
 	}
 #endif
@@ -312,15 +317,9 @@ static int actalis_detect_card(sc_pkcs15_card_t * p15card)
 }
 
 int sc_pkcs15emu_actalis_init_ex(sc_pkcs15_card_t * p15card,
-				 struct sc_aid *aid,
-				 sc_pkcs15emu_opt_t * opts)
+				 struct sc_aid *aid)
 {
-	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)
-		return sc_pkcs15emu_actalis_init(p15card);
-	else {
-		int r = actalis_detect_card(p15card);
-		if (r)
-			return SC_ERROR_WRONG_CARD;
-		return sc_pkcs15emu_actalis_init(p15card);
-	}
+	if (actalis_detect_card(p15card))
+		return SC_ERROR_WRONG_CARD;
+	return sc_pkcs15emu_actalis_init(p15card);
 }

@@ -33,8 +33,6 @@
 #define MANU_ID		"Giesecke & Devrient GmbH"
 #define STARCERT	"StarCertV2201"
 
-int sc_pkcs15emu_starcert_init_ex(sc_pkcs15_card_t *, struct sc_aid *,sc_pkcs15emu_opt_t *);
-
 typedef struct cdata_st {
 	const char *label;
 	int	    authority;
@@ -169,19 +167,15 @@ static int sc_pkcs15emu_starcert_init(sc_pkcs15_card_t *p15card)
 	r = sc_bin_to_hex(serial.value, serial.len, buf, sizeof(buf), 0);
 	if (r != SC_SUCCESS)
 		return SC_ERROR_INTERNAL;
-	if (p15card->tokeninfo->serial_number)
-		free(p15card->tokeninfo->serial_number);
-	p15card->tokeninfo->serial_number = malloc(strlen(buf) + 1);
+	free(p15card->tokeninfo->serial_number);
+	p15card->tokeninfo->serial_number = strdup(buf);
 	if (!p15card->tokeninfo->serial_number)
 		return SC_ERROR_INTERNAL;
-	strcpy(p15card->tokeninfo->serial_number, buf);
 	/* the manufacturer ID, in this case Giesecke & Devrient GmbH */
-	if (p15card->tokeninfo->manufacturer_id)
-		free(p15card->tokeninfo->manufacturer_id);
-	p15card->tokeninfo->manufacturer_id = malloc(strlen(MANU_ID) + 1);
+	free(p15card->tokeninfo->manufacturer_id);
+	p15card->tokeninfo->manufacturer_id = strdup(MANU_ID);
 	if (!p15card->tokeninfo->manufacturer_id)
 		return SC_ERROR_INTERNAL;
-	strcpy(p15card->tokeninfo->manufacturer_id, MANU_ID);
 
 	/* set certs */
 	for (i = 0; certs[i].label; i++) {
@@ -265,24 +259,16 @@ static int sc_pkcs15emu_starcert_init(sc_pkcs15_card_t *p15card)
 	if (r != SC_SUCCESS || !file)
 		return SC_ERROR_INTERNAL;
 	/* set the application DF */
-	if (p15card->file_app)
-		free(p15card->file_app);
+	sc_file_free(p15card->file_app);
 	p15card->file_app = file;
 
 	return SC_SUCCESS;
 }
 
 int sc_pkcs15emu_starcert_init_ex(sc_pkcs15_card_t *p15card,
-				  struct sc_aid *aid,
-				  sc_pkcs15emu_opt_t *opts)
+				  struct sc_aid *aid)
 {
-
-	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)
-		return sc_pkcs15emu_starcert_init(p15card);
-	else {
-		int r = starcert_detect_card(p15card);
-		if (r)
-			return SC_ERROR_WRONG_CARD;
-		return sc_pkcs15emu_starcert_init(p15card);
-	}
+	if (starcert_detect_card(p15card))
+		return SC_ERROR_WRONG_CARD;
+	return sc_pkcs15emu_starcert_init(p15card);
 }

@@ -55,8 +55,11 @@
 						<option>-c</option> <replaceable>driver</replaceable>
 					</term>
 					<listitem><para>
-						Use the given card driver.  The default is
-						auto-detected.
+						Use the given card driver.
+						The default is to auto-detect the correct card driver.
+						The literal value <literal>?</literal> lists
+						all available card drivers and terminates
+						<command>opensc-explorer</command>.
 					</para></listitem>
 				</varlistentry>
 				<varlistentry>
@@ -76,14 +79,14 @@
 				</varlistentry>
 				<varlistentry>
 					<term>
-						<option>--reader</option> <replaceable>num</replaceable>,
-						<option>-r</option> <replaceable>num</replaceable>
+						<option>--reader</option> <replaceable>arg</replaceable>,
+						<option>-r</option> <replaceable>arg</replaceable>
 					</term>
 					<listitem>
 						<para>
-							Specify the reader to use. By default, the first
+							Number of the reader to use. By default, the first
 							reader with a present card is used. If
-							<replaceable>num</replaceable> is an ATR, the
+							<replaceable>arg</replaceable> is an ATR, the
 							reader with a matching card will be chosen.
 						</para>
 					</listitem>
@@ -163,11 +166,23 @@
 					<term>
 						<command>asn1</command>
 						<replaceable>file-id</replaceable>
+						<arg choice="opt"><replaceable>rec-no</replaceable></arg>
+						<arg choice="opt"><replaceable>offs</replaceable></arg>
 					</term>
 					<listitem>
 						<para>
 							Parse and print the ASN.1 encoded content of the working EF
 							specified by <replaceable>file-id</replaceable>.
+							If the optional parameter
+							<replaceable>rec-no</replaceable> is given and the file is
+							a record-oriented EF, parse and print only the record
+							indicated by this parameter.
+							If the optional parameter
+							<replaceable>offs</replaceable> is given, start parsing
+							and printing the file or record at the offset indicated
+							by the value given.
+							If this parameter is not given, the default offset is
+							<literal>0</literal>.
 						</para>
 					</listitem>
 				</varlistentry>
@@ -179,12 +194,16 @@
 							<arg choice="plain"><replaceable>file-id</replaceable></arg>
 							<arg choice="plain"><literal>sfi:</literal><replaceable>short-id</replaceable></arg>
 						</group>
+						<arg choice="opt"><replaceable>rec-no</replaceable></arg>
 					</term>
 					<listitem>
 						<para>
 							Print the contents of the working EF specified by
 							<replaceable>file-id</replaceable> or the short file id
 							<replaceable>short-id</replaceable>.
+							If the optional second parameter
+							<replaceable>rec-no</replaceable> is given,
+							only print the record indicated by this parameter.
 							If no argument is given, print the the contents
 							of the currently selected EF.
 						</para>
@@ -396,6 +415,31 @@
 							If <replaceable>output</replaceable> is omitted,
 							the name of the output file will be derived from the
 							full card path to <replaceable>file-id</replaceable>.
+						</para>
+					</listitem>
+				</varlistentry>
+
+				<varlistentry>
+					<term>
+						<command>get_record</command>
+						<replaceable>file-id</replaceable>
+						<replaceable>rec-no</replaceable>
+						<arg choice="opt"><replaceable>output</replaceable></arg>
+					</term>
+					<listitem>
+						<para>
+							Copy a record of a record-oriented EF to a local file.
+							The local file is specified by
+							<replaceable>output</replaceable>
+							while the card file and the record are specified by
+							<replaceable>file-id</replaceable> and
+							<replaceable>rec-no</replaceable>,
+						</para>
+						<para>
+							If <replaceable>output</replaceable> is omitted,
+							the name of the output file will be derived from the
+							full card path to <replaceable>file-id</replaceable>.
+							and the <replaceable>rec-no</replaceable>.
 						</para>
 					</listitem>
 				</varlistentry>

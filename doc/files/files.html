@@ -453,7 +453,7 @@ app <em class="replaceable"><code>application</code></em> {
 							itself as signature terminal (ST).
 							We usually will use the reader's
 							capability to sign the data.
-							However, during developement you
+							However, during development you
 							may specify soft certificates and
 							keys for a ST.
 						</p><p>
@@ -724,9 +724,11 @@ app <em class="replaceable"><code>application</code></em> {
 					</span></dt><dd><p>
 							Where to cache the card's files. The default values are:
 							</p><div class="itemizedlist"><ul class="itemizedlist" style="list-style-type: disc; "><li class="listitem"><p>
-										<code class="filename"><code class="envar">HOME</code>/.eid/cache/</code> (Unix)
+										<code class="filename"><code class="envar">$XDG_CACHE_HOME</code>/opensc/</code> (if defined)
 									</p></li><li class="listitem"><p>
-										<code class="filename"><code class="envar">USERPROFILE</code>\.eid-cache\</code> (Windows)
+										<code class="filename"><code class="envar">$HOME</code>/.cache/opensc/</code> (Unix)
+									</p></li><li class="listitem"><p>
+										<code class="filename"><code class="envar">$USERPROFILE</code>\.eid-cache\</code> (Windows)
 									</p></li></ul></div><p>
 						</p><p>
 							If caching is done by a system process, the
@@ -775,8 +777,8 @@ app <em class="replaceable"><code>application</code></em> {
 						<code class="option">builtin_emulators = <em class="replaceable"><code>emulators</code></em>;</code>
 					</span></dt><dd><p>
 							List of the builtin pkcs15 emulators to test
-							(Default: <code class="literal">westcos, openpgp, infocamere,
-								starcert, tcos, esteid, itacns, postecert,
+							(Default: <code class="literal">westcos, openpgp,
+								starcert, tcos, esteid, itacns, 
 								PIV-II, cac, gemsafeGPK, gemsafeV1, actalis,
 								atrust-acos, tccardos, entersafe, pteid,
 								oberthur, sc-hsm, dnie, gids, iasecc, jpki,

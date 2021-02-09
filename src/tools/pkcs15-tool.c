@@ -57,6 +57,7 @@ typedef unsigned __int32 uint32_t;
 #include "libopensc/pkcs15.h"
 #include "libopensc/asn1.h"
 #include "util.h"
+#include "pkcs11/pkcs11-display.h"
 
 static const char *app_name = "pkcs15-tool";
 
@@ -107,6 +108,7 @@ enum {
 	OPT_RAW,
 	OPT_PRINT_VERSION,
 	OPT_LIST_INFO,
+	OPT_READ_CERT,
 };
 
 #define NELEMENTS(x)	(sizeof(x)/sizeof((x)[0]))
@@ -117,7 +119,7 @@ static const struct option options[] = {
 	{ "version",		0, NULL,			OPT_PRINT_VERSION },
 	{ "list-info",	no_argument, NULL,		OPT_LIST_INFO },
 	{ "list-applications",	no_argument, NULL,		OPT_LIST_APPLICATIONS },
-	{ "read-certificate",	required_argument, NULL,	'r' },
+	{ "read-certificate",	required_argument, NULL,	OPT_READ_CERT },
 	{ "list-certificates",	no_argument, NULL,		'c' },
 	{ "read-data-object",	required_argument, NULL,	'R' },
 	{ "raw",		no_argument, NULL,		OPT_RAW },
@@ -253,7 +255,7 @@ static void print_common_flags(const struct sc_pkcs15_object *obj)
 {
 	const char *common_flags[] = {"private", "modifiable"};
 	unsigned int i;
-	printf("\tObject Flags   : [0x%X]", obj->flags);
+	printf("\tObject Flags   : [0x%02X]", obj->flags);
 	for (i = 0; i < NELEMENTS(common_flags); i++) {
 		if (obj->flags & (1 << i)) {
 			printf(", %s", common_flags[i]);
@@ -606,6 +608,8 @@ static void print_prkey_info(const struct sc_pkcs15_object *obj)
 	struct sc_pkcs15_prkey_info *prkey = (struct sc_pkcs15_prkey_info *) obj->data;
 	unsigned char guid[40];
 	size_t guid_len;
+	int i;
+	int last_algo_refs = 0;
 
 	if (compact) {
 		printf("\t%-3s", key_types[7 & obj->type]);
@@ -620,7 +624,7 @@ static void print_prkey_info(const struct sc_pkcs15_object *obj)
 		printf("  Ref:0x%02X", prkey->key_reference);
 		if (obj->auth_id.len != 0)
 			printf("  AuthID:%s", sc_pkcs15_print_id(&obj->auth_id));
-		printf("\n\t     %-16.*s [0x%X", 16, obj->label, prkey->usage);
+		printf("\n\t     %-18.*s [0x%02X", (int) sizeof obj->label, obj->label, prkey->usage);
 		print_key_usages(prkey->usage);
 		printf("]");
 		return;
@@ -628,11 +632,21 @@ static void print_prkey_info(const struct sc_pkcs15_object *obj)
 
 	printf("Private %s Key [%.*s]\n", key_types[7 & obj->type], (int) sizeof obj->label, obj->label);
 	print_common_flags(obj);
-	printf("\tUsage          : [0x%X]", prkey->usage);
+	printf("\tUsage          : [0x%02X]", prkey->usage);
 	print_key_usages(prkey->usage);
 	printf("\n");
-	printf("\tAccess Flags   : [0x%X]", prkey->access_flags);
+	printf("\tAccess Flags   : [0x%02X]", prkey->access_flags);
 	print_key_access_flags(prkey->access_flags);
+	printf("\n");
+	printf("\tAlgo_refs      : ");
+	/* zero may be valid and don't know how many were read  print at least 1*/
+	for (i = 0; i< SC_MAX_SUPPORTED_ALGORITHMS; i++) {
+		if (prkey->algo_refs[i] != 0)
+			last_algo_refs = i;
+	}
+	for (i = 0; i< last_algo_refs + 1; i++) {
+		printf("%s%u", (i == 0) ? "" : ", ", prkey->algo_refs[i]);
+	}
 	printf("\n");
 
 	print_access_rules(obj->access_rules, SC_PKCS15_MAX_ACCESS_RULES);
@@ -641,7 +655,7 @@ static void print_prkey_info(const struct sc_pkcs15_object *obj)
 		printf("\tModLength      : %lu\n", (unsigned long)prkey->modulus_length);
 	else
 		printf("\tFieldLength    : %lu\n", (unsigned long)prkey->field_length);
-	printf("\tKey ref        : %d (0x%X)\n", prkey->key_reference, prkey->key_reference);
+	printf("\tKey ref        : %d (0x%02X)\n", prkey->key_reference, prkey->key_reference);
 	printf("\tNative         : %s\n", prkey->native ? "yes" : "no");
 	if (prkey->path.len || prkey->path.aid.len)
 		printf("\tPath           : %s\n", sc_print_path(&prkey->path));
@@ -701,7 +715,7 @@ static void print_pubkey_info(const struct sc_pkcs15_object *obj)
 		printf("  Ref:0x%02X", pubkey->key_reference);
 		if (obj->auth_id.len != 0)
 			printf("  AuthID:%s", sc_pkcs15_print_id(&obj->auth_id));
-		printf("  %15.*s [0x%X", (int) sizeof obj->label, obj->label, pubkey->usage);
+		printf("  %-18.*s [0x%02X", (int) sizeof obj->label, obj->label, pubkey->usage);
 		print_key_usages(pubkey->usage);
 		printf("]");
 		return;
@@ -709,11 +723,11 @@ static void print_pubkey_info(const struct sc_pkcs15_object *obj)
 
 	printf("Public %s Key [%.*s]\n", key_types[7 & obj->type], (int) sizeof obj->label, obj->label);
 	print_common_flags(obj);
-	printf("\tUsage          : [0x%X]", pubkey->usage);
+	printf("\tUsage          : [0x%02X]", pubkey->usage);
 	print_key_usages(pubkey->usage);
 	printf("\n");
 
-	printf("\tAccess Flags   : [0x%X]", pubkey->access_flags);
+	printf("\tAccess Flags   : [0x%02X]", pubkey->access_flags);
 	print_key_access_flags(pubkey->access_flags);
 	printf("\n");
 
@@ -733,7 +747,7 @@ static void print_pubkey_info(const struct sc_pkcs15_object *obj)
 		}
 	}
 
-	printf("\tKey ref        : %d (0x%X)\n", pubkey->key_reference,  pubkey->key_reference);
+	printf("\tKey ref        : %d (0x%02X)\n", pubkey->key_reference,  pubkey->key_reference);
 	printf("\tNative         : %s\n", pubkey->native ? "yes" : "no");
 	if (have_path)
 		printf("\tPath           : %s\n", sc_print_path(&pubkey->path));
@@ -840,11 +854,11 @@ static void print_skey_info(const struct sc_pkcs15_object *obj)
 
 	printf("Secret %s Key [%.*s]\n", skey_types[7 & obj->type], (int) sizeof obj->label, obj->label);
 	print_common_flags(obj);
-	printf("\tUsage          : [0x%X]", skey->usage);
+	printf("\tUsage          : [0x%02X]", skey->usage);
 	print_key_usages(skey->usage);
 	printf("\n");
 
-	printf("\tAccess Flags   : [0x%X]", skey->access_flags);
+	printf("\tAccess Flags   : [0x%02X]", skey->access_flags);
 	print_key_access_flags(skey->access_flags);
 	printf("\n");
 
@@ -853,7 +867,7 @@ static void print_skey_info(const struct sc_pkcs15_object *obj)
 	printf("\tSize           : %lu bits\n", (unsigned long)skey->value_len);
 	printf("\tID             : %s\n", sc_pkcs15_print_id(&skey->id));
 	printf("\tNative         : %s\n", skey->native ? "yes" : "no");
-	printf("\tKey ref        : %d (0x%X)\n", skey->key_reference, skey->key_reference);
+	printf("\tKey ref        : %d (0x%02X)\n", skey->key_reference, skey->key_reference);
 
 	if (skey->path.len || skey->path.aid.len)
 		printf("\tPath           : %s\n", sc_print_path(&skey->path));
@@ -1022,7 +1036,7 @@ static int read_ssh_key(void)
 		buf[1] = 0;
 		buf[2] = 0;
 		len = snprintf((char *) buf+4, 20, "ecdsa-sha2-nistp%d", n);
-		strncpy(alg, (char *) buf+4, 19);
+		memcpy(alg, buf+4, 20);
 		buf[3] = len;
 
 		len += 4;
@@ -1644,6 +1658,21 @@ static int list_apps(FILE *fout)
 	return 0;
 }
 
+
+static void print_supported_algo_info_operations(unsigned int operation)
+
+{
+	size_t i;
+	const char *operations[] = {
+		"compute_checksum", "compute_signature", "verify_checksum", "verify_signature",
+		"encipher", "decipher", "hash", "generate/derive_key"
+	};
+	const size_t operations_count = NELEMENTS(operations);
+	for (i = 0; i < operations_count; i++)
+		if (operation & (1 << i))
+			printf(", %s", operations[i]);
+}
+
 static void list_info(void)
 {
 	const char *flags[] = {
@@ -1654,6 +1683,7 @@ static void list_info(void)
 	};
 	char *last_update = sc_pkcs15_get_lastupdate(p15card);
 	int i, count = 0;
+	int idx;
 
 	printf("PKCS#15 Card [%s]:\n", p15card->tokeninfo->label);
 	printf("\tVersion        : %d\n", p15card->tokeninfo->version);
@@ -1674,6 +1704,34 @@ static void list_info(void)
 			count++;
 		}
 	}
+	printf("\n");
+	for (i = 0; i < SC_MAX_SUPPORTED_ALGORITHMS; i++) {
+		struct sc_supported_algo_info * sa = &p15card->tokeninfo->supported_algos[i];
+
+		if (sa->reference == 0 && sa->mechanism == 0
+				&& sa->operations == 0 && sa->algo_ref == 0)
+					break;
+		printf("\t\t sc_supported_algo_info[%d]:\n", i);
+		printf("\t\t\t reference  : %u (0x%02x)\n", sa->reference, sa->reference);
+		printf("\t\t\t mechanism  : [0x%02x] %s\n", sa->mechanism, lookup_enum(MEC_T, sa->mechanism));
+		if (sc_valid_oid(&sa->parameters)) {
+			printf("\t\t\t parameters:  %i", sa->parameters.value[0]);
+			for (idx = 1; idx < SC_MAX_OBJECT_ID_OCTETS && sa->parameters.value[idx] != -1 ; idx++)
+				printf(".%i", sa->parameters.value[idx]);
+			printf("\n");
+		}
+		printf("\t\t\t operations : [0x%2.2x]",sa->operations);
+		print_supported_algo_info_operations(sa->operations);
+		printf("\n");
+		if (sc_valid_oid((const struct sc_object_id*)&sa->algo_id)) {
+			printf("\t\t\t algo_id    : %i", sa->algo_id.value[0]);
+			for (idx = 1; idx < SC_MAX_OBJECT_ID_OCTETS && sa->algo_id.value[idx] != -1 ; idx++)
+				printf(".%i", sa->algo_id.value[idx]);
+			printf("\n");
+		}
+		printf("\t\t\t algo_ref   : [0x%02x]\n",sa->algo_ref);
+	}
+
 	printf((compact) ? "\n" : "\n\n");
 }
 
@@ -1713,8 +1771,10 @@ static int unblock_pin(void)
 
 		if (pin_obj->auth_id.len)   {
 			r = sc_pkcs15_find_pin_by_auth_id(p15card, &pin_obj->auth_id, &puk_obj);
-			if (r)
+			if (r < 0)   {
+				fprintf(stderr, "Failed to find PUK object for PIN: %s\n", sc_strerror(r));
 				return 2;
+			}
 		}
 
 		if (puk_obj)   {
@@ -2134,6 +2194,53 @@ int main(int argc, char *argv[])
 		if (c == '?')
 			util_print_usage_and_die(app_name, options, option_help, NULL);
 		switch (c) {
+		case 'r':
+
+#if OPENSC_MAJOR == 0 &&  OPENSC_VERSION_MINOR == 19
+			fprintf(stderr, "\nWarning, option -r is reserved to specify card reader in future versions\n");
+			fprintf (stderr, "Using -r option for read-certificate operation\n\n");
+			opt_cert = optarg;
+			do_read_cert = 1;
+			action_count++;
+			break;
+#elif OPENSC_MAJOR == 0 &&  OPENSC_VERSION_MINOR == 20
+
+			memset(&ctx_param, 0, sizeof(ctx_param));
+			ctx_param.ver      = 0;
+			ctx_param.app_name = app_name;
+
+			if (SC_SUCCESS == sc_context_create(&ctx, &ctx_param)) {
+				/* attempt to connect reader, on error, -r is used for read-certificate operation */
+				struct sc_reader *reader = NULL;
+
+				err = util_connect_reader(ctx, &reader, optarg, 0, 0);
+				sc_release_context(ctx);
+				ctx = NULL;
+
+				if (err != SC_SUCCESS ) {
+#if 1
+					fprintf (stderr,
+						"Error, option -r is reserved to specify card reader, no reader \"%s\" found\n", optarg);
+					exit (1);
+#else
+					fprintf (stderr,
+						"\nWarning, option -r is reserved to specify card reader, no reader \"%s\" found\n", optarg);
+					fprintf (stderr, "Using -r option for read-certificate operation\n\n");
+					opt_cert = optarg;
+					do_read_cert = 1;
+					action_count++;
+					break;
+#endif
+				}
+			}
+			opt_reader = optarg;
+			break;
+#elif (OPENSC_MAJOR > 0) || (OPENSC_MAJOR == 0 && OPENSC_VERSION_MINOR > 20)
+
+			opt_reader = optarg;
+			break;
+#endif
+
 		case OPT_PRINT_VERSION:
 			do_print_version = 1;
 			action_count++;
@@ -2142,7 +2249,7 @@ int main(int argc, char *argv[])
 			do_list_info = 1;
 			action_count++;
 			break;
-		case 'r':
+		case OPT_READ_CERT:
 			opt_cert = optarg;
 			do_read_cert = 1;
 			action_count++;
@@ -2295,11 +2402,6 @@ int main(int argc, char *argv[])
 		action_count--;
 	}
 
-	if (verbose > 1) {
-		ctx->debug = verbose;
-		sc_ctx_log_to_file(ctx, "stderr");
-	}
-
 	err = util_connect_card_ex(ctx, &card, opt_reader, opt_wait, 0, verbose);
 	if (err)
 		goto end;
@@ -2432,11 +2534,8 @@ int main(int argc, char *argv[])
 		action_count--;
 	}
 end:
-	if (p15card)
-		sc_pkcs15_unbind(p15card);
-	if (card)
-		sc_disconnect_card(card);
-	if (ctx)
-		sc_release_context(ctx);
+	sc_pkcs15_unbind(p15card);
+	sc_disconnect_card(card);
+	sc_release_context(ctx);
 	return err;
 }

@@ -49,7 +49,6 @@
 #include "pkcs15.h"
 
 static int pteid_detect_card(struct sc_card *card);
-int sc_pkcs15emu_pteid_init_ex(sc_pkcs15_card_t *, struct sc_aid *, sc_pkcs15emu_opt_t *);
 
 static
 int dump_ef(sc_card_t * card, const char *path, u8 * buf, size_t * buf_len)
@@ -164,8 +163,7 @@ static int sc_pkcs15emu_pteid_init(sc_pkcs15_card_t * p15card)
 	if (rv != SC_SUCCESS || !file)
 		return SC_ERROR_INTERNAL;
 	/* set the application DF */
-	if (p15card->file_app)
-		free(p15card->file_app);
+	sc_file_free(p15card->file_app);
 	p15card->file_app = file;
 
 	/* Load TokenInfo */
@@ -175,7 +173,6 @@ static int sc_pkcs15emu_pteid_init(sc_pkcs15_card_t * p15card)
 		sc_log(ctx, "Reading of EF.TOKENINFO failed: %d", rv);
 		LOG_FUNC_RETURN(ctx, rv);
 	}
-	memset(p15card->tokeninfo, 0, sizeof(*p15card->tokeninfo));
 	rv = sc_pkcs15_parse_tokeninfo(p15card->card->ctx, p15card->tokeninfo,
 				       buf, len);
 	if (rv != SC_SUCCESS) {
@@ -340,15 +337,12 @@ static int pteid_detect_card(struct sc_card *card)
 	return SC_ERROR_WRONG_CARD;
 }
 
-int sc_pkcs15emu_pteid_init_ex(sc_pkcs15_card_t *p15card, struct sc_aid *aid, sc_pkcs15emu_opt_t *opts)
+int sc_pkcs15emu_pteid_init_ex(sc_pkcs15_card_t *p15card, struct sc_aid *aid)
 {
 	int r=SC_SUCCESS;
 	sc_context_t *ctx = p15card->card->ctx;
 	LOG_FUNC_CALLED(ctx);
 
-	/* if no check flag execute unconditionally */
-	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)
-		LOG_FUNC_RETURN(ctx, sc_pkcs15emu_pteid_init(p15card));
 	/* check for proper card */
 	r = pteid_detect_card(p15card->card);
 	if (r == SC_ERROR_WRONG_CARD)

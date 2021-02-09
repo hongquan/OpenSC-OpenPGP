@@ -205,9 +205,6 @@ int main(int argc, char *argv[])
 	int action_count = 0;
 	sc_context_param_t ctx_param;
 
-	setbuf(stderr, NULL);
-	setbuf(stdout, NULL);
-
 	while (1) {
 		c = getopt_long(argc, argv, "v", options, &long_optind);
 		if (c == -1)
@@ -247,12 +244,6 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	/* Only change if not in opensc.conf */
-	if (verbose > 1 && ctx->debug == 0) {
-		ctx->debug = verbose;
-		sc_ctx_log_to_file(ctx, "stderr");
-	}
-
 	if (action_count <= 0)
 		goto end;
 
@@ -260,7 +251,7 @@ int main(int argc, char *argv[])
 	if (err)
 		goto end;
 
-        if (opt_bind_to_aid)   {
+	if (opt_bind_to_aid)   {
 		struct sc_aid aid;
 
 		aid.len = sizeof(aid.value);
@@ -273,6 +264,10 @@ int main(int argc, char *argv[])
 	}
 	else   if (!do_list_sdos) {
 		r = sc_pkcs15_bind(card, NULL, &p15card);
+	}
+	if (r != SC_SUCCESS) {
+		fprintf(stderr, "Failed to bind card: %s\n", sc_strerror(r));
+		goto end;
 	}
 
 	if (do_list_sdos) {
@@ -293,8 +288,7 @@ end:
 		sc_unlock(card);
 		sc_disconnect_card(card);
 	}
-	if (ctx)
-		sc_release_context(ctx);
+	sc_release_context(ctx);
 
 	return err;
 }

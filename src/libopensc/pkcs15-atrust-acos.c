@@ -34,8 +34,6 @@
 #define MANU_ID		"A-Trust"
 #define CARD_LABEL	"a.sign Premium a"
 
-int sc_pkcs15emu_atrust_acos_init_ex(sc_pkcs15_card_t *, struct sc_aid *aid, sc_pkcs15emu_opt_t *);
-
 typedef struct cdata_st {
 	const char *label;
 	int	    authority;
@@ -154,28 +152,22 @@ static int sc_pkcs15emu_atrust_acos_init(sc_pkcs15_card_t *p15card)
 	r = sc_bin_to_hex(buf, 8, buf2, sizeof(buf2), 0);
 	if (r != SC_SUCCESS)
 		return SC_ERROR_INTERNAL;
-	if (p15card->tokeninfo->serial_number)
-		free(p15card->tokeninfo->serial_number);
-	p15card->tokeninfo->serial_number = malloc(strlen(buf2) + 1);
+	free(p15card->tokeninfo->serial_number);
+	p15card->tokeninfo->serial_number = strdup(buf2);
 	if (!p15card->tokeninfo->serial_number)
 		return SC_ERROR_INTERNAL;
-	strcpy(p15card->tokeninfo->serial_number, buf2);
 
 	/* manufacturer ID */
-	if (p15card->tokeninfo->manufacturer_id)
-		free(p15card->tokeninfo->manufacturer_id);
-	p15card->tokeninfo->manufacturer_id = malloc(strlen(MANU_ID) + 1);
+	free(p15card->tokeninfo->manufacturer_id);
+	p15card->tokeninfo->manufacturer_id = strdup(MANU_ID);
 	if (!p15card->tokeninfo->manufacturer_id)
 		return SC_ERROR_INTERNAL;
-	strcpy(p15card->tokeninfo->manufacturer_id, MANU_ID);
 
 	/* card label */
-	if (p15card->tokeninfo->label)
-		free(p15card->tokeninfo->label);
-	p15card->tokeninfo->label = malloc(strlen(CARD_LABEL) + 1);
+	free(p15card->tokeninfo->label);
+	p15card->tokeninfo->label = strdup(CARD_LABEL);
 	if (!p15card->tokeninfo->label)
 		return SC_ERROR_INTERNAL;
-	strcpy(p15card->tokeninfo->label, CARD_LABEL);
 
 	/* set certs */
 	for (i = 0; certs[i].label; i++) {
@@ -258,24 +250,16 @@ static int sc_pkcs15emu_atrust_acos_init(sc_pkcs15_card_t *p15card)
 	if (r != SC_SUCCESS || !file)
 		return SC_ERROR_INTERNAL;
 	/* set the application DF */
-	if (p15card->file_app)
-		free(p15card->file_app);
+	sc_file_free(p15card->file_app);
 	p15card->file_app = file;
 
 	return SC_SUCCESS;
 }
 
 int sc_pkcs15emu_atrust_acos_init_ex(sc_pkcs15_card_t *p15card,
-				  struct sc_aid *aid,
-				  sc_pkcs15emu_opt_t *opts)
+				  struct sc_aid *aid)
 {
-
-	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)
-		return sc_pkcs15emu_atrust_acos_init(p15card);
-	else {
-		int r = acos_detect_card(p15card);
-		if (r)
-			return SC_ERROR_WRONG_CARD;
-		return sc_pkcs15emu_atrust_acos_init(p15card);
-	}
+	if (acos_detect_card(p15card))
+		return SC_ERROR_WRONG_CARD;
+	return sc_pkcs15emu_atrust_acos_init(p15card);
 }

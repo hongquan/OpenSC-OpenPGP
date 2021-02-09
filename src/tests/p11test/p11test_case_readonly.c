@@ -546,8 +546,10 @@ int sign_verify_test(test_cert_t *o, token_info_t *info, test_mech_t *mech,
 	CK_ULONG sign_length = 0;
 	int rv = 0;
 
-	if (message_length > strlen(SHORT_MESSAGE_TO_SIGN))
+	if (message_length > strlen(SHORT_MESSAGE_TO_SIGN)) {
 		fail_msg("Truncate is longer than the actual message");
+		return -1;
+	}
 
 	if (o->private_handle == CK_INVALID_HANDLE) {
 		debug_print(" [SKIP %s ] Missing private key", o->id_str);
@@ -667,6 +669,9 @@ void readonly_tests(void **state) {
 			o->derive_priv ? "[./]" : "[  ]");
 		if (!o->sign && !o->verify && !o->encrypt && !o->decrypt) {
 			printf("  no usable attributes found ... ignored\n");
+			continue;
+		}
+		if (objects.data[i].private_handle == CK_INVALID_HANDLE) {
 			continue;
 		}
 		for (j = 0; j < o->num_mechs; j++) {

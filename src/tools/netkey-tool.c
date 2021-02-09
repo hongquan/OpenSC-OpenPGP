@@ -27,7 +27,7 @@
 #include <openssl/x509v3.h>
 #include <openssl/pem.h>
 
-#include "common/compat_getopt.h"
+#include <getopt.h>
 #include "libopensc/opensc.h"
 
 static struct {
@@ -162,18 +162,18 @@ static void show_initial_puk(sc_card_t *card)
 	u8 buf1[128], buf2[128];
 	int i;
 
-	printf("\nReading crypted Initial-PUK-file: ");
+	printf("\nReading encrypted Initial-PUK-file: ");
 	sc_format_path("3F004350",&p);
 	if((i=sc_select_file(card,&p,&f))<0){
-		printf("Cannot select crypted Initial-PUK-file, %s\n", sc_strerror(i));
+		printf("Cannot select encrypted Initial-PUK-file, %s\n", sc_strerror(i));
 		return;
 	}
 	if((i=sc_read_binary(card,0,buf1,128,0))!=128){
-		printf("Cannot read crypted Initial-PUK-file, %s\n", sc_strerror(i));
+		printf("Cannot read encrypted Initial-PUK-file, %s\n", sc_strerror(i));
 		return;
 	}
 
-	printf("OK\nDecrypting crypted Initial-PUK-file: ");
+	printf("OK\nDecrypting encrypted Initial-PUK-file: ");
 	sc_format_path("3F00DF01",&p);
 	if((i=sc_select_file(card,&p,&f))<0){
 		printf("Cannot select DF01, %s\n", sc_strerror(i));
@@ -370,7 +370,7 @@ static void handle_writecert(sc_card_t *card, int cert, char *file)
 	c=PEM_read_X509(fp,NULL,NULL,NULL);
 	fclose(fp);
 	if(c==NULL){
-		printf("file does not conatin PEM-encoded certificate\n");
+		printf("file does not contain PEM-encoded certificate\n");
 		return;
 	}
 	printf("OK\nStoring Cert into Card-Certificate %d: ", cert); fflush(stdout);
@@ -437,16 +437,17 @@ int main(
 		{ "pin1",     1, NULL, '1' },
 		{ NULL, 0, NULL, 0 }
 	};
-	sc_context_t *ctx;
+	sc_context_t *ctx = NULL;
 	sc_context_param_t ctx_param;
-	sc_card_t *card;
+	sc_card_t *card = NULL;
 	int do_help=0, do_unblock=0, do_change=0, do_nullpin=0, do_readcert=0, do_writecert=0;
 	u8 newpin[32];
 	char *certfile=NULL, *p;
 	int r, oerr=0, reader=0, debug=0, pin_nr=-1, cert_nr=-1;
 	size_t i, newlen=0;
 
-	while((r=getopt_long(argc,argv,"hvr:p:u:0:1:",options,NULL))!=EOF) switch(r){
+	while ((r = getopt_long(argc, argv, "hvr:p:u:0:1:", options, NULL)) != -1) {
+		switch (r) {
 		case 'h': ++do_help; break;
 		case 'v': ++debug; break;
 		case 'r': reader=atoi(optarg); break;
@@ -455,6 +456,7 @@ int main(
 		case '0': set_pin(pinlist[2].value, &pinlist[2].len, optarg); break;
 		case '1': set_pin(pinlist[3].value, &pinlist[3].len, optarg); break;
 		default: ++oerr;
+		}
 	}
 	if(do_help){
 		fprintf(stderr,"This is netkey-tool V1.0, May 15 2005, Copyright Peter Koch <pk_opensc@web.de>\n");
@@ -533,10 +535,6 @@ int main(
 		fprintf(stderr,"Establish-Context failed: %s\n", sc_strerror(r));
 		exit(1);
 	}
-	if (debug > 1) {
-		ctx->debug = debug;
-		sc_ctx_log_to_file(ctx, "stderr");
-	}
 	if(ctx->debug>0)
 		printf("Context for application \"%s\" created, Debug=%d\n", ctx->app_name, ctx->debug);
 
@@ -544,17 +542,20 @@ int main(
 		if(!strcmp("tcos", ctx->card_drivers[i]->short_name)) break;
 	if(!ctx->card_drivers[i]){
 		fprintf(stderr,"Context does not support TCOS-cards\n");
+		sc_release_context(ctx);
 		exit(1);
 	}
 
 	printf("%d Readers detected\n", sc_ctx_get_reader_count(ctx));
 	if(reader < 0 || reader >= (int)sc_ctx_get_reader_count(ctx)){
 		fprintf(stderr,"Cannot open reader %d\n", reader);
+		sc_release_context(ctx);
 		exit(1);
 	}
 
 	if((r = sc_connect_card(sc_ctx_get_reader(ctx, 0), &card))<0){
 		fprintf(stderr,"Connect-Card failed: %s\n", sc_strerror(r));
+		sc_release_context(ctx);
 		exit(1);
 	}
 	printf("\nCard detected (driver: %s)\nATR:", card->driver->name);
@@ -564,6 +565,8 @@ int main(
 
 	if((r = sc_lock(card))<0){
 		fprintf(stderr,"Lock failed: %s\n", sc_strerror(r));
+		sc_disconnect_card(card);
+		sc_release_context(ctx);
 		exit(1);
 	}
 

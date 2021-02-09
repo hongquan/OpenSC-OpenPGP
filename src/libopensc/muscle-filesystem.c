@@ -147,8 +147,8 @@ int mscfs_lookup_path(mscfs_t* fs, const u8 *path, int pathlen, msc_id* objectId
 		return MSCFS_INVALID_ARGS;
 	if(isDirectory) {
 		/* Directory must be right next to root */
-		if((0 == memcmp(path, "\x3F\x00", 2) && pathlen == 4)
-		|| (0 == memcmp(fs->currentPath, "\x3F\x00", 2) && pathlen == 2)) {
+		if ((pathlen == 4 && 0 == memcmp(path, "\x3F\x00", 2)) ||
+		    (pathlen == 2 && 0 == memcmp(fs->currentPath, "\x3F\x00", 2))) {
 			oid[0] = path[pathlen - 2];
 			oid[1] = path[pathlen - 1];
 			oid[2] = oid[3] = 0;
@@ -169,7 +169,7 @@ int mscfs_lookup_path(mscfs_t* fs, const u8 *path, int pathlen, msc_id* objectId
 	if(pathlen > 4)
 		return MSCFS_INVALID_ARGS;
 	/* Reset to root */
-	if(0 == memcmp(path, "\x3F\x00", 2) && pathlen == 2) {
+	if(pathlen == 2 && 0 == memcmp(path, "\x3F\x00", 2)) {
 		oid[0] = oid[2] = path[0];
 		oid[1] = oid[3] = path[1];
 	} else if(pathlen == 2) { /* Path preserved for current-path */
@@ -207,23 +207,29 @@ int mscfs_check_selection(mscfs_t *fs, int requiredItem)
 
 int mscfs_loadFileInfo(mscfs_t* fs, const u8 *path, int pathlen, mscfs_file_t **file_data, int* idx)
 {
-	msc_id fullPath;
-	int x;
+	msc_id fullPath = {{0, 0, 0, 0}};
+	int x, rc;
 	assert(fs != NULL && path != NULL && file_data != NULL);
-	mscfs_lookup_path(fs, path, pathlen, &fullPath, 0);
+	rc = mscfs_lookup_path(fs, path, pathlen, &fullPath, 0);
+	if (rc != SC_SUCCESS) {
+		return rc;
+	}
 	
 	/* Obtain file information while checking if it exists */
 	mscfs_check_cache(fs);
 	if(idx) *idx = -1;
 	for(x = 0; x < fs->cache.size; x++) {
-		msc_id objectId;
 		*file_data = &fs->cache.array[x];
-		objectId = (*file_data)->objectId;
-		if(0 == memcmp(objectId.id, fullPath.id, 4)) {
-			if(idx) *idx = x;
-			break;
+		if (*file_data) {
+			msc_id objectId;
+			objectId = (*file_data)->objectId;
+			if(0 == memcmp(objectId.id, fullPath.id, 4)) {
+				if (idx)
+					*idx = x;
+				break;
+			}
+			*file_data = NULL;
 		}
-		*file_data = NULL;
 	}
 	if(*file_data == NULL && (0 == memcmp("\x3F\x00\x00\x00", fullPath.id, 4) || 0 == memcmp("\x3F\x00\x50\x15", fullPath.id, 4 ) || 0 == memcmp("\x3F\x00\x3F\x00", fullPath.id, 4))) {
 		static mscfs_file_t ROOT_FILE;

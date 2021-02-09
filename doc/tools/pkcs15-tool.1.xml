@@ -52,8 +52,8 @@
 
 				<varlistentry>
 					<term>
-						<option>--auth-id</option> <replaceable>pin</replaceable>,
-						<option>-a</option> <replaceable>pin</replaceable>
+						<option>--auth-id</option> <replaceable>id</replaceable>,
+						<option>-a</option> <replaceable>id</replaceable>
 					</term>
 					<listitem><para>Specifies the auth id of the PIN to use for the
 					operation. This is useful with the --change-pin operation.</para></listitem>
@@ -209,8 +209,7 @@
 
 				<varlistentry>
 					<term>
-						<option>--read-certificate</option> <replaceable>cert</replaceable>,
-						<option>-r</option> <replaceable>cert</replaceable>
+						<option>--read-certificate</option> <replaceable>cert</replaceable>
 					</term>
 					<listitem><para>Reads the certificate with the given id.</para></listitem>
 				</varlistentry>
@@ -278,13 +277,13 @@
 
 				<varlistentry>
 					<term>
-						<option>--reader</option> <replaceable>num</replaceable>
+						<option>--reader</option> <replaceable>arg</replaceable>
 					</term>
 					<listitem>
 						<para>
-							Specify the reader to use. By default, the first
+							Number of the reader to use. By default, the first
 							reader with a present card is used. If
-							<replaceable>num</replaceable> is an ATR, the
+							<replaceable>arg</replaceable> is an ATR, the
 							reader with a matching card will be chosen.
 						</para>
 					</listitem>
@@ -311,21 +310,32 @@
 
 				<varlistentry>
 					<term>
-						<option>--pin</option> <replaceable>PIN</replaceable>
+						<option>--pin</option> <replaceable>pin</replaceable>,
+						<option>--new-pin</option> <replaceable>newpin</replaceable>
+						<option>--puk</option> <replaceable>puk</replaceable>
 					</term>
-					<listitem><para>Specify PIN</para></listitem>
+					<listitem>
+						<para>
+							These options can be used to specify the PIN/PUK values
+							on the command line. If the value is set to
+							<literal>env:</literal><replaceable>VARIABLE</replaceable>, the value
+							of the specified environment variable is used. By default,
+							the code is prompted on the command line if needed.
+						</para>
+						<para>
+							Note that on most operation systems, any user can
+							display the command line of any process on the
+							system using utilities such as
+							<command>ps(1)</command>. Therefore, you should prefer
+							passing the codes via an environment variable
+							on an unsecured system.
+						</para>
+					</listitem>
 				</varlistentry>
 
 				<varlistentry>
 					<term>
-						<option>--puk</option> <replaceable>PUK</replaceable>
-					</term>
-					<listitem><para>Specify Unblock PIN</para></listitem>
-				</varlistentry>
-
-				<varlistentry>
-					<term>
-						<option>--new-pin</option> <replaceable>PIN</replaceable>
+						<option>--new-pin</option> <replaceable>pin</replaceable>
 					</term>
 					<listitem><para>Specify New PIN (when changing or unblocking)</para></listitem>
 				</varlistentry>

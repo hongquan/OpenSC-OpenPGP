@@ -302,8 +302,6 @@ static int parse_private_key(const u8 *key, size_t keysize, RSA *rsa)
 	if (dmq1 == NULL)
 		return -1;
 	cf2bn(p, base, dmq1);
-	p += base;
-
 	
 	if (RSA_set0_factors(rsa, bn_p, q) != 1)
 		return -1;
@@ -784,6 +782,10 @@ static int encode_public_key(RSA *rsa, u8 *key, size_t *keysize)
 	memcpy(p, bnbuf, 2*base);
 	p += 2*base;
 	r = bn2cf(rsa_e, bnbuf);
+	if (r != 4) {
+		fprintf(stderr, "Invalid exponent value.\n");
+		return 2;
+	}
 	memcpy(p, bnbuf, 4);
 	p += 4;
 
@@ -1073,12 +1075,9 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	if (verbose > 1) {
-		ctx->debug = verbose;
-		sc_ctx_log_to_file(ctx, "stderr");
-	}
-
 	err = util_connect_card(ctx, &card, opt_reader, opt_wait, verbose);
+	if (err)
+		goto end;
 	printf("Using card driver: %s\n", card->driver->name);
 
 	if (do_create_pin_file) {
@@ -1120,7 +1119,6 @@ end:
 		sc_unlock(card);
 		sc_disconnect_card(card);
 	}
-	if (ctx)
-		sc_release_context(ctx);
+	sc_release_context(ctx);
 	return err;
 }

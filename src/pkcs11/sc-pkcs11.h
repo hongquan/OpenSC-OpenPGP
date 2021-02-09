@@ -47,9 +47,6 @@ extern "C" {
 
 #define SC_PKCS11_SLOT_FOR_PINS		(SC_PKCS11_SLOT_FOR_PIN_USER | SC_PKCS11_SLOT_FOR_PIN_SIGN)
 
-extern void *C_LoadModule(const char *name, CK_FUNCTION_LIST_PTR_PTR);
-extern CK_RV C_UnloadModule(void *module);
-
 #ifdef __cplusplus
 }
 #endif
@@ -68,7 +65,6 @@ struct sc_pkcs11_slot;
 struct sc_pkcs11_card;
 
 struct sc_pkcs11_config {
-	unsigned int plug_and_play;
 	unsigned int max_virtual_slots;
 	unsigned int slots_per_card;
 	unsigned char lock_login;
@@ -91,7 +87,7 @@ struct sc_pkcs11_object_ops {
 	/* Management methods */
 	CK_RV (*set_attribute)(struct sc_pkcs11_session *, void *, CK_ATTRIBUTE_PTR);
 	CK_RV (*get_attribute)(struct sc_pkcs11_session *, void *, CK_ATTRIBUTE_PTR);
-	int   (*cmp_attribute)(struct sc_pkcs11_session *, void *, CK_ATTRIBUTE_PTR);
+	CK_RV (*cmp_attribute)(struct sc_pkcs11_session *, void *, CK_ATTRIBUTE_PTR);
 
 	CK_RV (*destroy_object)(struct sc_pkcs11_session *, void *);
 	CK_RV (*get_size)(struct sc_pkcs11_session *, void *);
@@ -104,8 +100,7 @@ struct sc_pkcs11_object_ops {
 	CK_RV (*unwrap_key)(struct sc_pkcs11_session *, void *,
 			CK_MECHANISM_PTR,
 			CK_BYTE_PTR pData, CK_ULONG ulDataLen,
-			CK_ATTRIBUTE_PTR, CK_ULONG,
-			void **);
+			void *targetKey);
 	CK_RV (*decrypt)(struct sc_pkcs11_session *, void *,
 			CK_MECHANISM_PTR,
 			CK_BYTE_PTR pEncryptedData, CK_ULONG ulEncryptedDataLen,
@@ -121,6 +116,11 @@ struct sc_pkcs11_object_ops {
 
 	/* General validation of mechanism parameters (sign, encrypt, etc) */
 	CK_RV (*init_params)(struct sc_pkcs11_session *, CK_MECHANISM_PTR);
+
+	CK_RV (*wrap_key)(struct sc_pkcs11_session *, void *,
+			CK_MECHANISM_PTR,
+			void*,
+			CK_BYTE_PTR pData, CK_ULONG_PTR ulDataLen);
 
 	/* Others to be added when implemented */
 };
@@ -226,6 +226,12 @@ struct sc_pkcs11_slot {
 };
 typedef struct sc_pkcs11_slot sc_pkcs11_slot_t;
 
+/* Debug virtual slots. S is slot to be highlighted or NULL
+ * C is a comment format string and args It will be preceded by "VSS " */
+#define DEBUG_VSS(S, ...) do { sc_log(context,"VSS " __VA_ARGS__); _debug_virtual_slots(S); } while (0)
+
+/* called by DEBUG_VSS to print table of virtual slots */
+void  _debug_virtual_slots(sc_pkcs11_slot_t *p);
 
 /* Forward decl */
 typedef struct sc_pkcs11_operation sc_pkcs11_operation_t;
@@ -237,6 +243,8 @@ enum {
 	SC_PKCS11_OPERATION_DIGEST,
 	SC_PKCS11_OPERATION_DECRYPT,
 	SC_PKCS11_OPERATION_DERIVE,
+	SC_PKCS11_OPERATION_WRAP,
+	SC_PKCS11_OPERATION_UNWRAP,
 	SC_PKCS11_OPERATION_MAX
 };
 
@@ -280,6 +288,15 @@ struct sc_pkcs11_mechanism_type {
 					struct sc_pkcs11_object *,
 					CK_BYTE_PTR, CK_ULONG,
 					CK_BYTE_PTR, CK_ULONG_PTR);
+	CK_RV		  (*wrap)(sc_pkcs11_operation_t *,
+					struct sc_pkcs11_object *,
+					struct sc_pkcs11_object *,
+					CK_BYTE_PTR, CK_ULONG_PTR);
+	CK_RV		  (*unwrap)(sc_pkcs11_operation_t *,
+					struct sc_pkcs11_object *,
+					CK_BYTE_PTR, CK_ULONG,
+					struct sc_pkcs11_object *);
+
 	/* mechanism specific data */
 	const void *  mech_data;
 	/* free mechanism specific data */
@@ -349,7 +366,7 @@ void sc_pkcs11_print_attrs(int level, const char *file, unsigned int line, const
 CK_RV card_removed(sc_reader_t *reader);
 CK_RV card_detect_all(void);
 CK_RV create_slot(sc_reader_t *reader);
-CK_RV initialize_reader(sc_reader_t *reader);
+void init_slot_info(CK_SLOT_INFO_PTR pInfo, sc_reader_t *reader);
 CK_RV card_detect(sc_reader_t *reader);
 CK_RV slot_get_slot(CK_SLOT_ID id, struct sc_pkcs11_slot **);
 CK_RV slot_get_token(CK_SLOT_ID id, struct sc_pkcs11_slot **);
@@ -382,7 +399,7 @@ CK_RV sc_pkcs11_create_secret_key(struct sc_pkcs11_session *,
 			CK_ATTRIBUTE_PTR, CK_ULONG,
 			struct sc_pkcs11_object **);
 /* Generic object handling */
-int sc_pkcs11_any_cmp_attribute(struct sc_pkcs11_session *,
+CK_RV sc_pkcs11_any_cmp_attribute(struct sc_pkcs11_session *,
 			void *, CK_ATTRIBUTE_PTR);
 
 /* Get attributes from template (misc.c) */
@@ -419,6 +436,8 @@ CK_RV sc_pkcs11_verif_final(struct sc_pkcs11_session *, CK_BYTE_PTR, CK_ULONG);
 #endif
 CK_RV sc_pkcs11_decr_init(struct sc_pkcs11_session *, CK_MECHANISM_PTR, struct sc_pkcs11_object *, CK_MECHANISM_TYPE);
 CK_RV sc_pkcs11_decr(struct sc_pkcs11_session *, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR);
+CK_RV sc_pkcs11_wrap(struct sc_pkcs11_session *,CK_MECHANISM_PTR, struct sc_pkcs11_object *, CK_KEY_TYPE, struct sc_pkcs11_object *, CK_BYTE_PTR, CK_ULONG_PTR);
+CK_RV sc_pkcs11_unwrap(struct sc_pkcs11_session *,CK_MECHANISM_PTR, struct sc_pkcs11_object *, CK_KEY_TYPE, CK_BYTE_PTR, CK_ULONG, struct sc_pkcs11_object *);
 CK_RV sc_pkcs11_deri(struct sc_pkcs11_session *, CK_MECHANISM_PTR,
 				struct sc_pkcs11_object *, CK_KEY_TYPE,
 				CK_SESSION_HANDLE, CK_OBJECT_HANDLE, struct sc_pkcs11_object *);
@@ -439,11 +458,11 @@ CK_RV sc_pkcs11_register_sign_and_hash_mechanism(struct sc_pkcs11_card *,
 				sc_pkcs11_mechanism_type_t *);
 
 #ifdef ENABLE_OPENSSL
-CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, int pubkey_len,
-	const unsigned char *pubkey_params, int pubkey_params_len,
+CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, unsigned int pubkey_len,
+	const unsigned char *pubkey_params, unsigned int pubkey_params_len,
 	CK_MECHANISM_PTR mech, sc_pkcs11_operation_t *md,
-	unsigned char *inp, int inp_len,
-	unsigned char *signat, int signat_len);
+	unsigned char *inp, unsigned int inp_len,
+	unsigned char *signat, unsigned int signat_len);
 #endif
 
 /* Load configuration defaults */

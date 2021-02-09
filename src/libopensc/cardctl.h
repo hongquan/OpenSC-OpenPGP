@@ -83,6 +83,7 @@ enum {
 	SC_CARDCTL_CARDOS_PUT_DATA_OCI,
 	SC_CARDCTL_CARDOS_PUT_DATA_SECI,
 	SC_CARDCTL_CARDOS_GENERATE_KEY,
+	SC_CARDCTL_CARDOS_PASS_ALGO_FLAGS,
 
 	/*
 	 * Starcos SPK 2.3 specific calls
@@ -303,6 +304,16 @@ enum {
 	SC_CARDCTL_GIDS_INITIALIZE,
 	SC_CARDCTL_GIDS_SET_ADMIN_KEY,
 	SC_CARDCTL_GIDS_AUTHENTICATE_ADMIN,
+
+	/*
+	 * IDPrime specific calls
+	 */
+	SC_CARDCTL_IDPRIME_BASE = _CTL_PREFIX('I', 'D', 'P'),
+	SC_CARDCTL_IDPRIME_INIT_GET_OBJECTS,
+	SC_CARDCTL_IDPRIME_GET_NEXT_OBJECT,
+	SC_CARDCTL_IDPRIME_FINAL_GET_OBJECTS,
+	SC_CARDCTL_IDPRIME_GET_TOKEN_NAME,
+
 };
 
 enum {
@@ -339,6 +350,14 @@ typedef struct sc_cardctl_pkcs11_init_pin {
 	const unsigned char *	pin;
 	size_t			pin_len;
 } sc_cardctl_pkcs11_init_pin_t;
+
+/*
+ * Generic cardctl - card driver can examine token info
+ */
+struct sc_cardctl_parsed_token_info {
+	unsigned int flags;
+	struct sc_pkcs15_tokeninfo * tokeninfo;
+};
 
 /*
  * GPK lock file.
@@ -407,6 +426,15 @@ struct sc_cardctl_cardos_genkey_info {
 	unsigned int	key_id;
 	unsigned int	key_bits;
 	unsigned short	fid;
+};
+
+struct sc_cardctl_cardos_pass_algo_flags {
+	unsigned int pass;
+	unsigned long card_flags; /* from card->flags i.e. user set */
+	unsigned long used_flags; /* as set by default */
+	unsigned long new_flags; /* set in pkcs15-cardos.c */
+	unsigned long ec_flags; /* for EC keys */
+	unsigned long ext_flags; /* for EC keys */
 };
 
 /*
@@ -569,19 +597,19 @@ typedef struct sc_cardctl_muscle_key_info {
 	u8* 	modValue;
 	size_t 	expLength;
 	u8* 	expValue;
-	int 	pLength;
+	size_t 	pLength;
 	u8* 	pValue;
-	int 	qLength;
+	size_t 	qLength;
 	u8* 	qValue;
-	int 	pqLength;
+	size_t 	pqLength;
 	u8* 	pqValue;
-	int 	dp1Length;
+	size_t 	dp1Length;
 	u8* 	dp1Value;
-	int 	dq1Length;
+	size_t 	dq1Length;
 	u8* 	dq1Value;
-	int 	gLength;
+	size_t 	gLength;
 	u8* 	gValue;
-	int 	yLength;
+	size_t 	yLength;
 	u8* 	yValue;
 } sc_cardctl_muscle_key_info_t;
 
@@ -883,7 +911,8 @@ typedef struct sc_rtecp_genkey_data {
 		SC_CARDCTL_MYEID_KEY_RSA = 0x11,
 		SC_CARDCTL_MYEID_KEY_DES = 0x19,
 		SC_CARDCTL_MYEID_KEY_EC  = 0x22,
-		SC_CARDCTL_MYEID_KEY_AES = 0x29
+		SC_CARDCTL_MYEID_KEY_AES = 0x29,
+		SC_CARDCTL_MYEID_KEY_GENERIC_SECRET = 0x41
 	};
 
 	struct sc_cardctl_myeid_data_obj {
@@ -897,25 +926,25 @@ typedef struct sc_rtecp_genkey_data {
 	struct sc_cardctl_myeid_gen_store_key_info {
 		int             op_type;
 		unsigned int	key_type;			/* value of SC_CARDCTL_MYEID_KEY_TYPE */ 
-		unsigned int    key_len_bits;   
+		size_t    key_len_bits;   
 		unsigned char  *mod;
-		unsigned int    pubexp_len;  
+		size_t    pubexp_len;  
 		unsigned char  *pubexp;
-		unsigned int    primep_len;  
+		size_t    primep_len;  
 		unsigned char  *primep;
-		unsigned int    primeq_len;  
+		size_t    primeq_len;  
 		unsigned char  *primeq;
-		unsigned int    dp1_len;  
+		size_t    dp1_len;  
 		unsigned char  *dp1;
-		unsigned int    dq1_len;  
+		size_t    dq1_len;  
 		unsigned char  *dq1;
-		unsigned int    invq_len;  
+		size_t    invq_len;  
 		unsigned char  *invq;
 		/* new for MyEID > 3.6.0 */
 		unsigned char  *d;                  /* EC private key / Symmetric key */
-		unsigned int    d_len;              /* EC / Symmetric */
+		size_t    d_len;              /* EC / Symmetric */
 		unsigned char  *ecpublic_point;     /* EC public key */
-		unsigned int    ecpublic_point_len; /* EC */
+		size_t    ecpublic_point_len; /* EC */
     };
 
 /*
@@ -943,38 +972,49 @@ typedef struct sc_cardctl_piv_genkey_info_st {
 #define SC_OPENPGP_KEY_AUTH		3
 
 #define	SC_OPENPGP_KEYALGO_RSA		0x01
+#define	SC_OPENPGP_KEYALGO_ECDH		0x12
+#define	SC_OPENPGP_KEYALGO_ECDSA	0x13
 
 #define SC_OPENPGP_KEYFORMAT_RSA_STD	0    /* See 4.3.3.6 Algorithm Attributes */
 #define SC_OPENPGP_KEYFORMAT_RSA_STDN	1    /* OpenPGP card spec v2 */
 #define SC_OPENPGP_KEYFORMAT_RSA_CRT	2
 #define SC_OPENPGP_KEYFORMAT_RSA_CRTN	3
 
+#define SC_OPENPGP_KEYFORMAT_EC_STD	0
+#define SC_OPENPGP_KEYFORMAT_EC_STDPUB	0xFF
+
+#define SC_OPENPGP_MAX_EXP_BITS		0x20 /* maximum exponent length supported in bits */
+
 typedef struct sc_cardctl_openpgp_keygen_info {
 	u8 key_id;		/* SC_OPENPGP_KEY_... */
 	u8 algorithm;		/* SC_OPENPGP_KEYALGO_... */
-	union {			/* anonymous union */
+	union {
 		struct {
+			u8 keyformat;		/* SC_OPENPGP_KEYFORMAT_RSA_... */
 			u8 *modulus;		/* New-generated pubkey info responded from the card */
 			size_t modulus_len;	/* Length of modulus in bit */
 			u8 *exponent;
-			size_t exponent_len;
-			u8 keyformat;	/* SC_OPENPGP_KEYFORMAT_RSA_... */
+			size_t exponent_len;	/* Length of exponent in bit */
 		} rsa;
 		struct {
-			u8 dummy;	/* placeholder */
-			// TODO: replace placeholder with real attributes
+			u8 keyformat;	/* SC_OPENPGP_KEYFORMAT_EC_... */
+			u8 *ecpoint;
+			size_t ecpoint_len;
+			struct sc_object_id oid;
+			u8 oid_len;
+			unsigned int key_length;
 		} ec;
-	};
+	} u;
 } sc_cardctl_openpgp_keygen_info_t;
 
 typedef struct sc_cardctl_openpgp_keystore_info {
 	u8 key_id;		/* SC_OPENPGP_KEY_... */
 	u8 algorithm;		/* SC_OPENPGP_KEYALGO_... */
-	union {			/* anonymous union */
+	union {
 		struct {
 			u8 keyformat;	/* SC_OPENPGP_KEYFORMAT_RSA_... */
 			u8 *e;
-			size_t e_len;
+			size_t e_len;	/* Length of exponent in bit */
 			u8 *p;
 			size_t p_len;
 			u8 *q;
@@ -983,10 +1023,15 @@ typedef struct sc_cardctl_openpgp_keystore_info {
 			size_t n_len;
 		} rsa;
 		struct {
-			u8 dummy;	/* placeholder */
-			// TODO: replace placeholder with real attributes
+			u8 keyformat;	/* SC_OPENPGP_KEYFORMAT_EC_... */
+			u8 *privateD;
+			size_t privateD_len;
+			u8 *ecpointQ;
+			size_t ecpointQ_len;
+			struct sc_object_id oid;
+			u8 oid_len;
 		} ec;
-	};
+	} u;
 	time_t creationtime;
 } sc_cardctl_openpgp_keystore_info_t;
 
@@ -1007,6 +1052,8 @@ typedef struct sc_cardctl_sc_hsm_init_param {
 	u8 *user_pin;				/* Initial user PIN */
 	size_t user_pin_len;		/* Length of user PIN */
 	u8 user_pin_retry_counter;	/* Retry counter default value */
+	struct sc_aid bio1;			/* AID of biometric server for template 1 */
+	struct sc_aid bio2;			/* AID of biometric server for template 2 */
 	u8 options[2];				/* Initialization options */
 	signed char dkek_shares;	/* Number of DKEK shares, 0 for card generated, -1 for none */
 	char *label;				/* Token label to be set in EF.TokenInfo (2F03) */

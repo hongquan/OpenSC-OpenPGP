@@ -85,6 +85,8 @@ parse_x509_cert(sc_context_t *ctx, struct sc_pkcs15_der *der, struct sc_pkcs15_c
 	const u8 *obj;
 	size_t objlen;
 
+	LOG_FUNC_CALLED(ctx);
+
 	memset(cert, 0, sizeof(*cert));
 	obj = sc_asn1_verify_tag(ctx, buf, buflen, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, &objlen);
 	if (obj == NULL)
@@ -106,7 +108,6 @@ parse_x509_cert(sc_context_t *ctx, struct sc_pkcs15_der *der, struct sc_pkcs15_c
 	if (!pubkey)
 		LOG_TEST_GOTO_ERR(ctx, SC_ERROR_INVALID_ASN1_OBJECT, "Unable to decode subjectPublicKeyInfo from cert");
 
-	sc_asn1_clear_algorithm_id(&sig_alg);
 
 	if (serial && serial_len)   {
 		sc_format_asn1_entry(asn1_serial_number + 0, serial, &serial_len, 1);
@@ -127,11 +128,13 @@ parse_x509_cert(sc_context_t *ctx, struct sc_pkcs15_der *der, struct sc_pkcs15_c
 	}
 
 err:
+	/* not used for anything */
+	sc_asn1_clear_algorithm_id(&sig_alg);
 	free(serial);
 	free(subject);
 	free(issuer);
 
-	return r;
+	LOG_FUNC_RETURN(ctx, r);
 }
 
 
@@ -202,6 +205,8 @@ sc_pkcs15_get_name_from_dn(struct sc_context *ctx, const u8 *dn, size_t dn_len,
 
 		/* Yes, then return the name */
 		dummy = sc_asn1_skip_tag(ctx, &ava, &ava_len, ava[0] & SC_ASN1_TAG_PRIMITIVE, &dummy_len);
+		if (dummy == NULL)
+			LOG_TEST_RET(ctx, SC_ERROR_INVALID_ASN1_OBJECT, "ASN.1 decoding of AVA name");
 		if (*name == NULL) {
 			*name = malloc(dummy_len);
 			if (*name == NULL)
@@ -257,6 +262,8 @@ sc_pkcs15_get_extension(struct sc_context *ctx, struct sc_pkcs15_cert *cert,
 		{ NULL, 0, 0, 0, NULL, NULL }
 	};
 
+	LOG_FUNC_CALLED(ctx);
+
 	for (next_ext = cert->extensions, next_ext_len = cert->extensions_len; next_ext_len; ) {
 		/* unwrap the set and point to the next ava */
 		ext = sc_asn1_skip_tag(ctx, &next_ext, &next_ext_len,
@@ -284,8 +291,10 @@ sc_pkcs15_get_extension(struct sc_context *ctx, struct sc_pkcs15_cert *cert,
 			}
 			else {
 				*ext_val_len = MIN(*ext_val_len, val_len);
-				memcpy(*ext_val, val, *ext_val_len);
-				free(val);
+				if (val) {
+					memcpy(*ext_val, val, *ext_val_len);
+					free(val);
+				}
 			}
 
 			if (is_critical)
@@ -322,12 +331,14 @@ sc_pkcs15_get_bitstring_extension(struct sc_context *ctx,
 		{ NULL, 0, 0, 0, NULL, NULL }
 	};
 
+	LOG_FUNC_CALLED(ctx);
+
 	r = sc_pkcs15_get_extension(ctx, cert, type, &bit_string, &bit_string_len, is_critical);
 	LOG_TEST_RET(ctx, r, "Get extension error");
 
 	r = sc_asn1_decode(ctx, asn1_bit_string, bit_string, bit_string_len, NULL, NULL);
-	LOG_TEST_RET(ctx, r, "Decoding extension bit string");
 	free(bit_string);
+	LOG_TEST_RET(ctx, r, "Decoding extension bit string");
 
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 }
@@ -477,7 +488,11 @@ sc_pkcs15_decode_cdf_entry(struct sc_pkcs15_card *p15card, struct sc_pkcs15_obje
 		return r;
 	LOG_TEST_RET(ctx, r, "ASN.1 decoding failed");
 
-	if (!p15card->app || !p15card->app->ddo.aid.len)   {
+	if (!p15card->app || !p15card->app->ddo.aid.len) {
+		if (!p15card->file_app) {
+			free(der->value);
+			return SC_ERROR_INTERNAL;
+		}
 		r = sc_pkcs15_make_absolute_path(&p15card->file_app->path, &info.path);
 		LOG_TEST_RET(ctx, r, "Cannot make absolute path");
 	}
@@ -485,6 +500,17 @@ sc_pkcs15_decode_cdf_entry(struct sc_pkcs15_card *p15card, struct sc_pkcs15_obje
 		info.path.aid = p15card->app->ddo.aid;
 	}
 	sc_log(ctx, "Certificate path '%s'", sc_print_path(&info.path));
+
+	switch (p15card->opts.private_certificate) {
+		case SC_PKCS15_CARD_OPTS_PRIV_CERT_DECLASSIFY:
+			sc_log(ctx, "Declassifying certificate");
+			obj->flags &= ~SC_PKCS15_CO_FLAG_PRIVATE;
+			break;
+		case SC_PKCS15_CARD_OPTS_PRIV_CERT_IGNORE:
+			sc_log(ctx, "Ignoring certificate");
+			free(der->value);
+			return 0;
+	}
 
 	obj->type = SC_PKCS15_TYPE_CERT_X509;
 	obj->data = malloc(sizeof(info));
@@ -533,6 +559,88 @@ sc_pkcs15_encode_cdf_entry(sc_context_t *ctx, const struct sc_pkcs15_object *obj
 	return r;
 }
 
+/* Only certain usages are valid for a given algorithm, return all the usages
+ * that the algorithm supports so we can use it as a filter for all
+ * the public and private key usages
+ */
+static unsigned int
+sc_pkcs15_alg_flags_from_algorithm(int algorithm)
+{
+	switch (algorithm) {
+	case SC_ALGORITHM_RSA:
+		return SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP |
+		       SC_PKCS15_PRKEY_USAGE_VERIFY | SC_PKCS15_PRKEY_USAGE_VERIFYRECOVER |
+		       SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP |
+		       SC_PKCS15_PRKEY_USAGE_SIGN | SC_PKCS15_PRKEY_USAGE_SIGNRECOVER |
+		       SC_PKCS15_PRKEY_USAGE_NONREPUDIATION;
+	case SC_ALGORITHM_DSA:
+		return SC_PKCS15_PRKEY_USAGE_VERIFY| SC_PKCS15_PRKEY_USAGE_SIGN |
+		       SC_PKCS15_PRKEY_USAGE_NONREPUDIATION;
+#ifdef SC_ALGORITHM_DH
+	case SC_ALGORITHM_DH:
+		return SC_PKCS15_PRKEY_USAGE_DERIVE ;
+#endif
+	case SC_ALGORITHM_EC:
+		return SC_PKCS15_PRKEY_USAGE_DERIVE | SC_PKCS15_PRKEY_USAGE_VERIFY|
+		       SC_PKCS15_PRKEY_USAGE_SIGN | SC_PKCS15_PRKEY_USAGE_NONREPUDIATION;
+	case SC_ALGORITHM_GOSTR3410:
+		return SC_PKCS15_PRKEY_USAGE_DERIVE | SC_PKCS15_PRKEY_USAGE_VERIFY|
+		       SC_PKCS15_PRKEY_USAGE_SIGN | SC_PKCS15_PRKEY_USAGE_NONREPUDIATION;
+	}
+	return 0;
+}
+
+/* These are the cert key usage bits that map to various PKCS #11 (and thus PKCS #15) flags */
+#define SC_PKCS15_X509_USAGE_SIGNATURE \
+	(SC_X509_DIGITAL_SIGNATURE | \
+	SC_X509_NON_REPUDIATION    | \
+	SC_X509_KEY_CERT_SIGN      | \
+	SC_X509_CRL_SIGN)
+#define SC_PKCS15_X509_USAGE_DERIVE \
+	SC_X509_KEY_AGREEMENT
+#define SC_PKCS15_X509_USAGE_UNWRAP \
+	(SC_X509_KEY_ENCIPHERMENT | \
+	SC_X509_KEY_AGREEMENT)
+#define SC_PKCS15_X509_USAGE_DECRYPT \
+	(SC_X509_DATA_ENCIPHERMENT | \
+	SC_X509_ENCIPHER_ONLY)
+#define SC_PKCS15_X509_USAGE_NONREPUDIATION \
+	SC_X509_NON_REPUDIATION
+
+/* map a cert usage and algorithm to public and private key usages */
+int
+sc_pkcs15_map_usage(unsigned int cert_usage, int algorithm,
+	unsigned int *pub_usage_ptr, unsigned int *pr_usage_ptr,
+	int allow_nonrepudiation)
+{
+	unsigned int pub_usage = 0, pr_usage = 0;
+	unsigned int alg_flags = sc_pkcs15_alg_flags_from_algorithm(algorithm);
+
+	if (cert_usage & SC_PKCS15_X509_USAGE_SIGNATURE) {
+		pub_usage |= SC_PKCS15_PRKEY_USAGE_VERIFY|SC_PKCS15_PRKEY_USAGE_VERIFYRECOVER;
+		pr_usage |= SC_PKCS15_PRKEY_USAGE_SIGN|SC_PKCS15_PRKEY_USAGE_SIGNRECOVER;
+	}
+	if (cert_usage & SC_PKCS15_X509_USAGE_DERIVE) {
+		pub_usage |= SC_PKCS15_PRKEY_USAGE_DERIVE;
+		pr_usage |= SC_PKCS15_PRKEY_USAGE_DERIVE;
+	}
+	if (cert_usage & (SC_PKCS15_X509_USAGE_DECRYPT|SC_PKCS15_X509_USAGE_UNWRAP)) {
+		pub_usage |= SC_PKCS15_PRKEY_USAGE_ENCRYPT;
+		pr_usage |= SC_PKCS15_PRKEY_USAGE_DECRYPT;
+	}
+	if (allow_nonrepudiation && (cert_usage & SC_PKCS15_X509_USAGE_NONREPUDIATION)) {
+		pub_usage |= SC_PKCS15_PRKEY_USAGE_NONREPUDIATION;
+		pr_usage |= SC_PKCS15_PRKEY_USAGE_NONREPUDIATION;
+	}
+	/* filter usages algorithm */
+	if (pub_usage_ptr) {
+		*pub_usage_ptr = pub_usage & alg_flags;
+	}
+	if (pr_usage_ptr) {
+		*pr_usage_ptr = pr_usage & alg_flags;
+	}
+	return SC_SUCCESS;
+}
 
 void
 sc_pkcs15_free_certificate(struct sc_pkcs15_cert *cert)

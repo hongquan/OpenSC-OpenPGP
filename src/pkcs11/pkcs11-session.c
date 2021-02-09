@@ -120,8 +120,11 @@ static CK_RV sc_pkcs11_close_session(CK_SESSION_HANDLE hSession)
 		slot->login_user = -1;
 		if (sc_pkcs11_conf.atomic)
 			pop_all_login_states(slot);
-		else
+		else {
+			if (slot->p11card == NULL)
+				return CKR_TOKEN_NOT_RECOGNIZED;
 			slot->p11card->framework->logout(slot);
+		}
 	}
 
 	if (list_delete(&sessions, session) != 0)
@@ -185,6 +188,62 @@ out:
 	return rv;
 }
 
+/* PKCS #11 3.0 only */
+CK_RV C_SessionCancel(CK_SESSION_HANDLE hSession,  /* the session's handle */
+		      CK_FLAGS flags)      /* flags control which sessions are cancelled */
+{
+	struct sc_pkcs11_session *session;
+	CK_RV rv;
+
+	rv = sc_pkcs11_lock();
+	if (rv != CKR_OK)
+		return rv;
+
+	rv = get_session(hSession, &session);
+	if (rv != CKR_OK)
+		goto out;
+
+	/* Ignore return value of the cancel operation as it is valid to
+	 * cancel not started operation and it can not fail for other reasons */
+	if (flags & CKF_ENCRYPT) {
+		 /* unused */
+	}
+	if (flags & CKF_DECRYPT) {
+		session_stop_operation(session, SC_PKCS11_OPERATION_DECRYPT);
+	}
+	if (flags & CKF_DIGEST) {
+		session_stop_operation(session, SC_PKCS11_OPERATION_DIGEST);
+	}
+	if (flags & CKF_SIGN) {
+		session_stop_operation(session, SC_PKCS11_OPERATION_SIGN);
+	}
+	if (flags & CKF_SIGN_RECOVER) {
+		/* unused */
+	}
+	if (flags & CKF_VERIFY) {
+		session_stop_operation(session, SC_PKCS11_OPERATION_VERIFY);
+	}
+	if (flags & CKF_VERIFY_RECOVER) {
+		/* unused */
+	}
+	if (flags & CKF_GENERATE || flags & CKF_GENERATE_KEY_PAIR) {
+		/* unused */
+	}
+	if (flags & CKF_WRAP) {
+		session_stop_operation(session, SC_PKCS11_OPERATION_WRAP);
+	}
+	if (flags & CKF_UNWRAP) {
+		session_stop_operation(session, SC_PKCS11_OPERATION_UNWRAP);
+	}
+	if (flags & CKF_DERIVE) {
+		session_stop_operation(session, SC_PKCS11_OPERATION_DERIVE);
+	}
+
+out:
+	sc_pkcs11_unlock();
+	return rv;
+}
+
 CK_RV C_GetSessionInfo(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		       CK_SESSION_INFO_PTR pInfo)
 {				/* receives session information */
@@ -215,6 +274,12 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE hSession,	/* the session's handle */
 
 	slot = session->slot;
 	logged_out = (slot_get_logged_in_state(slot) == SC_PIN_STATE_LOGGED_OUT);
+	if (logged_out && slot->login_user >= 0) {
+		slot->login_user = -1;
+		sc_pkcs11_close_all_sessions(session->slot->id);
+		rv = CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
 	if (slot->login_user == CKU_SO && !logged_out) {
 		pInfo->state = CKS_RW_SO_FUNCTIONS;
 	} else if ((slot->login_user == CKU_USER && !logged_out) || (!(slot->token_info.flags & CKF_LOGIN_REQUIRED))) {
@@ -289,7 +354,7 @@ CK_RV C_Login(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		}
 		else   {
 			rv = restore_login_state(slot);
-			if (rv == CKR_OK)
+			if (rv == CKR_OK && slot->p11card && slot->p11card->framework)
 				rv = slot->p11card->framework->login(slot, userType, pPin, ulPinLen);
 			rv = reset_login_state(slot, rv);
 		}
@@ -307,13 +372,15 @@ CK_RV C_Login(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		rv = restore_login_state(slot);
 		if (rv == CKR_OK) {
 			sc_log(context, "C_Login() userType %li", userType);
+			if (slot->p11card == NULL)
+				return CKR_TOKEN_NOT_RECOGNIZED;
 			rv = slot->p11card->framework->login(slot, userType, pPin, ulPinLen);
 			sc_log(context, "fLogin() rv %li", rv);
 		}
 		if (rv == CKR_OK)
 			rv = push_login_state(slot, userType, pPin, ulPinLen);
 		if (rv == CKR_OK) {
-			slot->login_user = userType;
+			slot->login_user = (int) userType;
 		}
 		rv = reset_login_state(slot, rv);
 	}
@@ -321,6 +388,17 @@ CK_RV C_Login(CK_SESSION_HANDLE hSession,	/* the session's handle */
 out:
 	sc_pkcs11_unlock();
 	return rv;
+}
+
+/* PKCS #11 3.0 only */
+CK_RV C_LoginUser(CK_SESSION_HANDLE hSession,	/* the session's handle */
+		  CK_USER_TYPE userType,	/* the user type */
+		  CK_CHAR_PTR pPin,	/* the user's PIN */
+		  CK_ULONG ulPinLen, /* the length of the PIN */
+		  CK_UTF8CHAR_PTR pUsername, /* the user's name */
+		  CK_ULONG ulUsernameLen) /*the length of the user's name */
+{
+	return CKR_FUNCTION_NOT_SUPPORTED;
 }
 
 CK_RV C_Logout(CK_SESSION_HANDLE hSession)
@@ -347,8 +425,11 @@ CK_RV C_Logout(CK_SESSION_HANDLE hSession)
 		slot->login_user = -1;
 		if (sc_pkcs11_conf.atomic)
 			pop_all_login_states(slot);
-		else
+		else {
+			if (!slot->p11card)
+				return CKR_TOKEN_NOT_RECOGNIZED;
 			rv = slot->p11card->framework->logout(slot);
+		}
 	} else
 		rv = CKR_USER_NOT_LOGGED_IN;
 
@@ -385,7 +466,7 @@ CK_RV C_InitPIN(CK_SESSION_HANDLE hSession, CK_CHAR_PTR pPin, CK_ULONG ulPinLen)
 	slot = session->slot;
 	if (slot->login_user != CKU_SO) {
 		rv = CKR_USER_NOT_LOGGED_IN;
-	} else if (slot->p11card->framework->init_pin == NULL) {
+	} else if (slot->p11card == NULL || slot->p11card->framework->init_pin == NULL) {
 		rv = CKR_FUNCTION_NOT_SUPPORTED;
 	} else {
 		rv = restore_login_state(slot);
@@ -430,8 +511,11 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
 	}
 
 	rv = restore_login_state(slot);
-	if (rv == CKR_OK)
+	if (rv == CKR_OK) {
+		if (slot->p11card == NULL)
+			return CKR_TOKEN_NOT_RECOGNIZED;
 		rv = slot->p11card->framework->change_pin(slot, pOldPin, ulOldLen, pNewPin, ulNewLen);
+	}
 	rv = reset_login_state(slot, rv);
 
 out:

@@ -174,7 +174,7 @@ app default {
 		# QES is only possible with a Comfort Reader (CAT-K), which holds a
 		# cryptographic key to authenticate itself as signature terminal (ST).
 		# We usually will use the reader's capability to sign the data.
-		# However, during developement you may specify soft certificates and
+		# However, during development you may specify soft certificates and
 		# keys for a ST below.
 		# The following example EAC PKI can be found in vicc's example data:
 		# https://github.com/frankmorgner/vsmartcard/tree/master/virtualsmartcard/npa-example-data
@@ -200,6 +200,15 @@ app default {
 		# Default: /usr/bin/pinentry
 		# Only used if compiled with --enable-dnie-ui
 		# user_consent_app = "/usr/bin/pinentry";
+	}
+
+	card_driver edo {
+		# CAN is required to establish connection
+		# with the card. It might be overridden by
+		# EDO_CAN environment variable. Currently,
+		# it is not possible to set it in any other way.
+		#
+		#can = 123456;
 	}
 
 	# In addition to the built-in list of known cards in the
@@ -455,6 +464,15 @@ app default {
 
 	# SmartCard-HSM with contact-less interface
 	card_atr 3B:8E:80:01:80:31:81:54:48:53:4D:31:73:80:21:40:81:07:18 {
+		driver = "sc-hsm";
+		read_only = false;
+		md_supports_X509_enrollment = true;
+		md_supports_container_key_gen = true;
+		md_guid_as_label = true;
+	}
+
+	# SmartCard-HSM 4k with contact-based interface or USB-Stick
+	card_atr 3b:de:18:ff:81:91:fe:1f:c3:80:31:81:54:48:53:4d:31:73:80:21:40:81:07:1c {
 		driver = "sc-hsm";
 		read_only = false;
 		md_supports_X509_enrollment = true;
@@ -873,7 +891,7 @@ app default {
 		# (with certificate check)  where $HOME is not set
 		# Default: path in user home
 		# file_cache_dir = /var/lib/opensc/cache
-                #
+
 		# Use PIN caching?
 		# Default: true
 		# use_pin_caching = false;
@@ -885,8 +903,15 @@ app default {
 		# Older PKCS#11 applications not supporting CKA_ALWAYS_AUTHENTICATE
 		# may need to set this to get signatures to work with some cards.
 		# Default: false
+		# It is recommended to enable also use_pin_caching to allow OpenSC
+		# to pass the pin to the card when needed.
 		# pin_cache_ignore_user_consent = true;
-		#
+
+		# How to handle a PIN-protected certificate
+		# Valid values: protect, declassify, ignore.
+		# Default: ignore in tokend, protect otherwise
+		# private_certificate = declassify;
+
 		# Enable pkcs15 emulation.
 		# Default: yes
 		# enable_pkcs15_emulation = no;
@@ -904,7 +929,7 @@ app default {
 		# enable_builtin_emulation = no;
 		#
 		# List of the builtin pkcs15 emulators to test
-		# Default: esteid, openpgp, tcos, starcert, itacns, infocamere, postecert, actalis, atrust-acos, gemsafeGPK, gemsafeV1, tccardos, PIV-II;
+		# Default: esteid, openpgp, tcos, starcert, itacns, actalis, atrust-acos, gemsafeGPK, gemsafeV1, tccardos, PIV-II;
 		# builtin_emulators = openpgp;
 
 		# additional settings per driver
@@ -1040,7 +1065,7 @@ app opensc-pkcs11 {
 		#    init_pin_in_so_session:  C_InitPIN() in CKU_SO logged session:
 		#       User PIN 'UNBLOCK' is protected by SOPIN. (PUK == SOPIN).
 		#       # Actually this style works only for the PKCS15 contents without SOPIN.
-		#       # For those with SOPIN, this mode will be usefull for the cards without
+		#       # For those with SOPIN, this mode will be useful for the cards without
 		#       #   modes 00 and 01 of ISO command 'RESET RETRY COUNTER'. --vt
 		#
 		# Default: none
@@ -1059,7 +1084,7 @@ app opensc-pkcs11 {
 		# Card can contain more then one PINs or more then one on-card application with
 		#   its own PINs. Normally, to access all of them with the PKCS#11 API a slot has to be
 		#   created for all of them. Many slots could be ennoying for some of widely used application,
-		#   like FireFox. This configuration parameter allows to select the PIN(s)
+		#   like FireFox. This configuration parameter allows one to select the PIN(s)
 		#   for which PKCS#11 slot will be created.
 		# Actually recognised following symbolic names:
 		#  'user', 'sign', 'all'

@@ -68,6 +68,7 @@ main (int argc, char **argv)
 	reader = sc_ctx_get_reader(ctx, 0);
 	if (!reader) {
 		fprintf(stderr, "Failed to access reader 0");
+		sc_release_context(ctx);
 		exit(1);
 	}
 
@@ -83,7 +84,7 @@ main (int argc, char **argv)
 	EAC_init();
 
 
-	/* Now we try to change the PIN. Therefor we need to establish a SM channel
+	/* Now we try to change the PIN. Therefore we need to establish a SM channel
 	 * with PACE.
 	 *
 	 * You could set your PIN with pin=“123456”; or just leave it at NULL to be

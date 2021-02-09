@@ -77,7 +77,7 @@ size_t sc_apdu_get_length(const sc_apdu_t *apdu, unsigned int proto)
  *  @param  apdu    APDU to be encoded as an octet string
  *  @param  proto   protocol version to be used
  *  @param  out     output buffer of size outlen.
- *  @param  outlen  size of hte output buffer
+ *  @param  outlen  size of the output buffer
  *  @return SC_SUCCESS on success and an error code otherwise
  */
 int sc_apdu2bytes(sc_context_t *ctx, const sc_apdu_t *apdu,
@@ -291,10 +291,6 @@ sc_check_apdu(sc_card_t *card, const sc_apdu_t *apdu)
 		/* data is expected       */
 		if (apdu->resplen == 0 || apdu->resp == NULL)
 			goto error;
-		/* return buffer to small */
-		if ((apdu->le == 0 && apdu->resplen < SC_MAX_APDU_BUFFER_SIZE-2)
-				|| (apdu->resplen < apdu->le))
-			goto error;
 		break;
 	case SC_APDU_CASE_3_SHORT:
 		/* data is sent */
@@ -313,10 +309,6 @@ sc_check_apdu(sc_card_t *card, const sc_apdu_t *apdu)
 			goto error;
 		/* data is expected       */
 		if (apdu->resplen == 0 || apdu->resp == NULL)
-			goto error;
-		/* return buffer to small */
-		if ((apdu->le == 0 && apdu->resplen < SC_MAX_APDU_BUFFER_SIZE-2)
-				|| (apdu->resplen < apdu->le))
 			goto error;
 		/* inconsistent datalen   */
 		if (apdu->datalen != apdu->lc)
@@ -627,9 +619,18 @@ int sc_transmit_apdu(sc_card_t *card, sc_apdu_t *apdu)
 			len -= plen;
 			buf += plen;
 		}
-	} else
+	} else {
 		/* transmit single APDU */
 		r = sc_transmit(card, apdu);
+	}
+
+	if (r == SC_ERROR_CARD_RESET || r == SC_ERROR_READER_REATTACHED) {
+		sc_invalidate_cache(card);
+		/* give card driver a chance to react on resets */
+		if (card->ops->card_reader_lock_obtained)
+			card->ops->card_reader_lock_obtained(card, 1);
+	}
+
 	/* all done => release lock */
 	if (sc_unlock(card) != SC_SUCCESS)
 		sc_log(card->ctx, "sc_unlock failed");

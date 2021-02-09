@@ -41,10 +41,6 @@
 #define TC_CARDOS_GLOBALPIN	0x3000
 #define TC_CARDOS_PIN_MASK	0x3000
 
-int sc_pkcs15emu_tccardos_init_ex(sc_pkcs15_card_t *p15card,
-				  struct sc_aid *,
-				  sc_pkcs15emu_opt_t *opts);
-
 static int read_file(struct sc_card *card, const char *file, u8 *buf,
 	size_t *len)
 {
@@ -54,12 +50,14 @@ static int read_file(struct sc_card *card, const char *file, u8 *buf,
 
 	sc_format_path(file, &path);
 	r = sc_select_file(card, &path, &fid);
-	if (r != SC_SUCCESS || !fid)
+	if (r != SC_SUCCESS)
 		return r;
+	if (!fid)
+		return SC_ERROR_INTERNAL;
 	if (fid->size < *len)
 		*len = fid->size;
 	r = sc_read_binary(card, 0, buf, *len, 0);
-	free(fid);
+	sc_file_free(fid);
 	if ((size_t)r < *len)
 		return SC_ERROR_INTERNAL;
 
@@ -219,7 +217,7 @@ static int parse_EF_CardInfo(sc_pkcs15_card_t *p15card)
 
 	/* read EF_CardInfo1 */
 	r = read_file(p15card->card, "3F001003b200", info1, &info1_len);
-	if (r != SC_SUCCESS)
+	if (r != SC_SUCCESS || info1_len < 4)
 		return SC_ERROR_WRONG_CARD;
 	/* read EF_CardInfo2 */
 	r = read_file(p15card->card, "3F001003b201", info2, &info2_len);
@@ -230,14 +228,19 @@ static int parse_EF_CardInfo(sc_pkcs15_card_t *p15card)
 		| (((unsigned int) info1[info1_len-2]) << 8)
 	   	| (((unsigned int) info1[info1_len-3]) << 16)
 	   	| (((unsigned int) info1[info1_len-4]) << 24);
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+	sc_log(ctx, 
 		"found %d private keys\n", (int)key_num);
 	/* set p1 to the address of the first key descriptor */
 	offset = info1_len - 4 - key_num * 2;
-	if (offset >= sizeof info1)
+	if (offset >= info1_len)
 		return SC_ERROR_INVALID_DATA;
 	p1 = info1 + offset;
 	p2 = info2;
+
+	/* This is the minimum amount of data expected by the following code without
+	 * overunning the buffer without additional condition for cert_count == 4 */
+	if (info2_len < key_num * 14)
+		return SC_ERROR_INVALID_DATA;
 	for (i=0; i<key_num; i++) {
 		u8   pinId, keyId, cert_count;
 		int  ch_cert, ca_cert, r1_cert, r2_cert = 0;
@@ -317,15 +320,11 @@ static int sc_pkcs15_tccardos_init_func(sc_pkcs15_card_t *p15card)
 	if (r != SC_SUCCESS)
 		return r;
 	/* set card label */
-	if (p15card->tokeninfo->label != NULL)
-		free(p15card->tokeninfo->label);
-	p15card->tokeninfo->label = strdup(TC_CARDOS_LABEL);
+	set_string(&p15card->tokeninfo->label, TC_CARDOS_LABEL);
 	if (p15card->tokeninfo->label == NULL)
 		return SC_ERROR_OUT_OF_MEMORY;
 	/* set the manufacturer ID */
-	if (p15card->tokeninfo->manufacturer_id != NULL)
-		free(p15card->tokeninfo->manufacturer_id);
-	p15card->tokeninfo->manufacturer_id = strdup(MANU_ID);
+	set_string(&p15card->tokeninfo->manufacturer_id, MANU_ID);
 	if (p15card->tokeninfo->manufacturer_id == NULL)
 		return SC_ERROR_OUT_OF_MEMORY;
 	/* set the serial number */
@@ -333,7 +332,7 @@ static int sc_pkcs15_tccardos_init_func(sc_pkcs15_card_t *p15card)
 	if (r != SC_SUCCESS || iccsn.len < 5+8)
 		return SC_ERROR_INTERNAL;
 	sc_bin_to_hex(iccsn.value + 5, 8, hex_buf, sizeof(hex_buf), 0);
-	p15card->tokeninfo->serial_number = strdup(hex_buf);
+	set_string(&p15card->tokeninfo->serial_number, hex_buf);
 	if (p15card->tokeninfo->serial_number == NULL)
 		return SC_ERROR_OUT_OF_MEMORY;
 	/* select the application DF */
@@ -342,16 +341,14 @@ static int sc_pkcs15_tccardos_init_func(sc_pkcs15_card_t *p15card)
 	if (r != SC_SUCCESS || file == NULL)
 		return SC_ERROR_INTERNAL;
 	/* set the application DF */
-	if (p15card->file_app)
-		free(p15card->file_app);
+	sc_file_free(p15card->file_app);
 	p15card->file_app = file;
 
 	return SC_SUCCESS;
 }
 
 int sc_pkcs15emu_tccardos_init_ex(sc_pkcs15_card_t *p15card,
-				  struct sc_aid *aid,
-				  sc_pkcs15emu_opt_t *opts)
+				  struct sc_aid *aid)
 {
 	return sc_pkcs15_tccardos_init_func(p15card);
 }

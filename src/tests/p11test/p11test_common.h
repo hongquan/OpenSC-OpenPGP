@@ -46,6 +46,7 @@
 #define FLAGS_DECRYPT		0x04
 #define FLAGS_DECRYPT_OPENSSL	0x08
 #define FLAGS_DECRYPT_ANY	( FLAGS_DECRYPT | FLAGS_DECRYPT_OPENSSL )
+#define FLAGS_DERIVE		0x10
 
 typedef struct {
 	char *outfile;
@@ -83,7 +84,7 @@ typedef struct {
 	size_t  num_keygen_mechs;
 } token_info_t;
 
-token_info_t token;
+extern token_info_t token;
 
 #endif /* P11TEST_COMMON_H */
 

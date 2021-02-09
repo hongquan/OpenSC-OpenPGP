@@ -30,57 +30,34 @@
 #include <stdio.h>
 
 #include "common/compat_strlcpy.h"
-#include "common/compat_strlcat.h"
 
 #include "internal.h"
 #include "opensc.h"
 #include "pkcs15.h"
-#include "esteid.h"
-
-int sc_pkcs15emu_esteid_init_ex(sc_pkcs15_card_t *, struct sc_aid *, sc_pkcs15emu_opt_t *);
-
-static void
-set_string (char **strp, const char *value)
-{
-	if (*strp)
-		free (*strp);
-	*strp = value ? strdup (value) : NULL;
-}
-
-
-int
-select_esteid_df (sc_card_t * card)
-{
-	int r;
-	sc_path_t tmppath;
-	sc_format_path ("3F00EEEE", &tmppath);
-	r = sc_select_file (card, &tmppath, NULL);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "esteid select DF failed");
-	return r;
-}
 
 static int
 sc_pkcs15emu_esteid_init (sc_pkcs15_card_t * p15card)
 {
+	const size_t SC_ESTEID_PD_DOCUMENT_NR = 8;
 	sc_card_t *card = p15card->card;
 	unsigned char buff[128];
 	int r, i;
 	size_t field_length = 0, modulus_length = 0;
 	sc_path_t tmppath;
 
-	set_string (&p15card->tokeninfo->label, "ID-kaart");
-	set_string (&p15card->tokeninfo->manufacturer_id, "AS Sertifitseerimiskeskus");
+	set_string(&p15card->tokeninfo->label, "ID-kaart");
+	set_string(&p15card->tokeninfo->manufacturer_id, "AS Sertifitseerimiskeskus");
 
 	/* Select application directory */
 	sc_format_path ("3f00eeee5044", &tmppath);
 	r = sc_select_file (card, &tmppath, NULL);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "select esteid PD failed");
+	LOG_TEST_RET(card->ctx, r, "select esteid PD failed");
 
 	/* read the serial (document number) */
 	r = sc_read_record (card, SC_ESTEID_PD_DOCUMENT_NR, buff, sizeof(buff), SC_RECORD_BY_REC_NR);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "read document number failed");
+	LOG_TEST_RET(card->ctx, r, "read document number failed");
 	buff[MIN((size_t) r, (sizeof buff)-1)] = '\0';
-	set_string (&p15card->tokeninfo->serial_number, (const char *) buff);
+	set_string(&p15card->tokeninfo->serial_number, (const char *)buff);
 
 	p15card->tokeninfo->flags = SC_PKCS15_TOKEN_PRN_GENERATION
 				  | SC_PKCS15_TOKEN_EID_COMPLIANT
@@ -94,7 +71,7 @@ sc_pkcs15emu_esteid_init (sc_pkcs15_card_t * p15card)
 		static char const *esteid_cert_paths[2] = {
 			"3f00eeeeaace",
 			"3f00eeeeddce"};
-		static int esteid_cert_ids[2] = {1, 2};
+		static u8 esteid_cert_ids[2] = {1, 2};
 
 		struct sc_pkcs15_cert_info cert_info;
 		struct sc_pkcs15_object cert_obj;
@@ -109,34 +86,29 @@ sc_pkcs15emu_esteid_init (sc_pkcs15_card_t * p15card)
 		r = sc_pkcs15emu_add_x509_cert(p15card, &cert_obj, &cert_info);
 		if (r < 0)
 			return SC_ERROR_INTERNAL;
-		if (i == 0) {
-			sc_pkcs15_cert_t *cert = NULL;
-			r = sc_pkcs15_read_certificate(p15card, &cert_info, &cert);
-			if (r < 0)
-				return SC_ERROR_INTERNAL;
-			if (cert->key->algorithm == SC_ALGORITHM_EC)
-				field_length = cert->key->u.ec.params.field_length;
-			else
-				modulus_length = cert->key->u.rsa.modulus.len * 8;
-			if (r == SC_SUCCESS) {
-				static const struct sc_object_id cn_oid = {{ 2, 5, 4, 3, -1 }};
-				u8 *cn_name = NULL;
-				size_t cn_len = 0;
-				sc_pkcs15_get_name_from_dn(card->ctx, cert->subject,
-					cert->subject_len, &cn_oid, &cn_name, &cn_len);
-				if (cn_len > 0) {
-					char *token_name = malloc(cn_len+1);
-					if (token_name) {
-						memcpy(token_name, cn_name, cn_len);
-						token_name[cn_len] = '\0';
-						set_string(&p15card->tokeninfo->label, (const char*)token_name);
-						free(token_name);
-					}
-				}
-				free(cn_name);
-				sc_pkcs15_free_certificate(cert);
-			}
+		if (i != 0)
+			continue;
+
+		sc_pkcs15_cert_t *cert = NULL;
+		r = sc_pkcs15_read_certificate(p15card, &cert_info, &cert);
+		if (r < 0)
+			return SC_ERROR_INTERNAL;
+		if (cert->key->algorithm == SC_ALGORITHM_EC)
+			field_length = cert->key->u.ec.params.field_length;
+		else
+			modulus_length = cert->key->u.rsa.modulus.len * 8;
+		static const struct sc_object_id cn_oid = {{ 2, 5, 4, 3, -1 }};
+		u8 *cn_name = NULL;
+		size_t cn_len = 0;
+		sc_pkcs15_get_name_from_dn(card->ctx, cert->subject,
+			cert->subject_len, &cn_oid, &cn_name, &cn_len);
+		if (cn_len > 0) {
+			cn_name = realloc(cn_name, cn_len + 1);
+			cn_name[cn_len] = 0;
+			free(p15card->tokeninfo->label);
+			p15card->tokeninfo->label = (char*) cn_name;
 		}
+		sc_pkcs15_free_certificate(cert);
 	}
 
 	/* the file with key pin info (tries left) */
@@ -147,16 +119,15 @@ sc_pkcs15emu_esteid_init (sc_pkcs15_card_t * p15card)
 
 	/* add pins */
 	for (i = 0; i < 3; i++) {
-		unsigned char tries_left;
 		static const char *esteid_pin_names[3] = {
 			"PIN1",
 			"PIN2",
 			"PUK" };
 			
-		static const int esteid_pin_min[3] = {4, 5, 8};
+		static const unsigned int esteid_pin_min[3] = {4, 5, 8};
 		static const int esteid_pin_ref[3] = {1, 2, 0};
-		static const int esteid_pin_authid[3] = {1, 2, 3};
-		static const int esteid_pin_flags[3] = {0, 0, SC_PKCS15_PIN_FLAG_UNBLOCKING_PIN};
+		static const u8 esteid_pin_authid[3] = {1, 2, 3};
+		static const unsigned int esteid_pin_flags[3] = {0, 0, SC_PKCS15_PIN_FLAG_UNBLOCKING_PIN};
 		
 		struct sc_pkcs15_auth_info pin_info;
 		struct sc_pkcs15_object pin_obj;
@@ -165,10 +136,9 @@ sc_pkcs15emu_esteid_init (sc_pkcs15_card_t * p15card)
 		memset(&pin_obj, 0, sizeof(pin_obj));
 
 		/* read the number of tries left for the PIN */
-		r = sc_read_record (card, i + 1, buff, sizeof(buff), SC_RECORD_BY_REC_NR);
-		if (r < 0)
+		r = sc_read_record (card, (unsigned int) i + 1, buff, sizeof(buff), SC_RECORD_BY_REC_NR);
+		if (r < 6)
 			return SC_ERROR_INTERNAL;
-		tries_left = buff[5];
 
 		pin_info.auth_id.len = 1;
 		pin_info.auth_id.value[0] = esteid_pin_authid[i];
@@ -180,7 +150,7 @@ sc_pkcs15emu_esteid_init (sc_pkcs15_card_t * p15card)
 		pin_info.attrs.pin.stored_length = 12;
 		pin_info.attrs.pin.max_length = 12;
 		pin_info.attrs.pin.pad_char = '\0';
-		pin_info.tries_left = (int)tries_left;
+		pin_info.tries_left = buff[5];
 		pin_info.max_tries = 3;
 
 		strlcpy(pin_obj.label, esteid_pin_names[i], sizeof(pin_obj.label));
@@ -199,7 +169,7 @@ sc_pkcs15emu_esteid_init (sc_pkcs15_card_t * p15card)
 
 	/* add private keys */
 	for (i = 0; i < 2; i++) {
-		static int prkey_pin[2] = {1, 2};
+		static u8 prkey_pin[2] = {1, 2};
 
 		static const char *prkey_name[2] = {
 			"Isikutuvastus",
@@ -241,25 +211,9 @@ sc_pkcs15emu_esteid_init (sc_pkcs15_card_t * p15card)
 	return SC_SUCCESS;
 }
 
-static int esteid_detect_card(sc_pkcs15_card_t *p15card)
+int sc_pkcs15emu_esteid_init_ex(sc_pkcs15_card_t *p15card, struct sc_aid *aid)
 {
-	if (is_esteid_card(p15card->card))
-		return SC_SUCCESS;
-	else
-		return SC_ERROR_WRONG_CARD;
-}
-
-int sc_pkcs15emu_esteid_init_ex(sc_pkcs15_card_t *p15card,
-				struct sc_aid *aid,
-				sc_pkcs15emu_opt_t *opts)
-{
-
-	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)
+	if (p15card->card->type == SC_CARD_TYPE_MCRD_ESTEID_V30)
 		return sc_pkcs15emu_esteid_init(p15card);
-	else {
-		int r = esteid_detect_card(p15card);
-		if (r)
-			return SC_ERROR_WRONG_CARD;
-		return sc_pkcs15emu_esteid_init(p15card);
-	}
+	return SC_ERROR_WRONG_CARD;
 }

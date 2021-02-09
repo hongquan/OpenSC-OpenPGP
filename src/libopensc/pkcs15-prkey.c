@@ -36,10 +36,8 @@
 #include <openssl/bn.h>
 #include <openssl/rsa.h>
 #include <openssl/dsa.h>
-#if OPENSSL_VERSION_NUMBER >= 0x10000000L
-	#ifndef OPENSSL_NO_EC
-	#include <openssl/ec.h>
-	#endif
+#ifndef OPENSSL_NO_EC
+#include <openssl/ec.h>
 #endif
 #endif
 
@@ -50,10 +48,18 @@
 #include "aux-data.h"
 
 /*
- * in src/libopensc/types.h SC_MAX_SUPPORTED_ALGORITHMS  defined as 8
+ * in src/libopensc/types.h SC_MAX_SUPPORTED_ALGORITHMS  defined as 16
  */
 #define C_ASN1_SUPPORTED_ALGORITHMS_SIZE (SC_MAX_SUPPORTED_ALGORITHMS + 1)
 static const struct sc_asn1_entry c_asn1_supported_algorithms[C_ASN1_SUPPORTED_ALGORITHMS_SIZE] = {
+	{ "algorithmReference", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmReference", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmReference", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmReference", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmReference", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmReference", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmReference", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmReference", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, SC_ASN1_OPTIONAL, NULL, NULL },
 	{ "algorithmReference", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, SC_ASN1_OPTIONAL, NULL, NULL },
 	{ "algorithmReference", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, SC_ASN1_OPTIONAL, NULL, NULL },
 	{ "algorithmReference", SC_ASN1_INTEGER, SC_ASN1_TAG_INTEGER, SC_ASN1_OPTIONAL, NULL, NULL },
@@ -259,8 +265,8 @@ int sc_pkcs15_decode_prkdf_entry(struct sc_pkcs15_card *p15card,
 
 	r = sc_asn1_decode_choice(ctx, asn1_prkey, *buf, *buflen, buf, buflen);
 	if (r == SC_ERROR_ASN1_END_OF_CONTENTS)
-		return r;
-	LOG_TEST_RET(ctx, r, "PrKey DF ASN.1 decoding failed");
+		goto err;
+	LOG_TEST_GOTO_ERR(ctx, r, "PrKey DF ASN.1 decoding failed");
 	if (asn1_prkey[0].flags & SC_ASN1_PRESENT) {
 		obj->type = SC_PKCS15_TYPE_PRKEY_RSA;
 	}
@@ -274,30 +280,39 @@ int sc_pkcs15_decode_prkdf_entry(struct sc_pkcs15_card *p15card,
 			info.path.type = SC_PATH_TYPE_PATH_PROT;
 	}
 	else if (asn1_prkey[3].flags & SC_ASN1_PRESENT) {
+		/* FIXME proper handling of gost parameters without the need of
+		 * allocating data here. this would also make sc_pkcs15_free_key_params
+		 * obsolete */
 		obj->type = SC_PKCS15_TYPE_PRKEY_GOSTR3410;
-		assert(info.modulus_length == 0);
+		if (info.modulus_length != 0 || info.params.len != 0) {
+			r = SC_ERROR_INVALID_ASN1_OBJECT;
+			goto err;
+		}
 		info.modulus_length = SC_PKCS15_GOSTR3410_KEYSIZE;
-		assert(info.params.len == 0);
 		info.params.len = sizeof(struct sc_pkcs15_keyinfo_gostparams);
 		info.params.data = malloc(info.params.len);
-		if (info.params.data == NULL)
-			LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
-		assert(sizeof(*keyinfo_gostparams) == info.params.len);
+		if (info.params.data == NULL) {
+			r = SC_ERROR_OUT_OF_MEMORY;
+			goto err;
+		}
 		keyinfo_gostparams = info.params.data;
 		keyinfo_gostparams->gostr3410 = gostr3410_params[0];
 		keyinfo_gostparams->gostr3411 = gostr3410_params[1];
 		keyinfo_gostparams->gost28147 = gostr3410_params[2];
 	}
 	else {
-		sc_log(ctx, "Neither RSA or DSA or GOSTR3410 or ECC key in PrKDF entry.");
-		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ASN1_OBJECT);
+		r = SC_ERROR_INVALID_ASN1_OBJECT;
+		LOG_TEST_GOTO_ERR(ctx, r, "Neither RSA or DSA or GOSTR3410 or ECC key in PrKDF entry.");
 	}
 
-	if (!p15card->app || !p15card->app->ddo.aid.len)   {
+	if (!p15card->app || !p15card->app->ddo.aid.len) {
+		if (!p15card->file_app) {
+			r = SC_ERROR_INTERNAL;
+			goto err;
+		}
 		r = sc_pkcs15_make_absolute_path(&p15card->file_app->path, &info.path);
 		if (r < 0) {
-			sc_pkcs15_free_key_params(&info.params);
-			return r;
+			goto err;
 		}
 	}
 	else   {
@@ -340,14 +355,24 @@ int sc_pkcs15_decode_prkdf_entry(struct sc_pkcs15_card *p15card,
 
 	obj->data = malloc(sizeof(info));
 	if (obj->data == NULL) {
-		sc_pkcs15_free_key_params(&info.params);
-		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+		r = SC_ERROR_OUT_OF_MEMORY;
+		goto err;
 	}
 	memcpy(obj->data, &info, sizeof(info));
 
 	sc_log(ctx, "Key Subject %s", sc_dump_hex(info.subject.value, info.subject.len));
 	sc_log(ctx, "Key path %s", sc_print_path(&info.path));
-	return 0;
+
+	r = SC_SUCCESS;
+
+err:
+	if (r < 0) {
+		/* This might have allocated something. If so, clear it now */
+		free(info.subject.value);
+		sc_pkcs15_free_key_params(&info.params);
+	}
+
+	return r;
 }
 
 int sc_pkcs15_encode_prkdf_entry(sc_context_t *ctx, const struct sc_pkcs15_object *obj,
@@ -580,7 +605,6 @@ sc_pkcs15_free_prkey(struct sc_pkcs15_prkey *key)
 		free(key->u.dsa.priv.data);
 		break;
 	case SC_ALGORITHM_GOSTR3410:
-		assert(key->u.gostr3410.d.data);
 		free(key->u.gostr3410.d.data);
 		break;
 	case SC_ALGORITHM_EC:
@@ -599,6 +623,9 @@ sc_pkcs15_free_prkey(struct sc_pkcs15_prkey *key)
 
 void sc_pkcs15_free_prkey_info(sc_pkcs15_prkey_info_t *key)
 {
+	if (!key)
+		return;
+
 	if (key->subject.value)
 		free(key->subject.value);
 
@@ -678,7 +705,7 @@ sc_pkcs15_convert_prkey(struct sc_pkcs15_prkey *pkcs15_key, void *evp_key)
 		DSA_free(src);
 		break;
 		}
-#if OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_EC)
+#if !defined(OPENSSL_NO_EC)
 	case NID_id_GostR3410_2001: {
 		struct sc_pkcs15_prkey_gostr3410 *dst = &pkcs15_key->u.gostr3410;
 		EC_KEY *src = EVP_PKEY_get0(pk);
@@ -713,8 +740,11 @@ sc_pkcs15_convert_prkey(struct sc_pkcs15_prkey *pkcs15_key, void *evp_key)
 
 		/* get curve name */
 		nid = EC_GROUP_get_curve_name(grp);
-		if(nid != 0)
-			dst->params.named_curve = strdup(OBJ_nid2sn(nid));
+		if(nid != 0) {
+			const char *sn = OBJ_nid2sn(nid);
+			if (sn)
+				dst->params.named_curve = strdup(sn);
+		}
 
 		/* Decode EC_POINT from a octet string */
 		buflen = EC_POINT_point2oct(grp, (const EC_POINT *) EC_KEY_get0_public_key(src),
@@ -730,7 +760,7 @@ sc_pkcs15_convert_prkey(struct sc_pkcs15_prkey *pkcs15_key, void *evp_key)
 		dst->ecpointQ.len = buflen;
 
 		/*
-		 * In OpenSC the field_length is in bits. Not all curves are a mutiple of 8.
+		 * In OpenSC the field_length is in bits. Not all curves are a multiple of 8.
 		 * EC_POINT_point2oct handles this and returns octstrings that can handle
 		 * these curves. Get real field_length from OpenSSL. 
 		 */
@@ -752,7 +782,7 @@ sc_pkcs15_convert_prkey(struct sc_pkcs15_prkey *pkcs15_key, void *evp_key)
 
 		break;
 	}
-#endif /* OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_EC) */
+#endif /* !defined(OPENSSL_NO_EC) */
 	default:
 		return SC_ERROR_NOT_SUPPORTED;
 	}

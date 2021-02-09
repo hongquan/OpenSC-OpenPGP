@@ -86,7 +86,7 @@ static int tcos_match_card(sc_card_t *card)
 
 static int tcos_init(sc_card_t *card)
 {
-        unsigned long flags;
+	unsigned long flags;
 
 	tcos_data *data = malloc(sizeof(tcos_data));
 	if (!data) return SC_ERROR_OUT_OF_MEMORY;
@@ -95,20 +95,20 @@ static int tcos_init(sc_card_t *card)
 	card->drv_data = (void *)data;
 	card->cla = 0x00;
 
-        flags = SC_ALGORITHM_RSA_RAW;
-        flags |= SC_ALGORITHM_RSA_PAD_PKCS1;
-        flags |= SC_ALGORITHM_RSA_HASH_NONE;
+	flags = SC_ALGORITHM_RSA_RAW;
+	flags |= SC_ALGORITHM_RSA_PAD_PKCS1;
+	flags |= SC_ALGORITHM_RSA_HASH_NONE;
 
-        _sc_card_add_rsa_alg(card, 512, flags, 0);
-        _sc_card_add_rsa_alg(card, 768, flags, 0);
-        _sc_card_add_rsa_alg(card, 1024, flags, 0);
+	_sc_card_add_rsa_alg(card, 512, flags, 0);
+	_sc_card_add_rsa_alg(card, 768, flags, 0);
+	_sc_card_add_rsa_alg(card, 1024, flags, 0);
 
 	if (card->type == SC_CARD_TYPE_TCOS_V3) {
 		card->caps |= SC_CARD_CAP_APDU_EXT;
 		_sc_card_add_rsa_alg(card, 1280, flags, 0);
 		_sc_card_add_rsa_alg(card, 1536, flags, 0);
 		_sc_card_add_rsa_alg(card, 1792, flags, 0);
-        	_sc_card_add_rsa_alg(card, 2048, flags, 0);
+		_sc_card_add_rsa_alg(card, 2048, flags, 0);
 	}
 
 	return 0;
@@ -124,20 +124,20 @@ static int tcos_construct_fci(const sc_file_t *file,
 {
 	u8 *p = out;
 	u8 buf[64];
-        size_t n;
+	size_t n;
 
-        /* FIXME: possible buffer overflow */
+	/* FIXME: possible buffer overflow */
 
-        *p++ = 0x6F; /* FCI */
-        p++;
+	*p++ = 0x6F; /* FCI */
+	p++;
 
 	/* File size */
 	buf[0] = (file->size >> 8) & 0xFF;
 	buf[1] = file->size & 0xFF;
 	sc_asn1_put_tag(0x81, buf, 2, p, 16, &p);
 
-        /* File descriptor */
-        n = 0;
+	/* File descriptor */
+	n = 0;
 	buf[n] = file->shareable ? 0x40 : 0;
 	switch (file->type) {
 	case SC_FILE_TYPE_WORKING_EF:
@@ -149,63 +149,60 @@ static int tcos_construct_fci(const sc_file_t *file,
 		return SC_ERROR_NOT_SUPPORTED;
 	}
 	buf[n++] |= file->ef_structure & 7;
-        if ( (file->ef_structure & 7) > 1) {
-                /* record structured file */
-                buf[n++] = 0x41; /* indicate 3rd byte */
-                buf[n++] = file->record_length;
-        }
+	if ( (file->ef_structure & 7) > 1) {
+		/* record structured file */
+		buf[n++] = 0x41; /* indicate 3rd byte */
+		buf[n++] = file->record_length;
+	}
 	sc_asn1_put_tag(0x82, buf, n, p, 8, &p);
 
-        /* File identifier */
+	/* File identifier */
 	buf[0] = (file->id >> 8) & 0xFF;
 	buf[1] = file->id & 0xFF;
 	sc_asn1_put_tag(0x83, buf, 2, p, 16, &p);
 
-        /* Directory name */
-        if (file->type == SC_FILE_TYPE_DF) {
-                if (file->namelen) {
-                        sc_asn1_put_tag(0x84, file->name, file->namelen,
+	/* Directory name */
+	if (file->type == SC_FILE_TYPE_DF) {
+		if (file->namelen) {
+			sc_asn1_put_tag(0x84, file->name, file->namelen,
                                         p, 16, &p);
-                }
-                else {
-                        /* TCOS needs one, so we use a faked one */
-                        snprintf ((char *) buf, sizeof(buf)-1, "foo-%lu",
+		} else {
+			/* TCOS needs one, so we use a faked one */
+			snprintf ((char *) buf, sizeof(buf)-1, "foo-%lu",
                                   (unsigned long) time (NULL));
-                        sc_asn1_put_tag(0x84, buf, strlen ((char *) buf), p, 16, &p);
-                }
-        }
+			sc_asn1_put_tag(0x84, buf, strlen ((char *) buf), p, 16, &p);
+		}
+	}
 
-        /* File descriptor extension */
-        if (file->prop_attr_len && file->prop_attr) {
+	/* File descriptor extension */
+	if (file->prop_attr_len && file->prop_attr) {
 		n = file->prop_attr_len;
 		memcpy(buf, file->prop_attr, n);
-        }
-        else {
-                n = 0;
-                buf[n++] = 0x01; /* not invalidated, permanent */
-                if (file->type == SC_FILE_TYPE_WORKING_EF) 
-                        buf[n++] = 0x00; /* generic data file */
-        }
-        sc_asn1_put_tag(0x85, buf, n, p, 16, &p);
+	} else {
+		n = 0;
+		buf[n++] = 0x01; /* not invalidated, permanent */
+		if (file->type == SC_FILE_TYPE_WORKING_EF)
+			buf[n++] = 0x00; /* generic data file */
+	}
+	sc_asn1_put_tag(0x85, buf, n, p, 16, &p);
 
-        /* Security attributes */
+	/* Security attributes */
 	if (file->sec_attr_len && file->sec_attr) {
 		memcpy(buf, file->sec_attr, file->sec_attr_len);
 		n = file->sec_attr_len;
+	} else {
+		/* no attributes given - fall back to default one */
+		memcpy (buf+ 0, "\xa4\x00\x00\x00\xff\xff", 6); /* select */
+		memcpy (buf+ 6, "\xb0\x00\x00\x00\xff\xff", 6); /* read bin */
+		memcpy (buf+12, "\xd6\x00\x00\x00\xff\xff", 6); /* upd bin */
+		memcpy (buf+18, "\x60\x00\x00\x00\xff\xff", 6); /* admin grp*/
+		n = 24;
 	}
-        else {
-                /* no attributes given - fall back to default one */
-                memcpy (buf+ 0, "\xa4\x00\x00\x00\xff\xff", 6); /* select */
-                memcpy (buf+ 6, "\xb0\x00\x00\x00\xff\xff", 6); /* read bin */
-                memcpy (buf+12, "\xd6\x00\x00\x00\xff\xff", 6); /* upd bin */
-                memcpy (buf+18, "\x60\x00\x00\x00\xff\xff", 6); /* admin grp*/
-                n = 24;
-        }
-        sc_asn1_put_tag(0x86, buf, n, p, sizeof (buf), &p);
+	sc_asn1_put_tag(0x86, buf, n, p, sizeof (buf), &p);
 
-        
-        /* fixup length of FCI */
-        out[1] = p - out - 2;
+
+	/* fixup length of FCI */
+	out[1] = p - out - 2;
 
 	*outlen = p - out;
 	return 0;
@@ -221,21 +218,21 @@ static int tcos_create_file(sc_card_t *card, sc_file_t *file)
 
 	len = SC_MAX_APDU_BUFFER_SIZE;
 	r = tcos_construct_fci(file, sbuf, &len);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "tcos_construct_fci() failed");
-	
+	LOG_TEST_RET(card->ctx, r, "tcos_construct_fci() failed");
+
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0xE0, 0x00, 0x00);
-        apdu.cla |= 0x80;  /* this is an proprietary extension */
+	apdu.cla |= 0x80;  /* this is an proprietary extension */
 	apdu.lc = len;
 	apdu.datalen = len;
 	apdu.data = sbuf;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 	return sc_check_sw(card, apdu.sw1, apdu.sw2);
 }
 
 
-static unsigned int map_operations (int commandbyte )
+static unsigned int map_operations (int commandbyte)
 {
 	unsigned int op = (unsigned int)-1;
 
@@ -272,72 +269,70 @@ static unsigned int map_operations (int commandbyte )
 static void parse_sec_attr(sc_card_t *card,
                            sc_file_t *file, const u8 *buf, size_t len)
 {
-        unsigned int op;
-        
-        /* list directory is not covered by ACLs - so always add an entry */
-        sc_file_add_acl_entry (file, SC_AC_OP_LIST_FILES,
+	unsigned int op;
+
+	/* list directory is not covered by ACLs - so always add an entry */
+	sc_file_add_acl_entry (file, SC_AC_OP_LIST_FILES,
                                SC_AC_NONE, SC_AC_KEY_REF_NONE);
-        /* FIXME: check for what LOCK is used */
-        sc_file_add_acl_entry (file, SC_AC_OP_LOCK,
+	/* FIXME: check for what LOCK is used */
+	sc_file_add_acl_entry (file, SC_AC_OP_LOCK,
                                SC_AC_NONE, SC_AC_KEY_REF_NONE);
-        for (; len >= 6; len -= 6, buf += 6) {
-                /* FIXME: temporary hacks */
-                if (!memcmp(buf, "\xa4\x00\x00\x00\xff\xff", 6)) /* select */
-                        sc_file_add_acl_entry (file, SC_AC_OP_SELECT,
+	for (; len >= 6; len -= 6, buf += 6) {
+		/* FIXME: temporary hacks */
+		if (!memcmp(buf, "\xa4\x00\x00\x00\xff\xff", 6)) {/* select */
+			sc_file_add_acl_entry (file, SC_AC_OP_SELECT,
                                                SC_AC_NONE, SC_AC_KEY_REF_NONE);
-                else if (!memcmp(buf, "\xb0\x00\x00\x00\xff\xff", 6)) /*read*/
-                        sc_file_add_acl_entry (file, SC_AC_OP_READ,
+		} else if (!memcmp(buf, "\xb0\x00\x00\x00\xff\xff", 6)) {/*read*/
+			sc_file_add_acl_entry (file, SC_AC_OP_READ,
                                                SC_AC_NONE, SC_AC_KEY_REF_NONE);
-                else if (!memcmp(buf, "\xd6\x00\x00\x00\xff\xff", 6)) /*upd*/
-                        sc_file_add_acl_entry (file, SC_AC_OP_UPDATE,
+		} else if (!memcmp(buf, "\xd6\x00\x00\x00\xff\xff", 6)) {/*upd*/
+			sc_file_add_acl_entry (file, SC_AC_OP_UPDATE,
                                                SC_AC_NONE, SC_AC_KEY_REF_NONE);
-                else if (!memcmp(buf, "\x60\x00\x00\x00\xff\xff", 6)) {/*adm */
-                        sc_file_add_acl_entry (file, SC_AC_OP_WRITE,
+		} else if (!memcmp(buf, "\x60\x00\x00\x00\xff\xff", 6)) {/*adm */
+			sc_file_add_acl_entry (file, SC_AC_OP_WRITE,
                                                SC_AC_NONE, SC_AC_KEY_REF_NONE);
-                        sc_file_add_acl_entry (file, SC_AC_OP_CREATE,
+			sc_file_add_acl_entry (file, SC_AC_OP_CREATE,
                                                SC_AC_NONE, SC_AC_KEY_REF_NONE);
-                        sc_file_add_acl_entry (file, SC_AC_OP_INVALIDATE,
+			sc_file_add_acl_entry (file, SC_AC_OP_INVALIDATE,
                                                SC_AC_NONE, SC_AC_KEY_REF_NONE);
-                        sc_file_add_acl_entry (file, SC_AC_OP_REHABILITATE,
+			sc_file_add_acl_entry (file, SC_AC_OP_REHABILITATE,
                                                SC_AC_NONE, SC_AC_KEY_REF_NONE);
-                }
-                else {
-                        /* the first byte tells use the command or the
-                           command group.  We have to mask bit 0
-                           because this one distinguish between AND/OR
-                           combination of PINs*/
-                        op = map_operations (buf[0]);
-                        if (op == (unsigned int)-1)
-                        {
-                                sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-                                       "Unknown security command byte %02x\n",
-                                       buf[0]);
-                                continue;
-                        }
-                        if (!buf[1])
-                                sc_file_add_acl_entry (file, op,
+		} else {
+			/* the first byte tells use the command or the
+			   command group.  We have to mask bit 0
+			   because this one distinguish between AND/OR
+			   combination of PINs*/
+			op = map_operations (buf[0]);
+			if (op == (unsigned int)-1) {
+				sc_log(card->ctx,
+					"Unknown security command byte %02x\n",
+					buf[0]);
+				continue;
+			}
+			if (!buf[1])
+				sc_file_add_acl_entry (file, op,
                                                        SC_AC_NONE,
                                                        SC_AC_KEY_REF_NONE);
-                        else
-                                sc_file_add_acl_entry (file, op,
+			else
+				sc_file_add_acl_entry (file, op,
                                                        SC_AC_CHV, buf[1]);
 
-                        if (!buf[2] && !buf[3])
-                                sc_file_add_acl_entry (file, op,
+			if (!buf[2] && !buf[3])
+				sc_file_add_acl_entry (file, op,
                                                        SC_AC_NONE,
                                                        SC_AC_KEY_REF_NONE);
-                        else
-                                sc_file_add_acl_entry (file, op,
+			else
+				sc_file_add_acl_entry (file, op,
                                                        SC_AC_TERM,
                                                        (buf[2]<<8)|buf[3]);
-                }
-        }
+		}
+	}
 }
 
 
 static int tcos_select_file(sc_card_t *card,
-			    const sc_path_t *in_path,
-			    sc_file_t **file_out)
+                            const sc_path_t *in_path,
+                            sc_file_t **file_out)
 {
 	sc_context_t *ctx;
 	sc_apdu_t apdu;
@@ -351,7 +346,7 @@ static int tcos_select_file(sc_card_t *card,
 	pathlen = in_path->len;
 
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_4_SHORT, 0xA4, 0, 0x04);
-	
+
 	switch (in_path->type) {
 	case SC_PATH_TYPE_FILE_ID:
 		if (pathlen != 2) return SC_ERROR_INVALID_ARGUMENTS;
@@ -386,23 +381,23 @@ static int tcos_select_file(sc_card_t *card,
 		apdu.le = 256;
 	} else {
 		apdu.resplen = 0;
-		apdu.le = 0; 
-		apdu.p2 = 0x0C; 
+		apdu.le = 0;
+		apdu.p2 = 0x0C;
 		apdu.cse = (pathlen == 0) ? SC_APDU_CASE_1 : SC_APDU_CASE_3_SHORT;
 	}
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(ctx, r, "APDU transmit failed");
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 	if (r || file_out == NULL) SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_VERBOSE, r);
 
-	if (apdu.resplen < 1 || apdu.resp[0] != 0x62){
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "received invalid template %02X\n", apdu.resp[0]);
+	if (apdu.resplen < 1 || apdu.resp[0] != 0x62) {
+		sc_log(ctx, "received invalid template %02X\n", apdu.resp[0]);
 		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_UNKNOWN_DATA_RECEIVED);
 	}
 
 	file = sc_file_new();
-	if (file == NULL) SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
+	if (file == NULL) LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
 	*file_out = file;
 	file->path = *in_path;
 
@@ -431,14 +426,14 @@ static int tcos_list_files(sc_card_t *card, u8 *buf, size_t buflen)
 		apdu.resplen = sizeof(rbuf);
 		apdu.le = 256;
 		r = sc_transmit_apdu(card, &apdu);
-		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+		LOG_TEST_RET(ctx, r, "APDU transmit failed");
 		if (apdu.sw1==0x6A && (apdu.sw2==0x82 || apdu.sw2==0x88)) continue;
 		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, r, "List Dir failed");
+		LOG_TEST_RET(ctx, r, "List Dir failed");
 		if (apdu.resplen > buflen) return SC_ERROR_BUFFER_TOO_SMALL;
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
-			 "got %"SC_FORMAT_LEN_SIZE_T"u %s-FileIDs\n",
-			 apdu.resplen / 2, p1 == 1 ? "DF" : "EF");
+		sc_log(ctx,
+			"got %"SC_FORMAT_LEN_SIZE_T"u %s-FileIDs\n",
+			apdu.resplen / 2, p1 == 1 ? "DF" : "EF");
 
 		memcpy(buf, apdu.resp, apdu.resplen);
 		buf += apdu.resplen;
@@ -457,19 +452,19 @@ static int tcos_delete_file(sc_card_t *card, const sc_path_t *path)
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 	if (path->type != SC_PATH_TYPE_FILE_ID && path->len != 2) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "File type has to be SC_PATH_TYPE_FILE_ID\n");
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INVALID_ARGUMENTS);
+		sc_log(card->ctx, "File type has to be SC_PATH_TYPE_FILE_ID\n");
+		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 	sbuf[0] = path->value[0];
 	sbuf[1] = path->value[1];
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0xE4, 0x00, 0x00);
-        apdu.cla |= 0x80;
+	apdu.cla |= 0x80;
 	apdu.lc = 2;
 	apdu.datalen = 2;
 	apdu.data = sbuf;
-	
+
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 	return sc_check_sw(card, apdu.sw1, apdu.sw2);
 }
 
@@ -487,19 +482,19 @@ static int tcos_set_security_env(sc_card_t *card, const sc_security_env_t *env, 
 	tcos3=(card->type==SC_CARD_TYPE_TCOS_V3);
 	data=(tcos_data *)card->drv_data;
 
-        if (se_num || (env->operation!=SC_SEC_OPERATION_DECIPHER && env->operation!=SC_SEC_OPERATION_SIGN)){
-		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INVALID_ARGUMENTS);
+	if (se_num || (env->operation!=SC_SEC_OPERATION_DECIPHER && env->operation!=SC_SEC_OPERATION_SIGN)) {
+		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 	if(!(env->flags & SC_SEC_ENV_KEY_REF_PRESENT))
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		sc_log(ctx,
 			"No Key-Reference in SecEnvironment\n");
 	else
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
-			 "Key-Reference %02X (len=%"SC_FORMAT_LEN_SIZE_T"u)\n",
-			 env->key_ref[0], env->key_ref_len);
+		sc_log(ctx,
+			"Key-Reference %02X (len=%"SC_FORMAT_LEN_SIZE_T"u)\n",
+			env->key_ref[0], env->key_ref_len);
 	/* Key-Reference 0x80 ?? */
 	default_key= !(env->flags & SC_SEC_ENV_KEY_REF_PRESENT) || (env->key_ref_len==1 && env->key_ref[0]==0x80);
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+	sc_log(ctx,
 		"TCOS3:%d PKCS1:%d\n", tcos3,
 		!!(env->algorithm_flags & SC_ALGORITHM_RSA_PAD_PKCS1));
 
@@ -508,7 +503,6 @@ static int tcos_set_security_env(sc_card_t *card, const sc_security_env_t *env, 
 
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x22, tcos3 ? 0x41 : 0xC1, 0xB8);
 	p = sbuf;
-	*p++=0x80; *p++=0x01; *p++=tcos3 ? 0x0A : 0x10;
 	if (env->flags & SC_SEC_ENV_KEY_REF_PRESENT) {
 		*p++ = (env->flags & SC_SEC_ENV_KEY_REF_SYMMETRIC) ? 0x83 : 0x84;
 		*p++ = env->key_ref_len;
@@ -520,12 +514,12 @@ static int tcos_set_security_env(sc_card_t *card, const sc_security_env_t *env, 
 
 	r=sc_transmit_apdu(card, &apdu);
 	if (r) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		sc_log(ctx,
 			"%s: APDU transmit failed", sc_strerror(r));
 		return r;
 	}
 	if (apdu.sw1==0x6A && (apdu.sw2==0x81 || apdu.sw2==0x88)) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		sc_log(ctx,
 			"Detected Signature-Only key\n");
 		if (env->operation==SC_SEC_OPERATION_SIGN && default_key) return SC_SUCCESS;
 	}
@@ -541,32 +535,46 @@ static int tcos_restore_security_env(sc_card_t *card, int se_num)
 
 static int tcos_compute_signature(sc_card_t *card, const u8 * data, size_t datalen, u8 * out, size_t outlen)
 {
-	size_t i, dlen=datalen;
+	size_t dlen = datalen;
 	sc_apdu_t apdu;
 	u8 rbuf[SC_MAX_APDU_BUFFER_SIZE];
 	u8 sbuf[SC_MAX_APDU_BUFFER_SIZE];
 	int tcos3, r;
 
-	assert(card != NULL && data != NULL && out != NULL);
-	tcos3=(card->type==SC_CARD_TYPE_TCOS_V3);
+	if (card == NULL || data == NULL || out == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
-	if (datalen > 255) SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_ARGUMENTS);
+	tcos3 = (card->type == SC_CARD_TYPE_TCOS_V3);
 
-	if(((tcos_data *)card->drv_data)->next_sign){
-		if(datalen>48){
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Data to be signed is too long (TCOS supports max. 48 bytes)\n");
+	// We can sign (key length / 8) bytes
+	if (datalen > 256) {
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_ARGUMENTS);
+	}
+
+	if (((tcos_data *)card->drv_data)->next_sign) {
+		if (datalen > 48) {
+			sc_log(card->ctx, "Data to be signed is too long (TCOS supports max. 48 bytes)\n");
 			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_ARGUMENTS);
 		}
 		sc_format_apdu(card, &apdu, SC_APDU_CASE_4_SHORT, 0x2A, 0x9E, 0x9A);
 		memcpy(sbuf, data, datalen);
-		dlen=datalen;
+		dlen = datalen;
 	} else {
-		int keylen= tcos3 ? 256 : 128;
-		sc_format_apdu(card, &apdu, keylen>255 ? SC_APDU_CASE_4_EXT : SC_APDU_CASE_4_SHORT, 0x2A,0x80,0x86);
-		for(i=0; i<sizeof(sbuf);++i) sbuf[i]=0xff;
-		sbuf[0]=0x02; sbuf[1]=0x00; sbuf[2]=0x01; sbuf[keylen-datalen]=0x00;
-		memcpy(sbuf+keylen-datalen+1, data, datalen);
-		dlen=keylen+1;
+		size_t keylen = tcos3 ? 256 : 128;
+
+		if (datalen > keylen) {
+			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_ARGUMENTS);
+		}
+
+		sc_format_apdu(card, &apdu, keylen > 255 ? SC_APDU_CASE_4_EXT : SC_APDU_CASE_4_SHORT, 0x2A, 0x80, 0x86);
+		memset(sbuf, 0xff, sizeof(sbuf));
+		sbuf[0] = 0x02;
+		sbuf[1] = 0x00;
+		sbuf[2] = 0x01;
+		sbuf[keylen - datalen] = 0x00;
+		memcpy(sbuf + keylen - datalen + 1, data, datalen);
+		dlen = keylen + 1;
 	}
 	apdu.resp = rbuf;
 	apdu.resplen = sizeof(rbuf);
@@ -575,14 +583,22 @@ static int tcos_compute_signature(sc_card_t *card, const u8 * data, size_t datal
 	apdu.lc = apdu.datalen = dlen;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
-	if (tcos3 && apdu.p1==0x80 && apdu.sw1==0x6A && apdu.sw2==0x87) {
-		int keylen=128;
-		sc_format_apdu(card, &apdu, SC_APDU_CASE_4_SHORT, 0x2A,0x80,0x86);
-		for(i=0; i<sizeof(sbuf);++i) sbuf[i]=0xff;
-		sbuf[0]=0x02; sbuf[1]=0x00; sbuf[2]=0x01; sbuf[keylen-datalen]=0x00;
-		memcpy(sbuf+keylen-datalen+1, data, datalen);
-		dlen=keylen+1;
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
+	if (tcos3 && apdu.p1 == 0x80 && apdu.sw1 == 0x6A && apdu.sw2 == 0x87) {
+		size_t keylen = 128;
+
+		if (datalen > keylen) {
+			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_ARGUMENTS);
+		}
+
+		sc_format_apdu(card, &apdu, SC_APDU_CASE_4_SHORT, 0x2A, 0x80, 0x86);
+		memset(sbuf, 0xff, sizeof(sbuf));
+		sbuf[0] = 0x02;
+		sbuf[1] = 0x00;
+		sbuf[2] = 0x01;
+		sbuf[keylen - datalen] = 0x00;
+		memcpy(sbuf + keylen - datalen + 1, data, datalen);
+		dlen = keylen + 1;
 
 		apdu.resp = rbuf;
 		apdu.resplen = sizeof(rbuf);
@@ -590,9 +606,9 @@ static int tcos_compute_signature(sc_card_t *card, const u8 * data, size_t datal
 		apdu.data = sbuf;
 		apdu.lc = apdu.datalen = dlen;
 		r = sc_transmit_apdu(card, &apdu);
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+		LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 	}
-	if (apdu.sw1==0x90 && apdu.sw2==0x00) {
+	if (apdu.sw1 == 0x90 && apdu.sw2 == 0x00) {
 		size_t len = apdu.resplen>outlen ? outlen : apdu.resplen;
 		memcpy(out, apdu.resp, len);
 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, len);
@@ -610,40 +626,47 @@ static int tcos_decipher(sc_card_t *card, const u8 * crgram, size_t crgram_len, 
 	tcos_data *data;
 	int tcos3, r;
 
-	assert(card != NULL && crgram != NULL && out != NULL);
+	if (card == NULL || crgram == NULL || out == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	ctx = card->ctx;
-	tcos3=(card->type==SC_CARD_TYPE_TCOS_V3);
-	data=(tcos_data *)card->drv_data;
+	tcos3 = (card->type == SC_CARD_TYPE_TCOS_V3);
+	data = (tcos_data *)card->drv_data;
 
-	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
-		"TCOS3:%d PKCS1:%d\n",tcos3,
+	LOG_FUNC_CALLED(ctx);
+	sc_log(ctx,
+		"TCOS3:%d PKCS1:%d\n", tcos3,
 		!!(data->pad_flags & SC_ALGORITHM_RSA_PAD_PKCS1));
 
-	sc_format_apdu(card, &apdu, crgram_len>255 ? SC_APDU_CASE_4_EXT : SC_APDU_CASE_4_SHORT, 0x2A, 0x80, 0x86);
+	sc_format_apdu(card, &apdu, crgram_len > 255 ? SC_APDU_CASE_4_EXT : SC_APDU_CASE_4_SHORT, 0x2A, 0x80, 0x86);
 	apdu.resp = rbuf;
 	apdu.resplen = sizeof(rbuf);
 	apdu.le = crgram_len;
 
 	apdu.data = sbuf;
-	apdu.lc = apdu.datalen = crgram_len+1;
+	apdu.lc = apdu.datalen = crgram_len + 1;
 	sbuf[0] = tcos3 ? 0x00 : ((data->pad_flags & SC_ALGORITHM_RSA_PAD_PKCS1) ? 0x81 : 0x02);
-	memcpy(sbuf+1, crgram, crgram_len);
+	if (sizeof sbuf - 1 < crgram_len)
+		return SC_ERROR_INVALID_ARGUMENTS;
+	memcpy(sbuf + 1, crgram, crgram_len);
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(ctx, r, "APDU transmit failed");
 
-	if (apdu.sw1==0x90 && apdu.sw2==0x00) {
-		size_t len= (apdu.resplen>outlen) ? outlen : apdu.resplen;
-		unsigned int offset=0;
-		if(tcos3 && (data->pad_flags & SC_ALGORITHM_RSA_PAD_PKCS1) && apdu.resp[0]==0 && apdu.resp[1]==2){
-			offset=2; while(offset<len && apdu.resp[offset]!=0) ++offset;
-			offset=(offset<len-1) ? offset+1 : 0;
+	if (apdu.sw1 == 0x90 && apdu.sw2 == 0x00) {
+		size_t len = (apdu.resplen > outlen) ? outlen : apdu.resplen;
+		unsigned int offset = 0;
+
+		if (tcos3 && (data->pad_flags & SC_ALGORITHM_RSA_PAD_PKCS1) && apdu.resp[0] == 0 && apdu.resp[1] == 2) {
+			offset = 2;
+			while (offset < len && apdu.resp[offset] != 0)
+				++offset;
+			offset = (offset < len - 1) ? offset + 1 : 0;
 		}
-		memcpy(out, apdu.resp+offset, len-offset);
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, len-offset);
+		memcpy(out, apdu.resp + offset, len - offset);
+		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_VERBOSE, len - offset);
 	}
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, sc_check_sw(card, apdu.sw1, apdu.sw2));
+	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_VERBOSE, sc_check_sw(card, apdu.sw1, apdu.sw2));
 }
 
 
@@ -657,13 +680,13 @@ static int tcos_setperm(sc_card_t *card, int enable_nullpin)
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_1, 0xEE, 0x00, 0x00);
-        apdu.cla |= 0x80;
+	apdu.cla |= 0x80;
 	apdu.lc = 0;
 	apdu.datalen = 0;
 	apdu.data = NULL;
-	
+
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 	return sc_check_sw(card, apdu.sw1, apdu.sw2);
 }
 
@@ -722,11 +745,10 @@ struct sc_card_driver * sc_get_tcos_driver(void)
 	tcos_ops.select_file          = tcos_select_file;
 	tcos_ops.list_files           = tcos_list_files;
 	tcos_ops.delete_file          = tcos_delete_file;
-	tcos_ops.set_security_env     = tcos_set_security_env;
 	tcos_ops.compute_signature    = tcos_compute_signature;
 	tcos_ops.decipher             = tcos_decipher;
 	tcos_ops.restore_security_env = tcos_restore_security_env;
 	tcos_ops.card_ctl             = tcos_card_ctl;
-	
+
 	return &tcos_drv;
 }

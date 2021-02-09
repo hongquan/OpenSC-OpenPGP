@@ -272,14 +272,6 @@ int dnie_ask_user_consent(struct sc_card * card, const char *title, const char *
 		LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 	LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_ALLOWED);
 #else
-	/* check that user_consent_app exists. TODO: check if executable */
-	res = stat(GET_DNIE_UI_CTX(card).user_consent_app, &st_file);
-	if (res != 0) {
-		sc_log(card->ctx, "Invalid pinentry application: %s\n",
-		       GET_DNIE_UI_CTX(card).user_consent_app);
-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
-	}
-
 	/* just a simple bidirectional pipe+fork+exec implementation */
 	/* In a pipe, xx[0] is for reading, xx[1] is for writing */
 	if (pipe(srv_send) < 0) {
@@ -304,10 +296,17 @@ int dnie_ask_user_consent(struct sc_card * card, const char *title, const char *
 		close(srv_send[1]);
 		close(srv_recv[0]);
 		close(srv_recv[1]);
-		/* call exec() with proper user_consent_app from configuration */
-		/* if ok should never return */
-		execlp(GET_DNIE_UI_CTX(card).user_consent_app, GET_DNIE_UI_CTX(card).user_consent_app, (char *)NULL);
-		sc_log(card->ctx, "execlp() error");
+		/* check that user_consent_app exists. TODO: check if executable */
+		res = stat(GET_DNIE_UI_CTX(card).user_consent_app, &st_file);
+		if (res != 0) {
+			sc_log(card->ctx, "Invalid pinentry application: %s\n",
+					GET_DNIE_UI_CTX(card).user_consent_app);
+		} else {
+			/* call exec() with proper user_consent_app from configuration */
+			/* if ok should never return */
+			execlp(GET_DNIE_UI_CTX(card).user_consent_app, GET_DNIE_UI_CTX(card).user_consent_app, (char *)NULL);
+			sc_log(card->ctx, "execlp() error");
+		}
 		abort();
 	default:		/* parent */
 		/* Close the pipe ends that the child uses to read from / write to
@@ -857,8 +856,6 @@ static int dnie_init(struct sc_card *card)
 	card->sm_ctx.ops.free_sm_apdu = dnie_sm_free_wrapped_apdu;
 	card->sm_ctx.sm_mode = SM_MODE_NONE;
 
-	init_flags(card);
-
 	res=cwa_create_secure_channel(card,provider,CWA_SM_OFF);
 	LOG_TEST_RET(card->ctx, res, "Failure creating CWA secure channel.");
 
@@ -875,6 +872,8 @@ static int dnie_init(struct sc_card *card)
 		LOG_TEST_RET(card->ctx, res, "Failure reading DNIe environment.");
 	}
 #endif
+
+	init_flags(card);
 
 	GET_DNIE_PRIV_DATA(card)->cwa_provider = provider;
 
@@ -905,22 +904,6 @@ static int dnie_finish(struct sc_card *card)
 /* ISO 7816-4 functions */
 
 /**
- * Convert little-endian data into unsigned long.
- *
- * @param pt pointer to little-endian data
- * @return equivalent long
- */
-static unsigned long le2ulong(u8 * pt)
-{
-	unsigned long res = 0L;
-	if (pt==NULL) return res;
-	res = (0xff & *(pt + 0)) +
-	    ((0xff & *(pt + 1)) << 8) +
-	    ((0xff & *(pt + 2)) << 16) + ((0xff & *(pt + 3)) << 24);
-	return res;
-}
-
-/**
  * Uncompress data if in compressed format.
  *
  * @param card pointer to sc_card_t structure
@@ -945,13 +928,16 @@ static u8 *dnie_uncompress(sc_card_t * card, u8 * from, size_t *len)
 	if (*len < 8)
 		goto compress_exit;
 	/* evaluate compressed an uncompressed sizes (little endian format) */
-	uncompressed = le2ulong(from);
-	compressed = le2ulong(from + 4);
+	uncompressed = lebytes2ulong(from);
+	compressed = lebytes2ulong(from + 4);
 	/* if compressed size doesn't match data length assume not compressed */
 	if (compressed != (*len) - 8)
 		goto compress_exit;
 	/* if compressed size greater than uncompressed, assume uncompressed data */
 	if (uncompressed < compressed)
+		goto compress_exit;
+	/* Do not try to allocate insane size if we receive bogus data */
+	if (uncompressed > MAX_FILE_SIZE)
 		goto compress_exit;
 
 	sc_log(card->ctx, "Data seems to be compressed. calling uncompress");
@@ -961,16 +947,15 @@ static u8 *dnie_uncompress(sc_card_t * card, u8 * from, size_t *len)
 		sc_log(card->ctx, "alloc() for uncompressed buffer failed");
 		return NULL;
 	}
+	*len = uncompressed;
 	res = sc_decompress(upt,	/* try to uncompress by calling sc_xx routine */
-			    (size_t *) & uncompressed,
+			    len,
 			    from + 8, (size_t) compressed, COMPRESSION_ZLIB);
-	/* TODO: check that returned uncompressed size matches expected */
 	if (res != SC_SUCCESS) {
 		sc_log(card->ctx, "Uncompress() failed or data not compressed");
 		goto compress_exit;	/* assume not need uncompression */
 	}
 	/* Done; update buffer len and return pt to uncompressed data */
-	*len = uncompressed;
 	sc_log_hex(card->ctx, "Compressed data", from + 8, compressed);
 	sc_log_hex(card->ctx, "Uncompressed data", upt, uncompressed);
  compress_exit:
@@ -1007,7 +992,7 @@ static int dnie_fill_cache(sc_card_t * card)
 	size_t count = 0;
 	size_t len = 0;
 	u8 *buffer = NULL;
-	u8 *pt = NULL;
+	u8 *pt = NULL, *p;
 	sc_context_t *ctx = NULL;
 
 	if (!card || !card->ctx)
@@ -1056,19 +1041,22 @@ static int dnie_fill_cache(sc_card_t * card)
 			}
 			if (r == SC_ERROR_INCORRECT_PARAMETERS)
 				goto read_done;
+			free(buffer);
 			if (apdu.resp != tmp)
 				free(apdu.resp);
 			LOG_FUNC_RETURN(ctx, r);	/* arriving here means response error */
 		}
 		/* copy received data into buffer. realloc() if not enough space */
 		count = apdu.resplen;
-		buffer = realloc(buffer, len + count);
-		if (!buffer) {
+		p = realloc(buffer, len + count);
+		if (!p) {
+			free(buffer);
 			free((void *)apdu.data);
 			if (apdu.resp != tmp)
 				free(apdu.resp);
 			LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
 		}
+		buffer = p;
 		memcpy(buffer + len, apdu.resp, count);
 		if (apdu.resp != tmp) {
 			free(apdu.resp);
@@ -1159,8 +1147,6 @@ static int dnie_compose_and_send_apdu(sc_card_t *card, const u8 *path, size_t pa
 	int res = 0;
 	sc_apdu_t apdu;
 	u8 rbuf[MAX_RESP_BUFFER_SIZE];
-	sc_file_t *file = NULL;
-
 	sc_context_t *ctx = NULL;
 
 	if (!card || !card->ctx)
@@ -1197,14 +1183,15 @@ static int dnie_compose_and_send_apdu(sc_card_t *card, const u8 *path, size_t pa
 		LOG_FUNC_RETURN(ctx, SC_ERROR_UNKNOWN_DATA_RECEIVED);
 	}
 
-	/* finally process FCI response */
-	file = sc_file_new();
-	if (file == NULL) {
-		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+	if (file_out) {
+		/* finally process FCI response */
+		sc_file_free(*file_out);
+		*file_out = sc_file_new();
+		if (*file_out == NULL) {
+			LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+		}
+		res = card->ops->process_fci(card, *file_out, apdu.resp + 2, apdu.resp[1]);
 	}
-	res = card->ops->process_fci(card, file, apdu.resp + 2, apdu.resp[1]);
-	sc_file_free(*file_out);
-	*file_out = file;
 	LOG_FUNC_RETURN(ctx, res);
 }
 
@@ -1516,11 +1503,6 @@ static int dnie_set_security_env(struct sc_card *card,
 	case SC_SEC_OPERATION_SIGN:
 		apdu.p1 = 0x41;	/* SET; internal operation */
 		apdu.p2 = 0xB6;	/* Template for Digital Signature */
-		break;
-	case SC_SEC_OPERATION_AUTHENTICATE:
-		/* TODO: _set_security_env() study diffs on internal/external auth */
-		apdu.p1 = 0x41;	/* SET; internal operation */
-		apdu.p2 = 0xA4;	/* Template for Authenticate */
 		break;
 	default:
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
@@ -1910,8 +1892,8 @@ static int dnie_read_header(struct sc_card *card)
 	/* check response */
 	if (apdu.resplen != 8)
 		goto header_notcompressed;
-	uncompressed = le2ulong(apdu.resp);
-	compressed = le2ulong(apdu.resp + 4);
+	uncompressed = lebytes2ulong(apdu.resp);
+	compressed = lebytes2ulong(apdu.resp + 4);
 	if (uncompressed < compressed)
 		goto header_notcompressed;
 	if (uncompressed > 32767)
@@ -2161,7 +2143,6 @@ static int dnie_pin_verify(struct sc_card *card,
 	res = cwa_create_secure_channel(card, GET_DNIE_PRIV_DATA(card)->cwa_provider, CWA_SM_ON);
 	LOG_TEST_RET(card->ctx, res, "Establish SM failed");
 
-	data->apdu = &apdu;	/* prepare apdu struct */
 	/* compose pin data to be inserted in apdu */
 	if (data->flags & SC_PIN_CMD_NEED_PADDING)
 		padding = 1;
@@ -2194,7 +2175,9 @@ static int dnie_pin_verify(struct sc_card *card,
 	if (card->atr.value[15] >= DNIE_30_VERSION) {
 		sc_log(card->ctx, "DNIe 3.0 detected => re-establish secure channel");
 		dnie_change_cwa_provider_to_secure(card);
-		res = cwa_create_secure_channel(card, GET_DNIE_PRIV_DATA(card)->cwa_provider, CWA_SM_ON);
+		if (res == SC_SUCCESS) {
+			res = cwa_create_secure_channel(card, GET_DNIE_PRIV_DATA(card)->cwa_provider, CWA_SM_ON);
+		}
 	}
 
 	LOG_FUNC_RETURN(card->ctx, res);

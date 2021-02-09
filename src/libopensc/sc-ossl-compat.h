@@ -42,6 +42,24 @@ extern "C" {
  */
 
 /*
+ * 1.1.0 deprecated ERR_load_crypto_strings(), SSL_load_error_strings(), ERR_free_strings()
+ * and ENGINE_load_dynamic.EVP_CIPHER_CTX_cleanup and EVP_CIPHER_CTX_init are replaced
+ * by EVP_CIPHER_CTX_reset.
+ * But for compatibility with LibreSSL and older OpenSSL. OpenSC uses the older functions
+ */
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L  && !defined(LIBRESSL_VERSION_NUMBER)
+# if defined(OPENSSL_API_COMPAT) && OPENSSL_API_COMPAT >= 0x10100000L
+#define ERR_load_crypto_strings(x) while (0) continue
+#define SSL_load_error_strings(x)  while (0) continue
+#define ERR_free_strings(x)        while (0) continue
+#define ENGINE_load_dynamic(x)     while (0) continue
+#define EVP_CIPHER_CTX_cleanup(x) EVP_CIPHER_CTX_reset(x)
+#define EVP_CIPHER_CTX_init(x) EVP_CIPHER_CTX_reset(x)
+# endif
+#endif
+
+ 
+/*
  * 1.1 renames RSA_PKCS1_SSLeay to RSA_PKCS1_OpenSSL
  * use RSA_PKCS1_OpenSSL
  * Previous versions are missing a number of functions to access
@@ -75,6 +93,11 @@ extern "C" {
 /* workaround unused value warning for a macro that does nothing */
 #if defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER >= 0x20700000L
 #define OPENSSL_malloc_init()
+#endif
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#define EC_POINT_get_affine_coordinates_GFp     EC_POINT_get_affine_coordinates
+#define EC_POINT_set_affine_coordinates_GFp     EC_POINT_set_affine_coordinates
 #endif
 
 /*
@@ -238,6 +261,10 @@ static sc_ossl_inline int CRYPTO_secure_malloc_init(size_t size, int minsize)
 static sc_ossl_inline int CRYPTO_secure_malloc_initialized()
 {
     return 0;
+}
+
+static sc_ossl_inline void CRYPTO_secure_malloc_done()
+{
 }
 
 #else

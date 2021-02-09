@@ -48,15 +48,21 @@ is_string_valid_atr(const char *atr_str)
 	return 1;
 }
 
-int
-util_connect_card_ex(sc_context_t *ctx, sc_card_t **cardp,
-		 const char *reader_id, int do_wait, int do_lock, int verbose)
+int util_connect_reader (sc_context_t *ctx, sc_reader_t **reader,
+	const char *reader_id, int do_wait, int verbose)
 {
-	struct sc_reader *reader = NULL, *found = NULL;
-	struct sc_card *card = NULL;
+	struct sc_reader *found = NULL;
 	int r;
 
+	setbuf(stderr, NULL);
+	setbuf(stdout, NULL);
+
 	sc_notify_init();
+
+	if (verbose) {
+		ctx->debug = verbose;
+		sc_ctx_log_to_file(ctx, "stderr");
+	}
 
 	if (do_wait) {
 		unsigned int event;
@@ -66,39 +72,39 @@ util_connect_card_ex(sc_context_t *ctx, sc_card_t **cardp,
 			r = sc_wait_for_event(ctx, SC_EVENT_READER_ATTACHED, &found, &event, -1, NULL);
 			if (r < 0) {
 				fprintf(stderr, "Error while waiting for a reader: %s\n", sc_strerror(r));
-				return 3;
+				return r;
 			}
 			r = sc_ctx_detect_readers(ctx);
 			if (r < 0) {
 				fprintf(stderr, "Error while refreshing readers: %s\n", sc_strerror(r));
-				return 3;
+				return r;
 			}
 		}
 		fprintf(stderr, "Waiting for a card to be inserted...\n");
 		r = sc_wait_for_event(ctx, SC_EVENT_CARD_INSERTED, &found, &event, -1, NULL);
 		if (r < 0) {
 			fprintf(stderr, "Error while waiting for a card: %s\n", sc_strerror(r));
-			return 3;
+			return r;
 		}
-		reader = found;
+		*reader = found;
 	}
 	else if (sc_ctx_get_reader_count(ctx) == 0) {
 		fprintf(stderr, "No smart card readers found.\n");
-		return 1;
+		return SC_ERROR_NO_READERS_FOUND;
 	}
 	else   {
 		if (!reader_id) {
 			unsigned int i;
 			/* Automatically try to skip to a reader with a card if reader not specified */
 			for (i = 0; i < sc_ctx_get_reader_count(ctx); i++) {
-				reader = sc_ctx_get_reader(ctx, i);
-				if (sc_detect_card_presence(reader) & SC_READER_CARD_PRESENT) {
-					fprintf(stderr, "Using reader with a card: %s\n", reader->name);
+				*reader = sc_ctx_get_reader(ctx, i);
+				if (sc_detect_card_presence(*reader) & SC_READER_CARD_PRESENT) {
+					fprintf(stderr, "Using reader with a card: %s\n", (*reader)->name);
 					goto autofound;
 				}
 			}
 			/* If no reader had a card, default to the first reader */
-			reader = sc_ctx_get_reader(ctx, 0);
+			*reader = sc_ctx_get_reader(ctx, 0);
 		}
 		else {
 			/* If the reader identifier looks like an ATR, try to find the reader with that card */
@@ -120,7 +126,7 @@ util_connect_card_ex(sc_context_t *ctx, sc_card_t **cardp,
 						continue;
 
 					fprintf(stderr, "Matched ATR in reader: %s\n", rdr->name);
-					reader = rdr;
+					*reader = rdr;
 					goto autofound;
 				}
 			}
@@ -131,30 +137,42 @@ util_connect_card_ex(sc_context_t *ctx, sc_card_t **cardp,
 				errno = 0;
 				num = strtol(reader_id, &endptr, 0);
 				if (!errno && endptr && *endptr == '\0')
-					reader = sc_ctx_get_reader(ctx, num);
+					*reader = sc_ctx_get_reader(ctx, num);
 				else
-					reader = sc_ctx_get_reader_by_name(ctx, reader_id);
+					*reader = sc_ctx_get_reader_by_name(ctx, reader_id);
 			}
 		}
 autofound:
-		if (!reader) {
+		if (!(*reader)) {
 			fprintf(stderr, "Reader \"%s\" not found (%d reader(s) detected)\n",
 					reader_id, sc_ctx_get_reader_count(ctx));
-			return 1;
+			return SC_ERROR_READER;
 		}
 
-		if (sc_detect_card_presence(reader) <= 0) {
+		if (sc_detect_card_presence(*reader) <= 0) {
 			fprintf(stderr, "Card not present.\n");
-			return 3;
+			return SC_ERROR_CARD_NOT_PRESENT;
 		}
 	}
+	return SC_SUCCESS;
+}
+int
+util_connect_card_ex(sc_context_t *ctx, sc_card_t **cardp,
+		 const char *reader_id, int do_wait, int do_lock, int verbose)
+{
+	struct sc_reader *reader = NULL;
+	struct sc_card *card = NULL;
+	int r;
 
+	r = util_connect_reader(ctx, &reader, reader_id, do_wait, verbose);
+	if(r)
+		return r;
 	if (verbose)
 		printf("Connecting to card in reader %s...\n", reader->name);
 	r = sc_connect_card(reader, &card);
 	if (r < 0) {
 		fprintf(stderr, "Failed to connect to card: %s\n", sc_strerror(r));
-		return 1;
+		return r;
 	}
 
 	if (verbose)
@@ -165,12 +183,12 @@ autofound:
 		if (r < 0) {
 			fprintf(stderr, "Failed to lock card: %s\n", sc_strerror(r));
 			sc_disconnect_card(card);
-			return 1;
+			return r;
 		}
 	}
 
 	*cardp = card;
-	return 0;
+	return SC_SUCCESS;
 }
 
 int
@@ -285,6 +303,26 @@ util_print_usage_and_die(const char *app_name, const struct option options[],
 	}
 
 	exit(2);
+}
+
+int util_list_card_drivers(const sc_context_t *ctx)
+{
+	int i;
+
+	if (ctx == NULL) {
+		fprintf(stderr, "Unable to get card drivers!\n");
+		return 1;
+	}
+	if (ctx->card_drivers[0] == NULL) {
+		fprintf(stderr, "No card drivers installed!\n");
+		return 1;
+	}
+	printf("Available card drivers:\n");
+	for (i = 0; ctx->card_drivers[i] != NULL; i++) {
+		printf("  %-16s %s\n", ctx->card_drivers[i]->short_name,
+		      ctx->card_drivers[i]->name);
+	}
+	return 0;
 }
 
 const char * util_acl_to_str(const sc_acl_entry_t *e)

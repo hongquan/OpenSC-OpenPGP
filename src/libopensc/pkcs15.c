@@ -64,9 +64,17 @@ static const struct sc_asn1_entry c_asn1_algorithm_info_parameters[3] = {
 };
 
 /*
- * in src/libopensc/types.h SC_MAX_SUPPORTED_ALGORITHMS  defined as 8
+ * in src/libopensc/types.h SC_MAX_SUPPORTED_ALGORITHMS  defined as 16
  */
 static const struct sc_asn1_entry c_asn1_supported_algorithms[SC_MAX_SUPPORTED_ALGORITHMS + 1] = {
+	{ "algorithmInfo", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmInfo", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmInfo", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmInfo", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmInfo", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmInfo", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmInfo", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
+	{ "algorithmInfo", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
 	{ "algorithmInfo", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
 	{ "algorithmInfo", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
 	{ "algorithmInfo", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
@@ -122,6 +130,7 @@ static void sc_pkcs15_remove_dfs(struct sc_pkcs15_card *);
 static void sc_pkcs15_remove_objects(struct sc_pkcs15_card *);
 static int sc_pkcs15_aux_get_md_guid(struct sc_pkcs15_card *, const struct sc_pkcs15_object *,
 		unsigned, unsigned char *, size_t *);
+static void sc_pkcs15_clear_tokeninfo(struct sc_pkcs15_tokeninfo *tokeninfo);
 
 int sc_pkcs15_parse_tokeninfo(sc_context_t *ctx,
 	sc_pkcs15_tokeninfo_t *ti, const u8 *buf, size_t blen)
@@ -131,9 +140,9 @@ int sc_pkcs15_parse_tokeninfo(sc_context_t *ctx,
 	u8 serial[128];
 	size_t serial_len = sizeof(serial);
 	u8 mnfid[SC_PKCS15_MAX_LABEL_SIZE];
-	size_t mnfid_len  = sizeof(mnfid);
+	size_t mnfid_len  = sizeof(mnfid) - 1;
 	u8 label[SC_PKCS15_MAX_LABEL_SIZE];
-	size_t label_len = sizeof(label);
+	size_t label_len = sizeof(label) - 1;
 	u8 last_update[32], profile_indication[SC_PKCS15_MAX_LABEL_SIZE];
 	size_t lupdate_len = sizeof(last_update) - 1, pi_len = sizeof(profile_indication) - 1;
 	size_t flags_len   = sizeof(ti->flags);
@@ -153,6 +162,10 @@ int sc_pkcs15_parse_tokeninfo(sc_context_t *ctx,
 	struct sc_asn1_entry asn1_toki_attrs[C_ASN1_TOKI_ATTRS_SIZE], asn1_tokeninfo[3], asn1_twlabel[3];
 
 	memset(last_update, 0, sizeof(last_update));
+	memset(label, 0, sizeof(label));
+	memset(profile_indication, 0, sizeof(profile_indication));
+	memset(mnfid, 0, sizeof(mnfid));
+
 	sc_copy_asn1_entry(c_asn1_twlabel, asn1_twlabel);
 	sc_copy_asn1_entry(c_asn1_toki_attrs, asn1_toki_attrs);
 	sc_copy_asn1_entry(c_asn1_tokeninfo, asn1_tokeninfo);
@@ -205,20 +218,18 @@ int sc_pkcs15_parse_tokeninfo(sc_context_t *ctx,
 	sc_format_asn1_entry(asn1_tokeninfo, asn1_toki_attrs, NULL, 0);
 
 	r = sc_asn1_decode(ctx, asn1_tokeninfo, buf, blen, NULL, NULL);
-	LOG_TEST_RET(ctx, r, "ASN.1 parsing of EF(TokenInfo) failed");
+	if (r != SC_SUCCESS) {
+		/* The decoding could have allocated something we need to free */
+		sc_pkcs15_clear_tokeninfo(ti);
+		LOG_TEST_RET(ctx, r, "ASN.1 parsing of EF(TokenInfo) failed");
+	}
 
 	if (asn1_toki_attrs[1].flags & SC_ASN1_PRESENT && serial_len > 0)   {
+		free(ti->serial_number);
 		ti->serial_number = malloc(serial_len * 2 + 1);
 		if (ti->serial_number == NULL)
 			return SC_ERROR_OUT_OF_MEMORY;
-
-		ti->serial_number[0] = 0;
-		for (ii = 0; ii < serial_len; ii++) {
-			char byte[3];
-
-			sprintf(byte, "%02X", serial[ii]);
-			strcat(ti->serial_number, byte);
-		}
+		sc_bin_to_hex(serial, serial_len, ti->serial_number, serial_len * 2 + 1, 0);
 		sc_log(ctx, "TokenInfo.serialNunmber '%s'", ti->serial_number);
 	}
 
@@ -312,11 +323,15 @@ sc_pkcs15_encode_tokeninfo(sc_context_t *ctx, sc_pkcs15_tokeninfo_t *ti,
 		sc_format_asn1_entry(asn1_algo_infos[ii] + 0, &ti->supported_algos[ii].reference, &reference_len, 1);
 		sc_format_asn1_entry(asn1_algo_infos[ii] + 1, &ti->supported_algos[ii].mechanism, &mechanism_len, 1);
 		sc_format_asn1_entry(asn1_algo_infos[ii] + 2,
-			asn1_algo_infos_parameters[ii], NULL, 0);
-		sc_format_asn1_entry(asn1_algo_infos_parameters[ii] + 0,
-			NULL, NULL, 0);
-		sc_format_asn1_entry(asn1_algo_infos_parameters[ii] + 1,
-			&ti->supported_algos[ii].parameters, &parameter_len, 0);
+			asn1_algo_infos_parameters[ii], NULL, 1);
+		if (!sc_valid_oid(&ti->supported_algos[ii].parameters)) {
+			sc_format_asn1_entry(asn1_algo_infos_parameters[ii] + 0,
+				NULL, NULL, 1);
+		}
+		else {
+			sc_format_asn1_entry(asn1_algo_infos_parameters[ii] + 1,
+				&ti->supported_algos[ii].parameters, &parameter_len, 0);
+		}
 		sc_format_asn1_entry(asn1_algo_infos[ii] + 3, &ti->supported_algos[ii].operations, &operations_len, 1);
 		sc_format_asn1_entry(asn1_algo_infos[ii] + 4, &ti->supported_algos[ii].algo_id, NULL, 1);
 		sc_format_asn1_entry(asn1_algo_infos[ii] + 5, &ti->supported_algos[ii].algo_ref, &algo_ref_len, 1);
@@ -471,6 +486,8 @@ parse_ddo(struct sc_pkcs15_card *p15card, const u8 * buf, size_t buflen)
 		p15card->file_odf->path = odf_path;
 	}
 	if (asn1_ddo[2].flags & SC_ASN1_PRESENT) {
+		if (p15card->file_tokeninfo)
+			sc_file_free(p15card->file_tokeninfo);
 		p15card->file_tokeninfo = sc_file_new();
 		if (p15card->file_tokeninfo == NULL)
 			goto mem_err;
@@ -604,12 +621,14 @@ parse_odf(const unsigned char * buf, size_t buflen, struct sc_pkcs15_card *p15ca
 		if (r < 0)
 			return r;
 		type = r;
-		r = sc_pkcs15_make_absolute_path(&p15card->file_app->path, &path);
-		if (r < 0)
-			return r;
-		r = sc_pkcs15_add_df(p15card, odf_indexes[type], &path);
-		if (r)
-			return r;
+		if (p15card->file_app) {
+			r = sc_pkcs15_make_absolute_path(&p15card->file_app->path, &path);
+			if (r < 0)
+				return r;
+			r = sc_pkcs15_add_df(p15card, odf_indexes[type], &path);
+			if (r)
+				return r;
+		}
 	}
 	return 0;
 }
@@ -712,6 +731,32 @@ sc_pkcs15_tokeninfo_new(void)
 	return tokeninfo;
 }
 
+static void
+sc_pkcs15_clear_tokeninfo(struct sc_pkcs15_tokeninfo *tokeninfo)
+{
+	if (!tokeninfo)
+		return;
+
+	free(tokeninfo->label);
+	tokeninfo->label = NULL;
+	free(tokeninfo->serial_number);
+	tokeninfo->serial_number = NULL;
+	free(tokeninfo->manufacturer_id);
+	tokeninfo->manufacturer_id = NULL;
+	free(tokeninfo->last_update.gtime);
+	tokeninfo->last_update.gtime = NULL;
+	free(tokeninfo->preferred_language);
+	tokeninfo->preferred_language = NULL;
+	free(tokeninfo->profile_indication.name);
+	tokeninfo->profile_indication.name = NULL;
+	if (tokeninfo->seInfo != NULL) {
+		unsigned i;
+		for (i = 0; i < tokeninfo->num_seInfo; i++)
+			free(tokeninfo->seInfo[i]);
+		free(tokeninfo->seInfo);
+		tokeninfo->seInfo = NULL;
+	}
+}
 
 void
 sc_pkcs15_free_tokeninfo(struct sc_pkcs15_tokeninfo *tokeninfo)
@@ -719,27 +764,9 @@ sc_pkcs15_free_tokeninfo(struct sc_pkcs15_tokeninfo *tokeninfo)
 	if (!tokeninfo)
 		return;
 
-	if (tokeninfo->label != NULL)
-		free(tokeninfo->label);
-	if (tokeninfo->serial_number != NULL)
-		free(tokeninfo->serial_number);
-	if (tokeninfo->manufacturer_id != NULL)
-		free(tokeninfo->manufacturer_id);
-	if (tokeninfo->last_update.gtime != NULL)
-		free(tokeninfo->last_update.gtime);
-	if (tokeninfo->preferred_language != NULL)
-		free(tokeninfo->preferred_language);
-	if (tokeninfo->profile_indication.name != NULL)
-		free(tokeninfo->profile_indication.name);
-	if (tokeninfo->seInfo != NULL) {
-		unsigned i;
-		for (i = 0; i < tokeninfo->num_seInfo; i++)
-			free(tokeninfo->seInfo[i]);
-		free(tokeninfo->seInfo);
-	}
+	sc_pkcs15_clear_tokeninfo(tokeninfo);
 	free(tokeninfo);
 }
-
 
 void
 sc_pkcs15_free_app(struct sc_pkcs15_card *p15card)
@@ -767,6 +794,7 @@ sc_pkcs15_card_free(struct sc_pkcs15_card *p15card)
 	if (p15card->md_data)
 		free(p15card->md_data);
 
+	sc_pkcs15_free_app(p15card);
 	sc_pkcs15_remove_objects(p15card);
 	sc_pkcs15_remove_dfs(p15card);
 	sc_pkcs15_free_unusedspace(p15card);
@@ -809,30 +837,19 @@ sc_pkcs15_card_clear(struct sc_pkcs15_card *p15card)
 	p15card->file_odf = NULL;
 	sc_file_free(p15card->file_unusedspace);
 	p15card->file_unusedspace = NULL;
-	if (p15card->tokeninfo->label != NULL) {
-		free(p15card->tokeninfo->label);
-		p15card->tokeninfo->label = NULL;
-	}
-	if (p15card->tokeninfo->serial_number != NULL) {
-		free(p15card->tokeninfo->serial_number);
-		p15card->tokeninfo->serial_number = NULL;
-	}
-	if (p15card->tokeninfo->manufacturer_id != NULL) {
-		free(p15card->tokeninfo->manufacturer_id);
-		p15card->tokeninfo->manufacturer_id = NULL;
-	}
-	if (p15card->tokeninfo->last_update.gtime != NULL) {
-		free(p15card->tokeninfo->last_update.gtime);
-		p15card->tokeninfo->last_update.gtime = NULL;
-	}
-	if (p15card->tokeninfo->preferred_language != NULL) {
-		free(p15card->tokeninfo->preferred_language);
-		p15card->tokeninfo->preferred_language = NULL;
-	}
-	if (p15card->tokeninfo->profile_indication.name != NULL)   {
-		free(p15card->tokeninfo->profile_indication.name);
-		p15card->tokeninfo->profile_indication.name = NULL;
-	}
+
+	free(p15card->tokeninfo->label);
+	p15card->tokeninfo->label = NULL;
+	free(p15card->tokeninfo->serial_number);
+	p15card->tokeninfo->serial_number = NULL;
+	free(p15card->tokeninfo->manufacturer_id);
+	p15card->tokeninfo->manufacturer_id = NULL;
+	free(p15card->tokeninfo->last_update.gtime);
+	p15card->tokeninfo->last_update.gtime = NULL;
+	free(p15card->tokeninfo->preferred_language);
+	p15card->tokeninfo->preferred_language = NULL;
+	free(p15card->tokeninfo->profile_indication.name);
+	p15card->tokeninfo->profile_indication.name = NULL;
 	if (p15card->tokeninfo->seInfo != NULL) {
 		size_t i;
 		for (i = 0; i < p15card->tokeninfo->num_seInfo; i++)
@@ -961,6 +978,7 @@ sc_pkcs15_bind_internal(struct sc_pkcs15_card *p15card, struct sc_aid *aid)
 		if (err != SC_SUCCESS)
 			sc_log(ctx, "unable to enumerate apps: %s", sc_strerror(err));
 	}
+	sc_file_free(p15card->file_app);
 	p15card->file_app = sc_file_new();
 	if (p15card->file_app == NULL) {
 		err = SC_ERROR_OUT_OF_MEMORY;
@@ -972,6 +990,7 @@ sc_pkcs15_bind_internal(struct sc_pkcs15_card *p15card, struct sc_aid *aid)
 	info = sc_find_app(card, aid);
 	if (info)   {
 		sc_log(ctx, "bind to application('%s',aid:'%s')", info->label, sc_dump_hex(info->aid.value, info->aid.len));
+		sc_pkcs15_free_app(p15card);
 		p15card->app = sc_dup_app_info(info);
 		if (!p15card->app)   {
 			err = SC_ERROR_OUT_OF_MEMORY;
@@ -1036,9 +1055,15 @@ sc_pkcs15_bind_internal(struct sc_pkcs15_card *p15card, struct sc_aid *aid)
 		sc_log(ctx, "EF(ODF) is empty");
 		goto end;
 	}
+	if (len > MAX_FILE_SIZE) {
+		sc_log(ctx, "EF(ODF) too large");
+		goto end;
+	}
 	buf = malloc(len);
-	if(buf == NULL)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+	if(buf == NULL) {
+		err = SC_ERROR_OUT_OF_MEMORY;
+		goto end;
+	}
 
 	err = -1; /* file state: not in cache */
 	if (p15card->opts.use_file_cache) {
@@ -1104,9 +1129,15 @@ sc_pkcs15_bind_internal(struct sc_pkcs15_card *p15card, struct sc_aid *aid)
 		sc_log(ctx, "EF(TokenInfo) is empty");
 		goto end;
 	}
+	if (len > MAX_FILE_SIZE) {
+		sc_log(ctx, "EF(TokenInfo) too large");
+		goto end;
+	}
 	buf = malloc(len);
-	if(buf == NULL)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+	if(buf == NULL) {
+		err = SC_ERROR_OUT_OF_MEMORY;
+		goto end;
+	}
 
 	err = -1; /* file state: not in cache */
 	if (p15card->opts.use_file_cache) {
@@ -1140,6 +1171,7 @@ sc_pkcs15_bind_internal(struct sc_pkcs15_card *p15card, struct sc_aid *aid)
 		goto end;
 	}
 
+	sc_pkcs15_clear_tokeninfo(p15card->tokeninfo);
 	*(p15card->tokeninfo) = tokeninfo;
 
 	if (!p15card->tokeninfo->serial_number && 0 == card->serialnr.len) {
@@ -1181,16 +1213,19 @@ sc_pkcs15_bind(struct sc_card *card, struct sc_aid *aid,
 		struct sc_pkcs15_card **p15card_out)
 {
 	struct sc_pkcs15_card *p15card = NULL;
-	struct sc_context *ctx = card->ctx;
+	struct sc_context *ctx;
 	scconf_block *conf_block = NULL;
 	int r, emu_first, enable_emu;
+	const char *private_certificate;
+
+	if (card == NULL || p15card_out == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+	ctx = card->ctx;
 
 	LOG_FUNC_CALLED(ctx);
 	sc_log(ctx, "application(aid:'%s')", aid ? sc_dump_hex(aid->value, aid->len) : "empty");
 
-	if (p15card_out == NULL) {
-		return SC_ERROR_INVALID_ARGUMENTS;
-	}
 	p15card = sc_pkcs15_card_new();
 	if (p15card == NULL)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
@@ -1200,19 +1235,33 @@ sc_pkcs15_bind(struct sc_card *card, struct sc_aid *aid,
 	p15card->opts.use_pin_cache = 1;
 	p15card->opts.pin_cache_counter = 10;
 	p15card->opts.pin_cache_ignore_user_consent = 0;
+	if(0 == strcmp(ctx->app_name, "tokend")) {
+		private_certificate = "ignore";
+		p15card->opts.private_certificate = SC_PKCS15_CARD_OPTS_PRIV_CERT_IGNORE;
+	} else {
+		private_certificate = "protect";
+		p15card->opts.private_certificate = SC_PKCS15_CARD_OPTS_PRIV_CERT_PROTECT;
+	}
 
 	conf_block = sc_get_conf_block(ctx, "framework", "pkcs15", 1);
-
 	if (conf_block) {
 		p15card->opts.use_file_cache = scconf_get_bool(conf_block, "use_file_caching", p15card->opts.use_file_cache);
 		p15card->opts.use_pin_cache = scconf_get_bool(conf_block, "use_pin_caching", p15card->opts.use_pin_cache);
 		p15card->opts.pin_cache_counter = scconf_get_int(conf_block, "pin_cache_counter", p15card->opts.pin_cache_counter);
-		p15card->opts.pin_cache_ignore_user_consent =  scconf_get_bool(conf_block, "pin_cache_ignore_user_consent",
+		p15card->opts.pin_cache_ignore_user_consent = scconf_get_bool(conf_block, "pin_cache_ignore_user_consent",
 				p15card->opts.pin_cache_ignore_user_consent);
+		private_certificate = scconf_get_str(conf_block, "private_certificate", private_certificate);
 	}
-	sc_log(ctx, "PKCS#15 options: use_file_cache=%d use_pin_cache=%d pin_cache_counter=%d pin_cache_ignore_user_consent=%d",
+	if (0 == strcmp(private_certificate, "protect")) {
+		p15card->opts.private_certificate = SC_PKCS15_CARD_OPTS_PRIV_CERT_PROTECT;
+	} else if (0 == strcmp(private_certificate, "ignore")) {
+		p15card->opts.private_certificate = SC_PKCS15_CARD_OPTS_PRIV_CERT_IGNORE;
+	} else if (0 == strcmp(private_certificate, "declassify")) {
+		p15card->opts.private_certificate = SC_PKCS15_CARD_OPTS_PRIV_CERT_DECLASSIFY;
+	}
+	sc_log(ctx, "PKCS#15 options: use_file_cache=%d use_pin_cache=%d pin_cache_counter=%d pin_cache_ignore_user_consent=%d private_certificate=%d",
 			p15card->opts.use_file_cache, p15card->opts.use_pin_cache,p15card->opts.pin_cache_counter,
-			p15card->opts.pin_cache_ignore_user_consent);
+			p15card->opts.pin_cache_ignore_user_consent, p15card->opts.private_certificate);
 
 	r = sc_lock(card);
 	if (r) {
@@ -1289,12 +1338,13 @@ __sc_pkcs15_search_objects(struct sc_pkcs15_card *p15card, unsigned int class_ma
 
 	/* Make sure the class mask we have makes sense */
 	if (class_mask == 0
-	 || (class_mask & ~(SC_PKCS15_SEARCH_CLASS_PRKEY |
-			    SC_PKCS15_SEARCH_CLASS_PUBKEY |
-			    SC_PKCS15_SEARCH_CLASS_SKEY |
-			    SC_PKCS15_SEARCH_CLASS_CERT |
-			    SC_PKCS15_SEARCH_CLASS_DATA |
-			    SC_PKCS15_SEARCH_CLASS_AUTH))) {
+			|| (class_mask & ~(
+					SC_PKCS15_SEARCH_CLASS_PRKEY |
+					SC_PKCS15_SEARCH_CLASS_PUBKEY |
+					SC_PKCS15_SEARCH_CLASS_SKEY |
+					SC_PKCS15_SEARCH_CLASS_CERT |
+					SC_PKCS15_SEARCH_CLASS_DATA |
+					SC_PKCS15_SEARCH_CLASS_AUTH))) {
 		LOG_FUNC_RETURN(p15card->card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 
@@ -1863,6 +1913,11 @@ sc_pkcs15_free_object(struct sc_pkcs15_object *obj)
 		sc_pkcs15_free_prkey_info((sc_pkcs15_prkey_info_t *)obj->data);
 		break;
 	case SC_PKCS15_TYPE_PUBKEY:
+		/* This is normally passed to framework-pkcs15,
+		 * but if something fails on the way, it would not get freed */
+		if (obj->emulated) {
+			sc_pkcs15_free_pubkey(obj->emulated);
+		}
 		sc_pkcs15_free_pubkey_info((sc_pkcs15_pubkey_info_t *)obj->data);
 		break;
 	case SC_PKCS15_TYPE_CERT:
@@ -1979,6 +2034,8 @@ sc_pkcs15_encode_df(struct sc_context *ctx, struct sc_pkcs15_card *p15card, stru
 			free(buf);
 			return r;
 		}
+		if (!tmpsize)
+			continue;
 		p = (u8 *) realloc(buf, bufsize + tmpsize);
 		if (!p) {
 			free(tmp);
@@ -2234,7 +2291,7 @@ sc_pkcs15_parse_unusedspace(const unsigned char *buf, size_t buflen, struct sc_p
 	const unsigned char *p = buf;
 	size_t left = buflen;
 	int r;
-	struct sc_path path, dummy_path;
+	struct sc_path path;
 	struct sc_pkcs15_id auth_id;
 	struct sc_asn1_entry asn1_unusedspace[] = {
 		{ "UnusedSpace", SC_ASN1_STRUCT, SC_ASN1_TAG_SEQUENCE | SC_ASN1_CONS, 0, NULL, NULL },
@@ -2248,9 +2305,6 @@ sc_pkcs15_parse_unusedspace(const unsigned char *buf, size_t buflen, struct sc_p
 
 	/* Clean the list if already present */
 	sc_pkcs15_free_unusedspace(p15card);
-
-	sc_format_path("3F00", &dummy_path);
-	dummy_path.index = dummy_path.count = 0;
 
 	sc_format_asn1_entry(asn1_unusedspace, asn1_unusedspace_values, NULL, 1);
 	sc_format_asn1_entry(asn1_unusedspace_values, &path, NULL, 1);
@@ -2266,7 +2320,7 @@ sc_pkcs15_parse_unusedspace(const unsigned char *buf, size_t buflen, struct sc_p
 		/* If the path length is 0, it's a dummy path then don't add it.
 		 * If the path length isn't included (-1) then it's against the standard
 		 *   but we'll just ignore it instead of returning an error. */
-		if (path.count > 0) {
+		if (path.count > 0 && p15card->file_app) {
 			r = sc_pkcs15_make_absolute_path(&p15card->file_app->path, &path);
 			if (r < 0)
 				return r;
@@ -2346,13 +2400,15 @@ sc_pkcs15_read_file(struct sc_pkcs15_card *p15card, const struct sc_path *in_pat
 		}
 
 		if (file->ef_structure == SC_FILE_EF_LINEAR_VARIABLE_TLV) {
-			int i;
+			unsigned int i;
 			size_t l, record_len;
 			unsigned char *head = data;
 
-			for (i=1;  ; i++) {
+			for (i=1; ; i++) {
 				l = len - (head - data);
-				if (l > 256) { l = 256; }
+				if (l > 256) {
+					l = 256;
+				}
 				r = sc_read_record(p15card->card, i, head, l, SC_RECORD_BY_REC_NR);
 				if (r == SC_ERROR_RECORD_NOT_FOUND)
 					break;
@@ -2363,13 +2419,13 @@ sc_pkcs15_read_file(struct sc_pkcs15_card *p15card, const struct sc_path *in_pat
 					break;
 				record_len = head[1];
 				if (record_len != 0xff) {
-					memmove(head,head+2,r-2);
+					memmove(head, head+2, r-2);
 					head += (r-2);
 				}
 				else {
 					if (r < 4)
 						break;
-					memmove(head,head+4,r-4);
+					memmove(head, head+4, r-4);
 					head += (r-4);
 				}
 			}
@@ -2570,13 +2626,38 @@ sc_pkcs15_get_supported_algo(struct sc_pkcs15_card *p15card, unsigned operation,
 	return info;
 }
 
+struct sc_supported_algo_info *
+sc_pkcs15_get_specific_supported_algo(struct sc_pkcs15_card *p15card, unsigned operation, unsigned mechanism, const struct sc_object_id *algo_oid)
+{
+	struct sc_context *ctx = p15card->card->ctx;
+	struct sc_supported_algo_info *info = NULL;
+	int ii;
+
+	if (algo_oid == NULL)
+		return NULL;
+
+	for (ii=0;ii<SC_MAX_SUPPORTED_ALGORITHMS && p15card->tokeninfo->supported_algos[ii].reference; ii++)
+		if ((p15card->tokeninfo->supported_algos[ii].operations & operation)
+				&& (p15card->tokeninfo->supported_algos[ii].mechanism == mechanism)
+				&& sc_compare_oid(algo_oid, &p15card->tokeninfo->supported_algos[ii].algo_id) == 1)
+			break;
+
+	if (ii < SC_MAX_SUPPORTED_ALGORITHMS && p15card->tokeninfo->supported_algos[ii].reference)   {
+		info = &p15card->tokeninfo->supported_algos[ii];
+		sc_log(ctx, "found supported algorithm (ref:%X,mech:%X,ops:%X,algo_ref:%X)",
+				info->reference, info->mechanism, info->operations, info->algo_ref);
+	}
+
+	return info;
+}
+
 int
 sc_pkcs15_get_generalized_time(struct sc_context *ctx, char **out)
 {
 #ifdef HAVE_GETTIMEOFDAY
 	struct timeval tv;
 #endif
-	struct tm *tm_time;
+	struct tm tm;
 	time_t t;
 
 	if (!ctx || !out)
@@ -2589,16 +2670,21 @@ sc_pkcs15_get_generalized_time(struct sc_context *ctx, char **out)
 #else
 	t = time(NULL);
 #endif
-	tm_time = gmtime(&t);
-	if (!tm_time)
-		LOG_TEST_RET(ctx, SC_ERROR_INTERNAL, "gmtime failed");
+
+#ifdef _WIN32
+	if (0 != gmtime_s(&tm, &t))
+		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
+#else
+	if (NULL == gmtime_r(&t, &tm))
+		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
+#endif
 
 	*out = calloc(1, 16);
 	if (*out == NULL)
 		LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "memory failure");
 
 	/* print time in generalized time format */
-	if (!strftime(*out, 16, "%Y%m%d%H%M%SZ", tm_time)) {
+	if (!strftime(*out, 16, "%Y%m%d%H%M%SZ", &tm)) {
 		free(*out);
 		LOG_TEST_RET(ctx, SC_ERROR_INTERNAL, "strftime failed");
 	}

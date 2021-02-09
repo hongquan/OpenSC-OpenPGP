@@ -33,11 +33,8 @@
 
 /* Module only built if OPENSSL is enabled */
 #include <openssl/opensslv.h>
-#include "libopensc/sc-ossl-compat.h"
-#if OPENSSL_VERSION_NUMBER >= 0x10000000L
 #include <openssl/opensslconf.h>
 #include <openssl/crypto.h>
-#endif
 #include <openssl/conf.h>
 
 #include <openssl/rsa.h>
@@ -55,8 +52,10 @@
 
 #include "libopensc/opensc.h"
 #include "libopensc/cardctl.h"
+#include "libopensc/cards.h"
 #include "libopensc/asn1.h"
 #include "util.h"
+#include "libopensc/sc-ossl-compat.h"
 
 static const char *app_name = "piv-tool";
 
@@ -82,7 +81,6 @@ static const struct option options[] = {
 	{ "in",			1, NULL, 		'i' },
 	{ "send-apdu",		1, NULL,		's' },
 	{ "reader",		1, NULL,		'r' },
-	{ "card-driver",	1, NULL,		'c' },
 	{ "wait",		0, NULL,		'w' },
 	{ "verbose",		0, NULL,		'v' },
 	{ NULL, 0, NULL, 0 }
@@ -100,7 +98,6 @@ static const char *option_help[] = {
 	"Input file for cert",
 	"Sends an APDU in format AA:BB:CC:DD:EE:FF...",
 	"Uses reader number <arg> [0]",
-	"Forces the use of driver <arg> [auto-detect]",
 	"Wait for a card to be inserted",
 	"Verbose operation. Use several times to enable debug output.",
 };
@@ -213,7 +210,7 @@ static int load_cert(const char * cert_id, const char * cert_file,
 	} else {
 		cert = PEM_read_X509(fp, &cert, NULL, NULL);
     	if(cert == NULL){
-        	printf("file %s does not conatin PEM-encoded certificate\n",
+        	printf("file %s does not contain PEM-encoded certificate\n",
 				 cert_file);
         	goto err;
     	}
@@ -262,7 +259,7 @@ static int admin_mode(const char* admin_info)
 	size_t buflen = 2;
 
 
-	if (strlen(admin_info) == 7 &&
+	if (admin_info && strlen(admin_info) == 7 &&
 			(admin_info[0] == 'A' || admin_info[0] == 'M') &&
 			admin_info[1] == ':' &&
 			(sc_hex_to_bin(admin_info+2, opts+1, &buflen) == 0) &&
@@ -383,6 +380,10 @@ static int gen_key(const char * key_info)
 		x = BN_bin2bn(keydata.ecpoint + 1, i, NULL);
 		y = BN_bin2bn(keydata.ecpoint + 1 + i, i, NULL) ;
 		r = EC_POINT_set_affine_coordinates_GFp(ecgroup, ecpoint, x, y, NULL);
+		if (r == 0) {
+			fprintf(stderr, "EC_POINT_set_affine_coordinates_GFp failed\n");
+			return -1;
+		}
 		eckey = EC_KEY_new();
 		r = EC_KEY_set_group(eckey, ecgroup);
 		if (r == 0) {
@@ -467,7 +468,7 @@ static void print_serial(sc_card_t *in_card)
 
 int main(int argc, char *argv[])
 {
-	int err = 0, r, c, long_optind = 0;
+	int err = 0, r, c;
 	int do_send_apdu = 0;
 	int do_admin_mode = 0;
 	int do_gen_key = 0;
@@ -477,7 +478,6 @@ int main(int argc, char *argv[])
 	int do_print_serial = 0;
 	int do_print_name = 0;
 	int action_count = 0;
-	const char *opt_driver = NULL;
 	const char *out_file = NULL;
 	const char *in_file = NULL;
 	const char *cert_id = NULL;
@@ -487,15 +487,7 @@ int main(int argc, char *argv[])
 	sc_context_param_t ctx_param;
 	char **old_apdus = NULL;
 
-	setbuf(stderr, NULL);
-	setbuf(stdout, NULL);
-
-	while (1) {
-		c = getopt_long(argc, argv, "nA:G:O:Z:C:i:o:fvs:c:w", options, &long_optind);
-		if (c == -1)
-			break;
-		if (c == '?')
-			util_print_usage_and_die(app_name, options, option_help, NULL);
+	while ((c = getopt_long(argc, argv, "nA:G:O:Z:C:i:o:r:fvs:c:w", options, (int *) 0)) != -1) {
 		switch (c) {
 		case OPT_SERIAL:
 			do_print_serial = 1;
@@ -555,14 +547,14 @@ int main(int argc, char *argv[])
 		case 'v':
 			verbose++;
 			break;
-		case 'c':
-			opt_driver = optarg;
-			break;
 		case 'w':
 			opt_wait = 1;
 			break;
+		default:
+			util_print_usage_and_die(app_name, options, option_help, NULL);
 		}
 	}
+
 	if (action_count == 0)
 		util_print_usage_and_die(app_name, options, option_help, NULL);
 
@@ -601,27 +593,27 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	/* Only change if not in opensc.conf */
-	if (verbose > 1 && ctx->debug == 0) {
-		ctx->debug = verbose;
-		sc_ctx_log_to_file(ctx, "stderr");
-	}
-
 	if (action_count <= 0)
 		goto end;
 
-	if (opt_driver != NULL) {
-		err = sc_set_card_driver(ctx, opt_driver);
-		if (err) {
-			fprintf(stderr, "Driver '%s' not found!\n", opt_driver);
-			err = 1;
-			goto end;
-		}
+	/* force PIV card driver */
+	err = sc_set_card_driver(ctx, "PIV-II");
+	if (err) {
+		fprintf(stderr, "PIV card driver not found!\n");
+		err = 1;
+		goto end;
 	}
 
 	err = util_connect_card(ctx, &card, opt_reader, opt_wait, verbose);
 	if (err)
 		goto end;
+
+	/* fail if card is not a PIV card */
+	if (card->type < SC_CARD_TYPE_PIV_II_BASE || card->type >= SC_CARD_TYPE_PIV_II_BASE+1000) {
+		fprintf(stderr, "Card type %X: not a PIV card\n", card->type);
+		err = 1;
+		goto end;
+	}
 
 	if (do_admin_mode) {
 		if ((err = admin_mode(admin_info)))
@@ -667,8 +659,7 @@ end:
 		sc_unlock(card);
 		sc_disconnect_card(card);
 	}
-	if (ctx)
-		sc_release_context(ctx);
+	sc_release_context(ctx);
 
 	ERR_print_errors_fp(stderr);
 	return err;

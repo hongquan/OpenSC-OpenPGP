@@ -92,8 +92,6 @@ static int sc_pkcs15emu_oberthur_add_pubkey(struct sc_pkcs15_card *, unsigned, u
 static int sc_pkcs15emu_oberthur_add_cert(struct sc_pkcs15_card *, unsigned);
 static int sc_pkcs15emu_oberthur_add_data(struct sc_pkcs15_card *, unsigned, unsigned, int);
 
-int sc_pkcs15emu_oberthur_init_ex(struct sc_pkcs15_card *, struct sc_aid *, struct sc_pkcs15emu_opt *);
-
 static int sc_oberthur_parse_tokeninfo (struct sc_pkcs15_card *, unsigned char *, size_t, int);
 static int sc_oberthur_parse_containers (struct sc_pkcs15_card *, unsigned char *, size_t, int);
 static int sc_oberthur_parse_publicinfo (struct sc_pkcs15_card *, unsigned char *, size_t, int);
@@ -253,7 +251,10 @@ sc_oberthur_read_file(struct sc_pkcs15_card *p15card, const char *in_path,
 
 	sc_format_path(in_path, &path);
 	rv = sc_select_file(card, &path, &file);
-	LOG_TEST_RET(ctx, rv, "Cannot select oberthur file to read");
+	if (rv != SC_SUCCESS) {
+		sc_file_free(file);
+		LOG_TEST_RET(ctx, rv, "Cannot select oberthur file to read");
+	}
 
 	if (file->ef_structure == SC_FILE_EF_TRANSPARENT)
 		sz = file->size;
@@ -261,18 +262,24 @@ sc_oberthur_read_file(struct sc_pkcs15_card *p15card, const char *in_path,
 		sz = (file->record_length + 2) * file->record_count;
 
 	*out = calloc(sz, 1);
-	if (*out == NULL)
+	if (*out == NULL) {
+		sc_file_free(file);
 		LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot read oberthur file");
+	}
 
 	if (file->ef_structure == SC_FILE_EF_TRANSPARENT)   {
 		rv = sc_read_binary(card, 0, *out, sz, 0);
 	}
 	else	{
-		int rec;
-		int offs = 0;
-		int rec_len = file->record_length;
+		size_t rec;
+		size_t offs = 0;
+		size_t rec_len = file->record_length;
 
 		for (rec = 1; ; rec++)   {
+			if (rec > file->record_count) {
+				rv = 0;
+				break;
+			}
 			rv = sc_read_record(card, rec, *out + offs + 2, rec_len, SC_RECORD_BY_REC_NR);
 			if (rv == SC_ERROR_RECORD_NOT_FOUND)   {
 				rv = 0;
@@ -297,15 +304,28 @@ sc_oberthur_read_file(struct sc_pkcs15_card *p15card, const char *in_path,
 	if (verify_pin && rv == SC_ERROR_SECURITY_STATUS_NOT_SATISFIED)   {
 		struct sc_pkcs15_object *objs[0x10], *pin_obj = NULL;
 		const struct sc_acl_entry *acl = sc_file_get_acl_entry(file, SC_AC_OP_READ);
-		int ii;
+		int ii, nobjs;
 
-		rv = sc_pkcs15_get_objects(p15card, SC_PKCS15_TYPE_AUTH_PIN, objs, 0x10);
-		LOG_TEST_RET(ctx, rv, "Cannot read oberthur file: get AUTH objects error");
+		if (acl == NULL) {
+			sc_file_free(file);
+			free(*out);
+			*out = NULL;
+			LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_DATA);
+		}
 
-		for (ii=0; ii<rv; ii++)   {
+		nobjs = sc_pkcs15_get_objects(p15card, SC_PKCS15_TYPE_AUTH_PIN, objs, 0x10);
+		if (nobjs < 1) {
+			sc_file_free(file);
+			free(*out);
+			*out = NULL;
+			LOG_TEST_RET(ctx, SC_ERROR_DATA_OBJECT_NOT_FOUND,
+				"Cannot read oberthur file: get AUTH objects error");
+		}
+
+		for (ii = 0; ii < nobjs; ii++) {
 			struct sc_pkcs15_auth_info *auth_info = (struct sc_pkcs15_auth_info *) objs[ii]->data;
 			sc_log(ctx, "compare PIN/ACL refs:%i/%i, method:%i/%i",
-					auth_info->attrs.pin.reference, acl->key_ref, auth_info->auth_method, acl->method);
+				auth_info->attrs.pin.reference, acl->key_ref, auth_info->auth_method, acl->method);
 			if (auth_info->attrs.pin.reference == (int)acl->key_ref && auth_info->auth_method == (unsigned)acl->method)   {
 				pin_obj = objs[ii];
 				break;
@@ -320,7 +340,7 @@ sc_oberthur_read_file(struct sc_pkcs15_card *p15card, const char *in_path,
 			if (!rv)
 				rv = sc_oberthur_read_file(p15card, in_path, out, out_len, 0);
 		}
-	};
+	}
 
 	sc_file_free(file);
 
@@ -359,8 +379,8 @@ sc_oberthur_parse_tokeninfo (struct sc_pkcs15_card *p15card,
 
 	flags = *(buff + 0x22) * 0x100 + *(buff + 0x23);
 
-	p15card->tokeninfo->label = strdup(label);
-	p15card->tokeninfo->manufacturer_id = strdup("Oberthur/OpenSC");
+	set_string(&p15card->tokeninfo->label, label);
+	set_string(&p15card->tokeninfo->manufacturer_id, "Oberthur/OpenSC");
 
 	if (flags & 0x01)
 		p15card->tokeninfo->flags |= SC_PKCS15_TOKEN_PRN_GENERATION;
@@ -388,7 +408,7 @@ sc_oberthur_parse_containers (struct sc_pkcs15_card *p15card,
 		Containers = next;
 	}
 
-	for (offs=0; offs < len;)  {
+	for (offs=0; offs + 2 + 2+2+2 + 2+2+2 + 2+36 <= len;)  {
 		struct container *cont;
 		unsigned char *ptr =  buff + offs + 2;
 
@@ -439,7 +459,7 @@ sc_oberthur_parse_publicinfo (struct sc_pkcs15_card *p15card,
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
-	for (ii=0; ii<len; ii+=5)   {
+	for (ii=0; ii+5<=len; ii+=5)   {
 		unsigned int file_id, size;
 
 		if(*(buff+ii) != 0xFF)
@@ -484,7 +504,7 @@ sc_oberthur_parse_privateinfo (struct sc_pkcs15_card *p15card,
 
 	LOG_FUNC_CALLED(ctx);
 
-	for (ii=0; ii<len; ii+=5)   {
+	for (ii=0; ii+5<=len; ii+=5)   {
 		unsigned int file_id, size;
 
 		if(*(buff+ii) != 0xFF)
@@ -688,7 +708,7 @@ sc_pkcs15emu_oberthur_add_cert(struct sc_pkcs15_card *p15card, unsigned int file
 
 	rv = sc_pkcs15emu_add_x509_cert(p15card, &cobj, &cinfo);
 
-	SC_FUNC_RETURN(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, rv);
+	LOG_FUNC_RETURN(p15card->card->ctx, rv);
 }
 
 
@@ -903,7 +923,7 @@ sc_pkcs15emu_oberthur_add_data(struct sc_pkcs15_card *p15card,
 
 	rv = sc_pkcs15emu_add_data_object(p15card, &dobj, &dinfo);
 
-	SC_FUNC_RETURN(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, rv);
+	LOG_FUNC_RETURN(p15card->card->ctx, rv);
 }
 
 
@@ -921,7 +941,7 @@ sc_pkcs15emu_oberthur_init(struct sc_pkcs15_card * p15card)
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 	sc_bin_to_hex(card->serialnr.value, card->serialnr.len, serial, sizeof(serial), 0);
-	p15card->tokeninfo->serial_number = strdup(serial);
+	set_string(&p15card->tokeninfo->serial_number, serial);
 
 	p15card->ops.parse_df = sc_awp_parse_df;
 	p15card->ops.clear = sc_awp_clear;
@@ -1020,6 +1040,7 @@ sc_pkcs15emu_oberthur_init(struct sc_pkcs15_card * p15card)
 
 	for (ii=0; oberthur_infos[ii].name; ii++)   {
 		sc_log(ctx, "Oberthur init: read %s file", oberthur_infos[ii].name);
+		free(oberthur_infos[ii].content);
 		rv = sc_oberthur_read_file(p15card, oberthur_infos[ii].path,
 				&oberthur_infos[ii].content, &oberthur_infos[ii].len, 1);
 		LOG_TEST_RET(ctx, rv, "Oberthur init failed: read oberthur file error");
@@ -1043,26 +1064,20 @@ oberthur_detect_card(struct sc_pkcs15_card * p15card)
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 	if (p15card->card->type != SC_CARD_TYPE_OBERTHUR_64K)
-		SC_FUNC_RETURN(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_WRONG_CARD);
-	SC_FUNC_RETURN(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, SC_SUCCESS);
+		LOG_FUNC_RETURN(p15card->card->ctx, SC_ERROR_WRONG_CARD);
+	LOG_FUNC_RETURN(p15card->card->ctx, SC_SUCCESS);
 }
 
 
 int
-sc_pkcs15emu_oberthur_init_ex(struct sc_pkcs15_card * p15card, struct sc_aid *aid,
-				   struct sc_pkcs15emu_opt * opts)
+sc_pkcs15emu_oberthur_init_ex(struct sc_pkcs15_card * p15card, struct sc_aid *aid)
 {
 	int rv;
 
 	LOG_FUNC_CALLED(p15card->card->ctx);
-	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)   {
+	rv = oberthur_detect_card(p15card);
+	if (!rv)
 		rv = sc_pkcs15emu_oberthur_init(p15card);
-	}
-	else {
-		rv = oberthur_detect_card(p15card);
-		if (!rv)
-			rv = sc_pkcs15emu_oberthur_init(p15card);
-	}
 
 	LOG_FUNC_RETURN(p15card->card->ctx, rv);
 }

@@ -31,8 +31,6 @@
 #include "cardctl.h"
 #include "common/compat_strlcpy.h"
 
-int sc_pkcs15emu_westcos_init_ex(sc_pkcs15_card_t *, struct sc_aid *, sc_pkcs15emu_opt_t *);
-
 static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 {
 	int i, r;
@@ -45,11 +43,9 @@ static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 	r = sc_select_file(card, &path, NULL);
 	if (r)
 		goto out;
-	if (p15card->tokeninfo->label != NULL)
-		free(p15card->tokeninfo->label);
+	free(p15card->tokeninfo->label);
 	p15card->tokeninfo->label = strdup("westcos");
-	if (p15card->tokeninfo->manufacturer_id != NULL)
-		free(p15card->tokeninfo->manufacturer_id);
+	free(p15card->tokeninfo->manufacturer_id);
 	p15card->tokeninfo->manufacturer_id = strdup("CEV");
 
 	/* get serial number */
@@ -59,8 +55,7 @@ static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 	r = sc_bin_to_hex(serial.value, serial.len, buf, sizeof(buf), 0);
 	if (r)
 		goto out;
-	if (p15card->tokeninfo->serial_number != NULL)
-		free(p15card->tokeninfo->serial_number);
+	free(p15card->tokeninfo->serial_number);
 	p15card->tokeninfo->serial_number = strdup(buf);
 	sc_format_path("AAAA", &path);
 	r = sc_select_file(card, &path, NULL);
@@ -141,7 +136,7 @@ static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 		if (!r) {
 			sc_pkcs15_cert_t *cert =
 			    (sc_pkcs15_cert_t *) (cert_obj.data);
-			strlcpy(cert_obj.label, "User certificat",
+			strlcpy(cert_obj.label, "User certificate",
 				sizeof(cert_obj.label));
 			cert_obj.flags = SC_PKCS15_CO_FLAG_MODIFIABLE;
 			r = sc_pkcs15emu_add_x509_cert(p15card, &cert_obj,
@@ -237,7 +232,7 @@ static int westcos_detect_card(sc_pkcs15_card_t * p15card)
 	sc_card_t *card = p15card->card;
 	sc_context_t *ctx = card->ctx;
 	const char *name = "WESTCOS";
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+	sc_log(ctx, 
 		"westcos_detect_card (%s)", card->name);
 	if (strncmp(card->name, name, strlen(name)))
 		return SC_ERROR_WRONG_CARD;
@@ -245,16 +240,13 @@ static int westcos_detect_card(sc_pkcs15_card_t * p15card)
 }
 
 int sc_pkcs15emu_westcos_init_ex(sc_pkcs15_card_t * p15card,
-				 struct sc_aid *aid,
-				 sc_pkcs15emu_opt_t * opts)
+				 struct sc_aid *aid)
 {
 	int r;
 	sc_card_t *card = p15card->card;
 	sc_context_t *ctx = card->ctx;
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+	sc_log(ctx, 
 		"sc_pkcs15_init_func_ex westcos\n");
-	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)
-		return sc_pkcs15emu_westcos_init(p15card);
 	r = westcos_detect_card(p15card);
 	if (r)
 		return SC_ERROR_WRONG_CARD;

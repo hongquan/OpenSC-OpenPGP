@@ -265,7 +265,7 @@ static int cryptotokenkit_transmit(sc_reader_t *reader, sc_apdu_t *apdu)
 
 	if (reader->name)
 		sc_log(reader->ctx, "reader '%s'", reader->name);
-	sc_apdu_log(reader->ctx, SC_LOG_DEBUG_NORMAL, sbuf, ssize, 1);
+	sc_apdu_log(reader->ctx, sbuf, ssize, 1);
 
 	[priv->tksmartcard transmitRequest:
 			[NSData dataWithBytes: sbuf length: ssize]
@@ -288,7 +288,7 @@ static int cryptotokenkit_transmit(sc_reader_t *reader, sc_apdu_t *apdu)
 	if (r != SC_SUCCESS)
 		goto err;
 
-	sc_apdu_log(reader->ctx, SC_LOG_DEBUG_NORMAL, rbuf, rsize, 0);
+	sc_apdu_log(reader->ctx, rbuf, rsize, 0);
 	r = sc_apdu_set_resp(reader->ctx, apdu, rbuf, rsize);
 
 err:
@@ -325,9 +325,6 @@ TKSmartCardPINFormat *getPINFormat(struct sc_pin_cmd_pin *pin)
 	}
 	format.minPINLength = pin->min_length;
 	format.maxPINLength = pin->max_length;
-	if (pin->length_offset > 4) {
-		format.PINLengthBitOffset = (pin->length_offset-5)*8;
-	}
 
 	return format;
 }
@@ -363,7 +360,7 @@ int cryptotokenkit_perform_verify(struct sc_reader *reader, struct sc_pin_cmd_da
 		case SC_PIN_CMD_VERIFY:
 			format = getPINFormat(pin_ref);
 			NSInteger offset;
-			if (data->pin1.length_offset != 4) {
+			if (data->pin1.offset >= 5) {
 				offset = data->pin1.offset - 5;
 			} else {
 				offset = 0;
@@ -378,13 +375,10 @@ int cryptotokenkit_perform_verify(struct sc_reader *reader, struct sc_pin_cmd_da
 			/* TODO: set confirmation and text */
 			format = getPINFormat(pin_ref);
 			NSInteger oldOffset, newOffset;
-			if (data->pin1.length_offset != 4) {
-				oldOffset = data->pin1.offset - 5;
-				newOffset = data->pin2.offset - 5;
-			} else {
-				oldOffset = 0;
-				newOffset = 0;
-			}
+
+			/* Set offsets if available, otherwise default to 0 */
+			oldOffset = (data->pin1.offset >= 5 ? data->pin1.offset - 5 : 0);
+			newOffset = (data->pin2.offset >= 5 ? data->pin2.offset - 5 : 0);
 			interaction = [priv->tksmartcard userInteractionForSecurePINChangeWithPINFormat:format APDU:apdu currentPINByteOffset:oldOffset newPINByteOffset:newOffset];
 		break;
 	default:
@@ -577,6 +571,7 @@ static int cryptotokenkit_detect_readers(sc_context_t *ctx)
 		if (j < [slotNames count]) {
 			/* existing reader found; remove it from the list */
 			[slotNames removeObjectAtIndex:j];
+			reader->flags &= ~SC_READER_REMOVED;
 		} else {
 			/* existing reader not found */
 			reader->flags |= SC_READER_REMOVED;

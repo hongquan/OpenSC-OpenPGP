@@ -62,6 +62,15 @@ static struct ec_curve curves[] = {
 				{ (unsigned char *) "\x01", 1}
 		},
 		{
+				{ (unsigned char *) "\x2B\x81\x04\x00\x22", 5},	// secp384r1
+				{ (unsigned char *) "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFE\xFF\xFF\xFF\xFF\x00\x00\x00\x00\x00\x00\x00\x00\xFF\xFF\xFF\xFF", 48},
+				{ (unsigned char *) "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFE\xFF\xFF\xFF\xFF\x00\x00\x00\x00\x00\x00\x00\x00\xFF\xFF\xFF\xFC", 48},
+				{ (unsigned char *) "\xB3\x31\x2F\xA7\xE2\x3E\xE7\xE4\x98\x8E\x05\x6B\xE3\xF8\x2D\x19\x18\x1D\x9C\x6E\xFE\x81\x41\x12\x03\x14\x08\x8F\x50\x13\x87\x5A\xC6\x56\x39\x8D\x8A\x2E\xD1\x9D\x2A\x85\xC8\xED\xD3\xEC\x2A\xEF", 48},
+				{ (unsigned char *) "\x04\xAA\x87\xCA\x22\xBE\x8B\x05\x37\x8E\xB1\xC7\x1E\xF3\x20\xAD\x74\x6E\x1D\x3B\x62\x8B\xA7\x9B\x98\x59\xF7\x41\xE0\x82\x54\x2A\x38\x55\x02\xF2\x5D\xBF\x55\x29\x6C\x3A\x54\x5E\x38\x72\x76\x0A\xB7\x36\x17\xDE\x4A\x96\x26\x2C\x6F\x5D\x9E\x98\xBF\x92\x92\xDC\x29\xF8\xF4\x1D\xBD\x28\x9A\x14\x7C\xE9\xDA\x31\x13\xB5\xF0\xB8\xC0\x0A\x60\xB1\xCE\x1D\x7E\x81\x9D\x7A\x43\x1D\x7C\x90\xEA\x0E\x5F", 97},
+				{ (unsigned char *) "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xC7\x63\x4D\x81\xF4\x37\x2D\xDF\x58\x1A\x0D\xB2\x48\xB0\xA7\x7A\xEC\xEC\x19\x6A\xCC\xC5\x29\x73", 48},
+				{ (unsigned char *) "\x01", 1}
+		},
+		{
 				{ (unsigned char *) "\x2B\x81\x04\x00\x23", 5},	// secp521r1
 				{ (unsigned char *) "\x01\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF", 66},
 				{ (unsigned char *) "\x01\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFC", 66},
@@ -438,8 +447,12 @@ static int sc_pkcs15emu_sc_hsm_get_rsa_public_key(struct sc_context *ctx, sc_cvc
 	pubkey->u.rsa.modulus.data	= malloc(pubkey->u.rsa.modulus.len);
 	pubkey->u.rsa.exponent.len	= cvc->coefficientAorExponentlen;
 	pubkey->u.rsa.exponent.data	= malloc(pubkey->u.rsa.exponent.len);
-	if (!pubkey->u.rsa.modulus.data || !pubkey->u.rsa.exponent.data)
+	if (!pubkey->u.rsa.modulus.data || !pubkey->u.rsa.exponent.data) {
+		free(pubkey->u.rsa.modulus.data);
+		free(pubkey->u.rsa.exponent.data);
+		free(pubkey->alg_id);
 		return SC_ERROR_OUT_OF_MEMORY;
+	}
 
 	memcpy(pubkey->u.rsa.exponent.data, cvc->coefficientAorExponent, pubkey->u.rsa.exponent.len);
 	memcpy(pubkey->u.rsa.modulus.data, cvc->primeOrModulus, pubkey->u.rsa.modulus.len);
@@ -488,14 +501,23 @@ static int sc_pkcs15emu_sc_hsm_get_ec_public_key(struct sc_context *ctx, sc_cvc_
 	pubkey->alg_id->params = ecp;
 
 	pubkey->u.ec.ecpointQ.value = malloc(cvc->publicPointlen);
-	if (!pubkey->u.ec.ecpointQ.value)
+	if (!pubkey->u.ec.ecpointQ.value) {
+		free(pubkey->alg_id);
+		free(ecp->der.value);
+		free(ecp);
 		return SC_ERROR_OUT_OF_MEMORY;
+	}
 	memcpy(pubkey->u.ec.ecpointQ.value, cvc->publicPoint, cvc->publicPointlen);
 	pubkey->u.ec.ecpointQ.len = cvc->publicPointlen;
 
 	pubkey->u.ec.params.der.value = malloc(ecp->der.len);
-	if (!pubkey->u.ec.params.der.value)
+	if (!pubkey->u.ec.params.der.value) {
+		free(pubkey->u.ec.ecpointQ.value);
+		free(pubkey->alg_id);
+		free(ecp->der.value);
+		free(ecp);
 		return SC_ERROR_OUT_OF_MEMORY;
+	}
 	memcpy(pubkey->u.ec.params.der.value, ecp->der.value, ecp->der.len);
 	pubkey->u.ec.params.der.len = ecp->der.len;
 
@@ -766,13 +788,15 @@ static int sc_pkcs15emu_sc_hsm_add_cd(sc_pkcs15_card_t * p15card, u8 id) {
 	/* Try to select a related EF containing the PKCS#15 description of the data */
 	len = sizeof efbin;
 	r = read_file(p15card, fid, efbin, &len, 1);
-	LOG_TEST_RET(card->ctx, r, "Skipping optional EF.DCOD");
+	LOG_TEST_RET(card->ctx, r, "Skipping optional EF.CDF");
 
 	ptr = efbin;
 
 	memset(&obj, 0, sizeof(obj));
 	r = sc_pkcs15_decode_cdf_entry(p15card, &obj, &ptr, &len);
-	LOG_TEST_RET(card->ctx, r, "Skipping optional EF.CDOD");
+	if (obj.data == NULL && r >= SC_SUCCESS)
+		r = SC_ERROR_OBJECT_NOT_FOUND;
+	LOG_TEST_RET(card->ctx, r, "Skipping optional EF.CDF");
 
 	cert_info = (sc_pkcs15_cert_info_t *)obj.data;
 
@@ -918,6 +942,7 @@ static int sc_pkcs15emu_sc_hsm_init (sc_pkcs15_card_t * p15card)
 	assert(len >= 8);
 	len -= 5;
 
+	free(p15card->tokeninfo->serial_number);
 	p15card->tokeninfo->serial_number = calloc(len + 1, 1);
 	if (p15card->tokeninfo->serial_number == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
@@ -1031,17 +1056,12 @@ static int sc_pkcs15emu_sc_hsm_init (sc_pkcs15_card_t * p15card)
 
 
 int sc_pkcs15emu_sc_hsm_init_ex(sc_pkcs15_card_t *p15card,
-				struct sc_aid *aid,
-				sc_pkcs15emu_opt_t *opts)
+				struct sc_aid *aid)
 {
-	if (opts && (opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)) {
-		return sc_pkcs15emu_sc_hsm_init(p15card);
-	} else {
-		if (p15card->card->type != SC_CARD_TYPE_SC_HSM
-				&& p15card->card->type != SC_CARD_TYPE_SC_HSM_SOC
-				&& p15card->card->type != SC_CARD_TYPE_SC_HSM_GOID) {
-			return SC_ERROR_WRONG_CARD;
-		}
-		return sc_pkcs15emu_sc_hsm_init(p15card);
+	if (p15card->card->type != SC_CARD_TYPE_SC_HSM
+			&& p15card->card->type != SC_CARD_TYPE_SC_HSM_SOC
+			&& p15card->card->type != SC_CARD_TYPE_SC_HSM_GOID) {
+		return SC_ERROR_WRONG_CARD;
 	}
+	return sc_pkcs15emu_sc_hsm_init(p15card);
 }

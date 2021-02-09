@@ -2,9 +2,6 @@ MAINTAINERCLEANFILES = $(srcdir)/Makefile.in
 
 EXTRA_DIST = completion-template
 
-TESTS = test-manpage.sh
-dist_noinst_SCRIPTS = test-manpage.sh
-
 dist_noinst_DATA = $(wildcard $(srcdir)/*.xml)
 if ENABLE_DOC
 html_DATA = tools.html
@@ -34,6 +31,9 @@ tools.html: $(srcdir)/tools.xml $(wildcard $(srcdir)/*.1.xml)
 				| sort -u | grep -- '^\-' | tr '\n' '|' | sed 's,|$$,,' | grep ^ || echo "!*")," \
 		| sed "s,FILEOPTS,\
 			$(shell sed -n 's,.*<option>\([^<]*\)</option>.*<replaceable>.*filename.*,\1,pg' $< \
+				| sort -u | grep -- '^\-' | tr '\n' '|' | sed 's,|$$,,' | grep ^ || echo "!*"),"  \
+		| sed "s,PINOPTS,\
+			$(shell sed -En 's,.*<option>([^<]*)</option>.*<replaceable>\s*(newpin|pin|puk|sopin|sopuk)\s*<.*,\1,pg' $< \
 				| sort -u | grep -- '^\-' | tr '\n' '|' | sed 's,|$$,,' | grep ^ || echo "!*"),"  \
 		| sed "s,MODULEOPTS,\
 			$(shell sed -n 's,.*<option>\([^<]*\)</option>.*<replaceable>.*mod.*,\1,pg' $< \

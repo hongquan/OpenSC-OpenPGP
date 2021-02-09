@@ -33,9 +33,6 @@
 #include "pkcs15.h"
 #include "jpki.h"
 
-int sc_pkcs15emu_jpki_init_ex(sc_pkcs15_card_t *, struct sc_aid *,
-		sc_pkcs15emu_opt_t *);
-
 static int
 sc_pkcs15emu_jpki_init(sc_pkcs15_card_t * p15card)
 {
@@ -45,10 +42,10 @@ sc_pkcs15emu_jpki_init(sc_pkcs15_card_t * p15card)
 
 	LOG_FUNC_CALLED(p15card->card->ctx);
 
-	p15card->tokeninfo->label = strdup("JPKI");
-	p15card->tokeninfo->manufacturer_id = strdup("JPKI");
+	set_string(&p15card->tokeninfo->label, "JPKI");
+	set_string(&p15card->tokeninfo->manufacturer_id, "JPKI");
 	/* set dummy until we found serial number */
-	p15card->tokeninfo->serial_number = strdup("00000000");
+	set_string(&p15card->tokeninfo->serial_number, "00000000");
 
 	/* Select application directory */
 	if (drvdata->selected != SELECT_JPKI_AP) {
@@ -224,15 +221,9 @@ sc_pkcs15emu_jpki_init(sc_pkcs15_card_t * p15card)
 
 int
 sc_pkcs15emu_jpki_init_ex(sc_pkcs15_card_t * p15card,
-			  struct sc_aid *aid, sc_pkcs15emu_opt_t * opts)
+			  struct sc_aid *aid)
 {
-	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK) {
-		return sc_pkcs15emu_jpki_init(p15card);
-	}
-	else {
-		if (p15card->card->type != SC_CARD_TYPE_JPKI_BASE)
-			return SC_ERROR_WRONG_CARD;
-
-		return sc_pkcs15emu_jpki_init(p15card);
-	}
+	if (p15card->card->type != SC_CARD_TYPE_JPKI_BASE)
+		return SC_ERROR_WRONG_CARD;
+	return sc_pkcs15emu_jpki_init(p15card);
 }

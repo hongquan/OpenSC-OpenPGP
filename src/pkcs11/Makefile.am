@@ -4,6 +4,10 @@ MAINTAINERCLEANFILES = $(srcdir)/Makefile.in $(srcdir)/versioninfo-pkcs11.rc $(s
 EXTRA_DIST = Makefile.mak versioninfo-pkcs11.rc.in versioninfo-pkcs11-spy.rc.in opensc-pkcs11.pc.in opensc-pkcs11.dll.manifest onepin-opensc-pkcs11.dll.manifest
 
 lib_LTLIBRARIES = opensc-pkcs11.la pkcs11-spy.la onepin-opensc-pkcs11.la
+if ENABLE_SHARED
+else
+noinst_LTLIBRARIES = libopensc-pkcs11.la
+endif
 
 AM_CPPFLAGS = -I$(top_srcdir)/src
 
@@ -13,12 +17,12 @@ OPENSC_PKCS11_SRC = pkcs11-global.c pkcs11-session.c pkcs11-object.c misc.c slot
 	framework-pkcs15init.c debug.c pkcs11.exports \
 	pkcs11-display.c pkcs11-display.h
 OPENSC_PKCS11_CFLAGS = \
-	$(OPTIONAL_OPENSSL_CFLAGS) $(OPENSC_PKCS11_PTHREAD_CFLAGS)
+	$(OPENPACE_CFLAGS) $(OPTIONAL_OPENSSL_CFLAGS) $(OPENSC_PKCS11_PTHREAD_CFLAGS)
 OPENSC_PKCS11_LIBS = \
 	$(top_builddir)/src/libopensc/libopensc.la \
 	$(top_builddir)/src/common/libscdl.la \
 	$(top_builddir)/src/common/libcompat.la \
-	$(OPTIONAL_OPENSSL_LIBS) $(PTHREAD_LIBS)
+	$(OPENPACE_LIBS) $(OPTIONAL_OPENSSL_LIBS) $(PTHREAD_LIBS)
 
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = opensc-pkcs11.pc
@@ -30,6 +34,11 @@ opensc_pkcs11_la_LIBADD = $(OPENSC_PKCS11_LIBS)
 opensc_pkcs11_la_LDFLAGS = $(AM_LDFLAGS) \
 	-export-symbols "$(srcdir)/pkcs11.exports" \
 	-module -shared -avoid-version -no-undefined
+
+libopensc_pkcs11_la_SOURCES = $(OPENSC_PKCS11_SRC) $(OPENSC_PKCS11_INC)
+libopensc_pkcs11_la_CFLAGS = $(OPENSC_PKCS11_CFLAGS)
+libopensc_pkcs11_la_LIBADD = $(OPENSC_PKCS11_LIBS)
+libopensc_pkcs11_la_LDFLAGS = $(AM_LDFLAGS)
 
 onepin_opensc_pkcs11_la_SOURCES = $(OPENSC_PKCS11_SRC) $(OPENSC_PKCS11_INC)
 onepin_opensc_pkcs11_la_CFLAGS = -DMODULE_APP_NAME=\"onepin-opensc-pkcs11\" $(OPENSC_PKCS11_CFLAGS)
@@ -70,3 +79,12 @@ install-exec-hook:
 	done
 
 endif
+
+TIDY_FLAGS = $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(AM_CFLAGS) $(CFLAGS) $(OPENSC_PKCS11_CFLAGS)
+TIDY_FILES = \
+			 pkcs11-global.c pkcs11-session.c pkcs11-object.c slot.c \
+			 mechanism.c openssl.c framework-pkcs15.c \
+			 framework-pkcs15init.c debug.c
+
+check-local:
+	if [ -x "$(CLANGTIDY)" ]; then clang-tidy -config='' --checks='$(TIDY_CHECKS)' -header-filter=.* $(TIDY_FILES) -- $(TIDY_FLAGS); fi

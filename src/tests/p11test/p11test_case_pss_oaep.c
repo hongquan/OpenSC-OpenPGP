@@ -376,7 +376,7 @@ int oaep_encrypt_decrypt_test(test_cert_t *o, token_info_t *info, test_mech_t *m
 	CK_BYTE *dec_message = NULL;
 	int dec_message_length = 0;
 	int message_length = 16;
-	unsigned char *enc_message;
+	unsigned char *enc_message = NULL;
 	int enc_message_length, rv;
 
 	if (o->private_handle == CK_INVALID_HANDLE) {
@@ -689,7 +689,7 @@ int pss_sign_verify_test(test_cert_t *o, token_info_t *info, test_mech_t *mech)
 }
 
 /* ignore the prefilled mechanisms and list all combinations of mechanisms
- * found, all resonable hash functions, MGFs and salt lengths
+ * found, all reasonable hash functions, MGFs and salt lengths
  */
 void fill_object_pss_mechanisms(token_info_t *info, test_cert_t *o)
 {
@@ -814,6 +814,10 @@ void pss_oaep_test(void **state) {
 		's', "ENCRYPT&DECRYPT WORKS");
 	for (i = 0; i < objects.count; i++) {
 		test_cert_t *o = &objects.data[i];
+
+		/* Do not go through incomplete pairs */
+		if (o->private_handle == CK_INVALID_HANDLE)
+			continue;
 
 		/* Do not list non-RSA keys here */
 		if (o->type != EVP_PK_RSA)
